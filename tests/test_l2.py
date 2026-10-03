@@ -1,4 +1,4 @@
-"""Tests for cTrader L2 order-book reconstruction (no warehouse required)."""
+"""Tests for L2 order-book reconstruction (no data source required)."""
 from __future__ import annotations
 
 import json

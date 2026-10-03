@@ -1,7 +1,7 @@
 """Data access layer: resolves a tick source and falls back to synthetic data.
 
-Keeps the HTTP layer free of warehouse concerns and centralises caching so
-repeated dashboard requests don't re-scan the (columnar) warehouse.
+Keeps the HTTP layer free of storage concerns and centralises caching so
+repeated dashboard requests do not re-scan the data source.
 """
 from __future__ import annotations
 
@@ -14,14 +14,13 @@ import pandas as pd
 
 from . import synthetic
 from .config import get_settings
-from .db import (TableInfo, WarehouseError, connect, discover_tables, fetch_ticks,
-                 get_symbols, list_all_tables, list_databases, query,
+from .db import (TableInfo, DataSourceError, connect, fetch_ticks,
+                 get_symbols, list_all_tables, query,
                  find_symbol_dimension, symbol_labels)
 from .books import from_agg, from_levels
 from .l2 import L2Options, last_stats, reconstruct
-from .schema import build_column_map, normalise
+from .schema import normalise
 
-_SYSTEM_SCHEMAS = {"sys", "queryinsights", "_rsc", "information_schema"}
 _CACHE_TTL = 60.0
 _MAX_CACHE_ENTRIES = 64
 _DELTA_META_COLUMNS = {"_rid", "_ts"}
@@ -88,16 +87,25 @@ _cache = _TTLCache()
 _status = Status()
 _LAST_L2_STATS: dict = {}
 _SYMBOL_LABELS: dict[str, str] = {}
-_SYMBOL_DIM: str = ""
+_PRIMARY: "TableInfo | None" = None
 
 
 
-def _table_info(t: dict) -> TableInfo:
-    return TableInfo(schema=t["schema"], table=t["table"], columns=t["columns"],
-                     column_map=build_column_map(t["columns"]),
-                     is_l2=(t.get("kind") == "l2") or bool(t.get("is_l2")),
-                     _kind=t.get("kind") or "",
-                     database=t.get("database", ""))
+def primary_table(conn) -> TableInfo | None:
+    """Resolve the one configured book-snapshot table.
+
+    The physical name lives in config only and is never returned to clients:
+    the UI only ever sees the opaque source key ``live``.
+    """
+    want = get_settings().data_table.strip().lower()
+    schema, _, table = want.rpartition(".")
+    for t in list_all_tables(conn):
+        if t.table.lower() != table:
+            continue
+        if schema and t.schema.lower() != schema:
+            continue
+        return t
+    return None
 
 
 def _probe_table(conn, ti: TableInfo) -> dict:
@@ -110,7 +118,7 @@ def _probe_table(conn, ti: TableInfo) -> dict:
     try:
         n = query(conn, f"SELECT COUNT_BIG(*) AS n FROM {ti.qualified}")
         out["row_count"] = int(n["n"].iloc[0])
-    except WarehouseError:
+    except DataSourceError:
         return out
     payload = [c for c in ti.columns if c.strip().lower() not in _DELTA_META_COLUMNS]
     out["payload_columns"] = payload
@@ -119,108 +127,92 @@ def _probe_table(conn, ti: TableInfo) -> dict:
 
 
 def status(*, refresh: bool = False) -> Status:
-    """Probe the warehouse. Cached briefly so the UI stays responsive."""
+    """Probe the data source. Cached briefly so the UI stays responsive."""
     if not refresh and _status.server_time:
         return _status
     st = get_settings()
     _status.hints = []
+    global _PRIMARY
     try:
         with connect() as conn:
             _status.server_time = str(query(conn, "SELECT CURRENT_TIMESTAMP AS t")["t"].iloc[0])
 
-            # Every user table in every database on this endpoint.
-            all_tables = [t for t in list_all_tables(conn)
-                          if t.schema.lower() not in _SYSTEM_SCHEMAS]
-            tick_keys = {f"{t.database}|{t.schema}.{t.table}" for t in discover_tables(conn)}
-            described = []
-            for t in all_tables:
-                d = t.to_dict()
-                d["is_tick_source"] = f"{t.database}|{t.schema}.{t.table}" in tick_keys
-                if d["is_tick_source"]:
-                    d.update(_probe_table(conn, t))
-                else:
-                    d.update({"row_count": None, "payload_columns": [], "is_metadata_only": False})
-                described.append(d)
-            _status.tables = described
-            _status.databases = list_databases(conn)
-
-            live = [t for t in described if t["is_tick_source"]]
-            empty = [t for t in live if t.get("row_count") == 0]
-            if not live:
+            ti = primary_table(conn)
+            if ti is None:
+                _PRIMARY = None
                 _status.hints.append(
-                    "Connected, but no table matched a known tick/book shape "
-                    "(timestamp plus bid/ask, or a book snapshot schema)."
+                    "Connected, but the configured data table was not found."
                 )
-            elif empty:
-                _status.hints.append(
-                    f"{len(empty)} tick source(s) are empty: "
-                    + ", ".join(t["qualified"] for t in empty)
-                    + ". Run the ingest pipeline, or use the Synthetic source."
-                )
-            if len(_status.databases) > 1:
-                _status.hints.append(
-                    "Endpoint spans " + str(len(_status.databases)) + " databases: "
-                    + ", ".join(_status.databases) + "."
-                )
+                _status.tables = []
+            else:
+                _PRIMARY = ti
+                d = ti.to_dict()
+                d["is_tick_source"] = True
+                d.update(_probe_table(conn, ti))
+                _status.tables = [d]
+                if d.get("row_count") == 0:
+                    _status.hints.append(
+                        "The data source is empty. Run the ingest pipeline, or use "
+                        "the Demo source."
+                    )
         _status.connected, _status.error, _status.synthetic = True, None, False
-    except WarehouseError as exc:
+    except DataSourceError as exc:
+        _PRIMARY = None
         _status.connected, _status.error, _status.synthetic = False, str(exc), st.allow_synthetic
-        _status.hints = [
-            "Add FABRIC_CLIENT_ID / FABRIC_CLIENT_SECRET / FABRIC_TENANT_ID to .env.",
-            "Grant the service principal a Contributor role on the Fabric workspace. "
-            "Viewer works for the SQL layer, but OneLake security filters Viewers "
-            "and hides whole tables (they then look like they do not exist).",
-        ]
+        _status.tables = []
+        _status.hints = ["Data source unavailable. Check the configured credentials."]
     return _status
 
 
 def sources() -> list[SourceInfo]:
-    """Every tick source the UI can offer: live tables plus synthetic."""
+    """The single live source plus the synthetic demo source.
+
+    Neither label, nor the API, ever exposes a table name or the endpoint.
+    """
     out: list[SourceInfo] = []
-    badges = {"agg": "aggregated book", "levels": "L2 price levels",
-              "l2": "raw L2 events", "flat": "flat ticks"}
     for t in status().tables:
-        if not t.get("is_tick_source"):
-            continue
-        kind = t.get("kind") or "flat"
-        out.append(SourceInfo(key=t["qualified"],
-                              label=f"{t['qualified']}  ({badges.get(kind, kind)})",
-                              symbols=[], table=t))
+        out.append(SourceInfo(key="live", label="Live", symbols=[], table=t))
     if not out or get_settings().allow_synthetic:
-        out.append(SourceInfo(key="synthetic", label="Synthetic (demo)",
+        out.append(SourceInfo(key="synthetic", label="Demo (synthetic)",
                               symbols=synthetic.available_symbols(), synthetic=True,
-                              note="Generated tick data - not from the warehouse."))
+                              note="Generated tick data - not from the data source."))
     return out
 
 
 def symbols_for(source_key: str) -> list[str]:
     """Best-effort symbol list for a source key."""
-    for t in status().tables:
-        if t.get("qualified") == source_key:
+    if source_key == "live":
+        status()          # ensures _PRIMARY is populated/validated
+        if _PRIMARY is not None:
             try:
                 with connect() as conn:
-                    return [x["symbol"] for x in get_symbols(conn, _table_info(t), limit=300)]
-            except WarehouseError:
+                    return [x["symbol"] for x in get_symbols(conn, _PRIMARY, limit=300)]
+            except DataSourceError:
                 return []
     if source_key == "synthetic":
         return synthetic.available_symbols()
     return []
 
 
-def load_ticks(source: str = "synthetic", *, symbol: str | None = None,
+def load_ticks(source: str = "live", *, symbol: str | None = None,
                limit: int | None = None, lookback_days: int = 3) -> pd.DataFrame:
-    """Load canonical ticks for a source/symbol. Raises WarehouseError on live failure."""
+    """Load canonical ticks for a source/symbol. Raises DataSourceError on live failure."""
     s = get_settings()
     limit = int(limit or s.max_ticks)
 
     if source == "synthetic" or source.startswith("synthetic"):
         return synthetic.generate((symbol or "EURUSD").upper(), ticks=min(limit, 60_000))
 
-    match = next((t for t in status().tables if t.get("qualified") == source), None)
-    if match is None:
-        raise WarehouseError(f"Unknown tick source: {source}")
+    if source != "live":
+        raise DataSourceError(f"Unknown tick source: {source}")
 
-    ti = _table_info(match)
+    status()              # populates _PRIMARY
+    ti = _PRIMARY
+    if ti is None:
+        with connect() as conn:
+            ti = primary_table(conn)
+    if ti is None:
+        raise DataSourceError("The configured data table was not found.")
     with connect() as conn:
         raw, cm = fetch_ticks(conn, ti, symbol=symbol, limit=limit, lookback_days=lookback_days)
 
@@ -242,7 +234,7 @@ def load_ticks(source: str = "synthetic", *, symbol: str | None = None,
     if not frame.empty and symbol:
         frame = frame[frame["symbol"].astype(str) == str(symbol)]
     if frame.empty:
-        raise WarehouseError(
+        raise DataSourceError(
             f"No usable ticks for {symbol or 'this table'} in the last {lookback_days} day(s)."
         )
     return frame
@@ -258,7 +250,7 @@ def load_ticks_cached(source: str, symbol: str | None, limit: int | None,
     try:
         result = (load_ticks(source, symbol=symbol, limit=limit, lookback_days=lookback_days),
                   source.startswith("synthetic"))
-    except WarehouseError:
+    except DataSourceError:
         if not get_settings().allow_synthetic:
             raise
         frame = synthetic.generate((symbol or "EURUSD").upper(), ticks=min(limit or 20_000, 60_000))
@@ -268,17 +260,15 @@ def load_ticks_cached(source: str, symbol: str | None, limit: int | None,
 
 
 def symbol_map() -> dict[str, str]:
-    """{symbolId: symbolName} from gold.symbols_pepperstone, cached for the session."""
-    global _SYMBOL_LABELS, _SYMBOL_DIM
+    """{symbolId: symbolName} lookup, cached for the session."""
+    global _SYMBOL_LABELS
     if not _SYMBOL_LABELS:
         try:
             with connect() as conn:
-                all_t = [t for t in list_all_tables(conn) if t.schema.lower() not in _SYSTEM_SCHEMAS]
-                dim = find_symbol_dimension(conn, all_t)
+                dim = find_symbol_dimension(conn, list_all_tables(conn))
                 if dim is not None:
-                    _SYMBOL_DIM = dim.label
                     _SYMBOL_LABELS = symbol_labels(conn, dim)
-        except WarehouseError:
+        except DataSourceError:
             _SYMBOL_LABELS = {}
     return _SYMBOL_LABELS
 

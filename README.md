@@ -1,12 +1,13 @@
 # Axioma Analytics
 
-Tick-data microstructure analytics over a **Microsoft Fabric SQL analytics endpoint**
-(TDS / `datawarehouse.fabric.microsoft.com`).
+Tick-data microstructure analytics over a single pre-aggregated order-book
+snapshot source, normalised into ticks and rendered as a full microstructure
+dashboard: OHLCV bars, order-flow imbalance, spread evolution, volume-at-price,
+return distribution, drawdown, autocorrelation and large-trade market impact.
 
-The app auto-discovers your tick table, normalises whatever column names you use,
-and renders a full microstructure dashboard: OHLCV bars, order-flow imbalance,
-spread evolution, volume-at-price, return distribution, drawdown, autocorrelation
-and large-trade market impact.
+Storage internals (warehouse, database, table and endpoint names) are never sent
+to the browser. The API exposes two opaque sources - `live` and `synthetic` - and
+the UI labels them "Live" and "Demo".
 
 ---
 
@@ -14,26 +15,27 @@ and large-trade market impact.
 
 ```bash
 pip install -r requirements.txt
-python scripts/check_connection.py     # verify auth + discover tick tables
-python run.py                          # dashboard on http://127.0.0.1:8000
+python run.py        # dashboard on http://127.0.0.1:8000
 ```
+
+If the data source is unreachable the app automatically falls back to the
+synthetic demo source, so the dashboard is always demonstrable.
 
 ---
 
 ## Configuration (`.env`)
 
 ```ini
-SQL_ANALYTICS_ENDPOINT="<workspace-id>.datawarehouse.fabric.microsoft.com"
-
+# Data source host and credentials (Entra ID service principal).
+SQL_ANALYTICS_ENDPOINT="<host>"
 FABRIC_TENANT_ID="<tenant-guid>"
 FABRIC_CLIENT_ID="<app-registration-client-id>"
 FABRIC_CLIENT_SECRET="<client-secret>"
 
-# Optional: pin the tick table. Leave blank to auto-discover.
-FABRIC_TICK_SCHEMA=
-FABRIC_TICK_TABLE=
+# The single book-snapshot table to read. Resolved server-side only.
+DATA_TABLE="gold.agg_dom_book_snapshot"
 
-FABRIC_ALLOW_SYNTHETIC="true"   # demo fallback when the warehouse has no ticks
+FABRIC_ALLOW_SYNTHETIC="true"   # demo fallback when the data source is unreachable
 MAX_TICKS="200000"
 ```
 
@@ -68,42 +70,24 @@ Invoke-RestMethod "https://api.fabric.microsoft.com/v1/workspaces/<workspace-id>
 
 ---
 
-## Current warehouse state
+## Data source shape
 
-The endpoint spans **two databases** (one per workspace item):
+The configured table holds one pre-aggregated row per symbol and timestamp, with
+`best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`, `imbalance_ratio`,
+`vwap_bid`, `vwap_ask`, `vwap_spread` and `rel_spread`. `app/books.py` normalises
+it to the canonical tick frame (`ts | symbol | bid | ask | last | volume`) so every
+dashboard panel works unchanged. The pipeline's own imbalance is used as the
+directional signal; one-sided rows (no best bid or ask) are dropped because they
+cannot produce a mid.
 
-| Database | Table | Rows | Reader |
-|---|---|---:|---|
-| `ctrader` | `ctrader.dom_pepperstone` | 37k+ (live) | `l2` |
-| `ctrader` | `ctrader.market_depth` / `_v2` | 0 | - |
-| `ctrader_lakehouse` | `gold.agg_dom_book_snapshot` | 27,632 | `agg` |
-| `ctrader_lakehouse` | `dbo.silver_dom_book_snapshot` | 128,328 | `levels` |
-| `ctrader_lakehouse` | `gold.symbols_pepperstone` | 1,941 | symbol dimension |
-
-### Four source shapes, one analytics engine
-
-`app/books.py` classifies each table and normalises it to the canonical tick frame
-(`ts | symbol | bid | ask | last | volume`), so every panel works on any source:
-
-- **`agg`** - `gold.agg_dom_book_snapshot`: one pre-aggregated row per symbol/time
-  with `best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`,
-  `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread`, `rel_spread`.
-  The pipeline's own imbalance is used as the directional signal. One-sided rows
-  (no best bid or ask) are dropped because they cannot produce a mid.
-- **`levels`** - `dbo.silver_dom_book_snapshot`: one row per resting price level
-  (`symbolId, quoteId, timestamp, side, price, size`). Collapsed to one snapshot
-  per `(symbol, timestamp)` with best bid/ask, top-N depth and a depth curve.
-  One-sided and crossed snapshots are skipped.
-- **`l2`** - `ctrader.dom_pepperstone`: raw `newQuotes`/`deletedQuotes` deltas
-  with scaled integer prices (`/ 10**digits`), replayed by `app/l2.py`.
-- **`flat`** - conventional `ts/bid/ask/last/volume` tables.
+The readers also understand per-level snapshots, raw L2 event deltas and
+conventional tick tables, so the same engine generalises to other shapes.
 
 ### Symbol names
 
-`gold.symbols_pepperstone` maps `symbolId -> symbolName`, so the UI shows
-`BTCUSD`, `ETHUSD`, `EURUSD` instead of `10028`, `10029`, `1`. It is discovered
-automatically (any table with a symbol id + name column), and every tick symbol
-resolves (1,868/1,868).
+A symbol dimension (`symbolId -> symbolName`) is discovered automatically, so the
+UI shows `BTCUSD`, `ETHUSD`, `EURUSD` instead of raw numeric ids. The dimension
+table's name is likewise never exposed.
 
 ### Two correctness guards in the L2 replay
 
@@ -124,18 +108,16 @@ After the guards: **0 crossed books, 100% positive spreads** on the full replay.
 app/
   config.py      .env -> Settings (secrets redacted)
   auth.py        az CLI / service-principal token minting
-  db.py          connection, all-database discovery, tick fetch, symbol dimension
-  books.py       readers for agg / levels book snapshots (+ classification)
+  db.py          connection, table resolution, tick fetch, symbol dimension
+  books.py       readers for book snapshot shapes (+ classification)
   schema.py      tolerant column mapping -> canonical tick frame
   analytics.py   all computations (pure functions, no I/O)
   synthetic.py   realistic tick generator (fallback/demo)
   service.py     source resolution, health probing, TTL cache
   main.py        FastAPI app + static dashboard
   static/        dashboard (Chart.js)
-scripts/
-  check_connection.py   CLI: auth check + tick-table discovery
 tests/
-  test_analytics.py     17 tests, no warehouse required
+  test_analytics.py / test_books.py / test_l2.py   no data source required
 ```
 
 The canonical tick frame is:
@@ -145,7 +127,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 ```
 
 `schema.ALIASES` maps many spellings (`bid`, `BidPrice`, `bid_price`, `b`…) onto
-those fields, so most warehouse layouts work without configuration.
+those fields, so most column layouts work without configuration.
 
 ---
 
@@ -153,14 +135,14 @@ those fields, so most warehouse layouts work without configuration.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status, tables, hints |
-| `GET /api/sources` | Available sources + symbols |
+| `GET /api/health?refresh=true` | Connection status and hints (no storage details) |
+| `GET /api/sources` | The `live` / `synthetic` sources + symbols |
 | `GET /api/symbols?source=` | Symbols for one source |
 | `GET /api/analytics` | Full analytics bundle |
 | `POST /api/query?sql=` | One read-only `SELECT` (schema exploration) |
 
-`/api/analytics` parameters: `source`, `symbol`, `timeframe`, `window`, `bins`,
-`limit`, `lookback_days`.
+`/api/analytics` parameters: `source` (`live` or `synthetic`), `symbol`,
+`timeframe`, `window`, `bins`, `limit`, `lookback_days`.
 
 ---
 

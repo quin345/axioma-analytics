@@ -1,4 +1,4 @@
-"""Unit tests for the tick analytics layer (no warehouse required)."""
+"""Unit tests for the tick analytics layer (no data source required)."""
 from __future__ import annotations
 
 import json

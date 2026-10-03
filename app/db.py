@@ -1,4 +1,4 @@
-"""Fabric DW access: connection, catalog discovery, and tick fetching."""
+"""Data source access: connection, table resolution, and tick fetching."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -20,7 +20,7 @@ def ident(name: str) -> str:
     return "[" + str(name).replace("]", "]]") + "]"
 
 
-class WarehouseError(RuntimeError):
+class DataSourceError(RuntimeError):
     pass
 
 
@@ -53,14 +53,14 @@ class TableInfo:
         return self._kind or ("l2" if self.is_l2 else "flat")
 
     def to_dict(self) -> dict:
+        """Internal health payload.
+
+        Deliberately omits schema/table/database: physical names stay inside the
+        server and are never exposed over the API.
+        """
         return {
-            "schema": self.schema,
-            "table": self.table,
-            "qualified": self.label,
             "kind": self.kind,
-            "database": self.database,
-            "columns": self.columns,
-            "tick_columns": self.column_map.to_dict(),
+            "column_count": len(self.columns),
             "synthetic": False,
         }
 
@@ -97,7 +97,7 @@ _ACCESS_TOKEN_ATTR = 1256
 def connect(settings: Settings | None = None) -> Iterator[pyodbc.Connection]:
     s = settings or get_settings()
     if not s.host:
-        raise WarehouseError("SQL_ANALYTICS_ENDPOINT is not set")
+        raise DataSourceError("The data source host is not configured")
 
     attrs: dict | None = None
     try:
@@ -105,51 +105,28 @@ def connect(settings: Settings | None = None) -> Iterator[pyodbc.Connection]:
         if not s.has_credentials:
             token = get_access_token()
             if token is None:
-                raise WarehouseError(
-                    "No credentials configured. Set FABRIC_TENANT_ID / FABRIC_CLIENT_ID / "
-                    "FABRIC_CLIENT_SECRET in .env, or run `az login`."
+                raise DataSourceError(
+                    "No credentials configured. Set the credential variables in "
+                    ".env, or run `az login`."
                 )
             # Not valid together with Authentication / Trusted_Connection in the string.
             attrs = {_ACCESS_TOKEN_ATTR: token.value}
     except TokenError as exc:
-        raise WarehouseError(str(exc)) from exc
+        raise DataSourceError(str(exc)) from exc
 
     try:
         conn = pyodbc.connect(cs, autocommit=True, attrs_before=attrs) if attrs else \
             pyodbc.connect(cs, autocommit=True)
     except pyodbc.Error as exc:
-        raise WarehouseError(
-            f"Could not connect to the Fabric SQL analytics endpoint: {exc}\n"
-            "Check that (1) the principal has at least the Viewer role on the Fabric "
-            "workspace holding the SQL analytics endpoint, and (2) the endpoint host is correct."
+        raise DataSourceError(
+            f"Could not connect to the data source: {exc}\n"
+            "Check that the configured credentials and host are correct, and that "
+            "the principal has read access to the workspace."
         ) from exc
     try:
         yield conn
     finally:
         conn.close()
-
-
-# Fabric OneLake denies access at the *external policy* layer, not via a SQL
-# role - and such objects are then hidden from the catalog entirely, so they look
-# like they do not exist. Detect it and say so explicitly.
-_PERMISSION_MARKERS = ("permission", "external policy", "was denied")
-
-
-def is_permission_error(message: str) -> bool:
-    m = str(message).lower()
-    return any(marker in m for marker in _PERMISSION_MARKERS)
-
-
-def permission_hint(message: str) -> str:
-    """Actionable next step when a query is refused by OneLake policy."""
-    if not is_permission_error(message):
-        return ""
-    return (
-        "The object exists but this principal cannot read it. In Fabric, Lakehouse "
-        "tables are also gated by OneLake security, not just the workspace role. "
-        "Grant the service principal access to the table's folder under "
-        "Workspace > prod_axioma > OneLake access control (e.g. Tables/dbo)."
-    )
 
 
 def query(conn: pyodbc.Connection, sql: str, params: tuple | None = None) -> pd.DataFrame:
@@ -159,7 +136,7 @@ def query(conn: pyodbc.Connection, sql: str, params: tuple | None = None) -> pd.
         cols = [c[0] for c in cur.description] if cur.description else []
         return pd.DataFrame.from_records(cur.fetchall(), columns=cols)
     except pyodbc.Error as exc:
-        raise WarehouseError(f"Query failed: {exc}\nSQL: {sql[:400]}") from exc
+        raise DataSourceError(f"Query failed: {exc}\nSQL: {sql[:400]}") from exc
     finally:
         cur.close()
 
@@ -205,7 +182,7 @@ def list_all_tables(conn: pyodbc.Connection) -> list[TableInfo]:
                 SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
                 FROM {ident(db)}.INFORMATION_SCHEMA.COLUMNS
                 ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION""")
-        except WarehouseError:
+        except DataSourceError:
             continue
         grouped: dict[tuple[str, str], list[str]] = {}
         for schema, table, col in zip(df["TABLE_SCHEMA"], df["TABLE_NAME"], df["COLUMN_NAME"]):
@@ -218,51 +195,6 @@ def list_all_tables(conn: pyodbc.Connection) -> list[TableInfo]:
                                  column_map=cm, is_l2=is_l2_table(cols),
                                  _kind=classify_book_table(cols), database=db))
     return out
-
-
-def discover_tables(conn: pyodbc.Connection, *, min_score: int = 3,
-                    databases: list[str] | None = None) -> list[TableInfo]:
-    """Score schema.table across every database and return tick-like tables.
-
-    Scans all databases because INFORMATION_SCHEMA is scoped to the current
-    database, and a workspace endpoint exposes one database per DW/Lakehouse.
-    """
-    dbs = databases if databases is not None else list_databases(conn)
-    grouped: dict[tuple[str, str, str], list[str]] = {}
-
-    for db in dbs:
-        try:
-            df = query(conn, f"""
-                SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
-                FROM {ident(db)}.INFORMATION_SCHEMA.COLUMNS
-                ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION""")
-        except WarehouseError:
-            continue
-        if df.empty:
-            continue
-        for schema, table, col in zip(df["TABLE_SCHEMA"], df["TABLE_NAME"], df["COLUMN_NAME"]):
-            if str(schema).lower() in _SKIP_SCHEMAS:
-                continue
-            grouped.setdefault((db, str(schema), str(table)), []).append(str(col))
-
-    found: list[TableInfo] = []
-    for (db, schema, table), cols in grouped.items():
-        cm = build_column_map(cols)
-        l2 = is_l2_table(cols)
-        kind = classify_book_table(cols)
-        # DOM events and aggregated book snapshots are valid tick sources even
-        # though they have no plain bid/ask columns - they are rebuilt at read time.
-        if not cm.valid and kind not in ("l2", "agg", "levels"):
-            continue
-        score = 3 + (1 if (cm.bid and cm.ask) else 0) + (1 if cm.symbol else 0) + (1 if cm.volume else 0)
-        if l2:
-            score += 2
-        if score >= min_score:
-            found.append(TableInfo(schema=schema, table=table, columns=cols,
-                                   column_map=cm, is_l2=l2, _kind=kind, database=db))
-
-    found.sort(key=lambda t: (not t.is_l2, t.database, t.schema, t.table))
-    return found
 
 
 # Column names used by common symbol-dimension tables (gold/silver layers).
@@ -306,7 +238,7 @@ def symbol_labels(conn: pyodbc.Connection, dim: TableInfo | None = None,
     try:
         df = query(conn, f"SELECT TOP ({int(limit)}) {ident(id_col)} AS id, {ident(name_col)} AS nm "
                           f"FROM {dim.qualified} WHERE {ident(name_col)} IS NOT NULL")
-    except WarehouseError:
+    except DataSourceError:
         return {}
     out: dict[str, str] = {}
     for i, n in zip(df["id"], df["nm"]):
@@ -335,7 +267,7 @@ def get_symbols(conn: pyodbc.Connection, ti: TableInfo, *, limit: int = 500) -> 
     )
     try:
         df = query(conn, sql)
-    except WarehouseError:
+    except DataSourceError:
         return []
     if df.empty:
         return []
@@ -385,7 +317,7 @@ def fetch_ticks(
             anchor = query(conn, f"SELECT MAX({ident(ts_col)}) AS mx FROM {q}{anchor_where}",
                            tuple(params) if params else None)
             mx = None if anchor.empty else anchor["mx"].iloc[0]
-        except WarehouseError:
+        except DataSourceError:
             mx = None
         if mx is not None and not pd.isna(mx):
             cutoff = pd.Timestamp(mx) - pd.Timedelta(days=int(lookback_days))

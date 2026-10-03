@@ -1,4 +1,4 @@
-"""Tests for the medallion book readers (no warehouse required)."""
+"""Tests for the book readers (no data source required)."""
 from __future__ import annotations
 
 import json

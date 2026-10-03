@@ -1,11 +1,11 @@
-"""Readers for the cTrader medallion tables in `ctrader_lakehouse`.
+"""Readers for the pre-aggregated order-book snapshots.
 
 Three shapes are supported, all normalised to the canonical tick frame so the
 analytics engine stays unchanged:
 
-`agg`    - gold.agg_dom_book_snapshot: one pre-aggregated row per symbol/time
+`agg`    - one pre-aggregated row per symbol/time
            with best_bid/best_ask, total sizes, imbalance and VWAP spreads.
-`levels` - dbo.silver_dom_book_snapshot: one row per resting price level
+`levels` - one row per resting price level
            (symbolId, quoteId, timestamp, side, price, size), collapsed here into
            per-timestamp book snapshots.
 `l2`     - raw newQuotes/deletedQuotes event deltas (see app/l2.py).
@@ -19,7 +19,7 @@ import pandas as pd
 from .schema import CANONICAL
 
 # --------------------------------------------------------------------------
-# gold.agg_dom_book_snapshot
+# aggregated book snapshots
 # --------------------------------------------------------------------------
 
 AGG_ALIASES: dict[str, tuple[str, ...]] = {
@@ -101,7 +101,7 @@ def from_agg(raw: pd.DataFrame) -> pd.DataFrame:
     out["signed_volume"] = np.where(out["imbalance"].notna(), out["imbalance"], derived)
     return out
 # --------------------------------------------------------------------------
-# dbo.silver_dom_book_snapshot  (one row per resting price level)
+# per-level book snapshots (one row per resting price level)
 # --------------------------------------------------------------------------
 
 LEVEL_ALIASES: dict[str, tuple[str, ...]] = {

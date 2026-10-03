@@ -12,20 +12,24 @@ from fastapi.staticfiles import StaticFiles
 
 from . import analytics, service
 from .config import get_settings
-from .db import WarehouseError, connect, query
+from .db import DataSourceError, connect, query
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Axioma Analytics",
-    description="Tick-data microstructure analytics over a Microsoft Fabric SQL analytics endpoint.",
+    description="Tick-data microstructure analytics.",
     version="1.0.0",
 )
 
 
 @app.get("/api/health")
-def health(refresh: bool = Query(False, description="Re-probe the warehouse")) -> dict:
-    """Connection status, discovered tables and actionable hints."""
+def health(refresh: bool = Query(False, description="Re-probe the data source")) -> dict:
+    """Connection status and actionable hints.
+
+    Storage details (table names, databases, endpoint) are deliberately not
+    exposed: the client only needs to know whether data is available.
+    """
     s = get_settings()
     st = service.status(refresh=refresh)
     # Warm the symbol lookup so the UI can show tickers instead of raw ids.
@@ -38,37 +42,33 @@ def health(refresh: bool = Query(False, description="Re-probe the warehouse")) -
         "server_time": st.server_time,
         "error": st.error,
         "hints": st.hints,
-        "tables": st.tables,
-        "databases": st.databases,
-        "symbol_dimension": service._SYMBOL_DIM,
+        "has_data": bool(st.tables),
         "symbol_count": len(service._SYMBOL_LABELS),
-        "auth": "service principal" if s.has_credentials else "az login access token",
-        "endpoint": f"{s.server}:{s.port}",
         "timeframes": list(analytics.TIMEFRAMES),
     }
 
 
 @app.get("/api/sources")
 def sources() -> dict:
-    """Tick sources available for analysis, with their symbols."""
+    """Available data sources, with their symbols."""
     out = []
     for src in service.sources():
         d = src.to_dict()
         rows = [{"symbol": s} for s in service.symbols_for(src.key)]
         d["symbols"] = service.decorate(rows)
         out.append(d)
-    return {"sources": out, "symbol_dimension": service._SYMBOL_DIM}
+    return {"sources": out}
 
 
 @app.get("/api/symbols")
-def symbols(source: str = Query("synthetic")) -> dict:
+def symbols(source: str = Query("live")) -> dict:
     rows = [{"symbol": s} for s in service.symbols_for(source)]
     return {"symbols": service.decorate(rows)}
 
 
 @app.get("/api/analytics")
 def analytics_report(
-    source: str = Query("synthetic", description="schema.table, or 'synthetic'"),
+    source: str = Query("live", description="'live' or 'synthetic'"),
     symbol: str | None = Query(None),
     timeframe: str = Query("1m"),
     window: int = Query(50, ge=2, le=5000),
@@ -79,12 +79,12 @@ def analytics_report(
     """Full analytics bundle for one symbol."""
     try:
         frame, is_synthetic = service.load_ticks_cached(source, symbol, limit, lookback_days)
-    except WarehouseError as exc:
+    except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     report = analytics.build_report(frame, timeframe=timeframe, window=window, bins=bins)
     report["meta"] = {
-        "source": source,
+        "source": "live" if source == "live" else "demo",
         "symbol": symbol or report["summary"].get("symbol"),
         "symbol_name": service.symbol_map().get(str(symbol)) if symbol else None,
         "synthetic": is_synthetic,
@@ -108,7 +108,7 @@ def ad_hoc_query(sql: str = Query(..., description="A single read-only SELECT st
     try:
         with connect() as conn:
             df = query(conn, sql)
-    except WarehouseError as exc:
+    except DataSourceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
         "columns": list(df.columns),
@@ -126,6 +126,6 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.exception_handler(WarehouseError)
-def _warehouse_handler(_request, exc: WarehouseError) -> JSONResponse:
+@app.exception_handler(DataSourceError)
+def _warehouse_handler(_request, exc: DataSourceError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})

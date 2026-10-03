@@ -102,43 +102,28 @@ async function loadHealth() {
   const dot = $("connDot");
   if (h.connected) {
     dot.className = "dot ok";
-    const dbs = (h.databases || []).length;
-    $("connText").textContent =
-      `Connected \u00b7 ${h.auth} \u00b7 ${dbs ? dbs + " databases \u00b7 " : ""}${h.endpoint}`;
+    $("connText").textContent = h.has_data ? "Connected \u00b7 live data" : "Connected \u00b7 no data";
   } else {
     dot.className = "dot bad";
-    $("connText").textContent = h.using_synthetic ? "Offline \u00b7 synthetic data" : "Offline";
+    $("connText").textContent = h.using_synthetic ? "Offline \u00b7 demo data" : "Offline";
   }
   // Hints are useful even when connected (e.g. "table is empty", "not a tick
   // table"), so surface them in both states rather than only when offline.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
 
-  // tables panel
+  // Data source panel. Storage internals (table, database, endpoint) are never
+  // sent by the API, so only availability and instrument coverage are shown.
   const box = $("tables");
-  if (!h.tables || !h.tables.length) {
-    box.innerHTML = `<p class="note">No tick tables discovered yet.</p>`;
+  if (h.connected && h.has_data) {
+    const n = h.symbol_count || 0;
+    box.innerHTML = `<div class="trow">
+      <div><b>Live market data</b>
+        <div class="meta">${n ? n.toLocaleString() + " instruments available" : "loading instruments\u2026"}</div>
+        <div class="meta">Order-book snapshots, normalised into ticks.</div></div>
+      <span class="pill ok">available</span>
+    </div>`;
   } else {
-    box.innerHTML = h.tables.map((t) => {
-      const rows = t.row_count;
-      const isTick = t.is_tick_source;
-      const cols = (t.payload_columns || []).join(", ")
-        || (t.columns || []).join(", ")
-        || "\u2013";
-      const mapped = isTick
-        ? (t.kind === "agg" || t.kind === "levels"
-            ? `read as ${esc(t.kind)} book snapshots`
-            : Object.entries(t.tick_columns || {}).filter(([, v]) => v).map(([k, v]) => `${k}\u2192${v}`).join(", "))
-        : "metadata / not an analytics source";
-      const pill = rows === null
-        ? '<span class="pill warn">unknown rows</span>'
-        : (rows === 0 ? '<span class="pill bad">0 rows</span>' : `<span class="pill ok">${rows.toLocaleString()} rows</span>`);
-      return `<div class="trow">
-        <div><b>${esc(t.qualified)}</b>${isTick ? ` <span class="pill ok">${esc(t.kind)}</span>` : ""}
-          <div class="meta">columns: ${esc(cols)}</div>
-          <div class="meta">mapped: ${esc(mapped)}</div></div>
-        ${pill}
-      </div>`;
-    }).join("");
+    box.innerHTML = `<p class="note">Live data is not available right now. The demo source remains usable.</p>`;
   }
   return h;
 }

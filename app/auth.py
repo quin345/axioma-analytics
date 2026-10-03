@@ -1,4 +1,4 @@
-"""Entra ID auth for the Fabric SQL analytics endpoint.
+"""Entra ID auth for the SQL data source endpoint.
 
 Two credential modes are supported:
 

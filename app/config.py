@@ -20,7 +20,7 @@ def _env(*names: str, default: str | None = None) -> str | None:
 
 @dataclass(frozen=True)
 class Settings:
-    # --- Fabric SQL analytics endpoint (TDS) ---
+    # --- Data source endpoint (TDS) ---
     host: str = field(default_factory=lambda: _env("SQL_ANALYTICS_ENDPOINT", "FABRIC_HOST") or "")
     tenant_id: str | None = field(default_factory=lambda: _env("FABRIC_TENANT_ID", "AZURE_TENANT_ID"))
     client_id: str | None = field(default_factory=lambda: _env("FABRIC_CLIENT_ID", "AZURE_CLIENT_ID"))
@@ -34,6 +34,13 @@ class Settings:
     # tick table by scoring every schema.table on its columns.
     tick_schema: str | None = field(default_factory=lambda: _env("FABRIC_TICK_SCHEMA"))
     tick_table: str | None = field(default_factory=lambda: _env("FABRIC_TICK_TABLE"))
+
+    # The single book-snapshot table the app reads from. Its physical name is
+    # never surfaced to clients - it is resolved internally only.
+    data_table: str = field(
+        default_factory=lambda: _env("DATA_TABLE", default="gold.agg_dom_book_snapshot")
+        or "gold.agg_dom_book_snapshot"
+    )
 
     # Serve synthetic tick data when the warehouse is unreachable, so the UI is
     # always demonstrable. Set FABRIC_ALLOW_SYNTHETIC=false to fail hard instead.
@@ -64,10 +71,10 @@ class Settings:
         return bool(self.tenant_id and self.client_id and self.client_secret)
 
     def connection_string(self) -> str:
-        """Fabric SQL analytics endpoint via Entra ID service principal.
+        """Data source endpoint via Entra ID service principal.
 
-        Note: Fabric SQL analytics endpoints do NOT accept a `Database=` key -
-        objects are addressed as fully-qualified [schema].[dbo].[table].
+        Note: this endpoint type does NOT accept a `Database=` key - objects are
+        addressed as fully-qualified [schema].[table].
         """
         if not self.host:
             raise RuntimeError("SQL_ANALYTICS_ENDPOINT is not set")
