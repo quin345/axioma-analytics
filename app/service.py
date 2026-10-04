@@ -290,3 +290,17 @@ def l2_stats() -> dict:
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+def reset() -> None:
+    """Drop every cached fragment so a newly selected endpoint is picked up.
+
+    Called after switching environments: the catalog, symbol map and health
+    probe all belong to the previous endpoint and must not leak across.
+    """
+    global _PRIMARY, _SYMBOL_LABELS, _status
+    clear_cache()
+    _PRIMARY = None
+    _SYMBOL_LABELS = {}
+    _status = Status()
+    _LAST_L2_STATS.clear()

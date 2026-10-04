@@ -11,7 +11,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, service
-from .config import get_settings
+from .config import (active_environment, available_environments, get_settings,
+                     mask_host, set_environment)
 from .db import DataSourceError, connect, query
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -36,6 +37,7 @@ def health(refresh: bool = Query(False, description="Re-probe the data source"))
     service.symbol_map()
     return {
         "app": s.app_name,
+        "environment": active_environment() or "default",
         "connected": st.connected,
         "synthetic_available": s.allow_synthetic,
         "using_synthetic": bool(not st.connected and s.allow_synthetic),
@@ -46,6 +48,38 @@ def health(refresh: bool = Query(False, description="Re-probe the data source"))
         "symbol_count": len(service._SYMBOL_LABELS),
         "timeframes": list(analytics.TIMEFRAMES),
     }
+
+
+@app.get("/api/environments")
+def environments() -> dict:
+    """The selectable SQL analytics endpoints and which one is active.
+
+    Endpoint hosts are masked: enough of the unique segment is shown to tell
+    environments apart without exposing the storage location in full.
+    """
+    envs = available_environments()
+    active = active_environment() or (next(iter(envs)) if envs else "")
+    return {
+        "active": active,
+        "environments": [
+            {"key": name, "host": mask_host(host), "active": name == active}
+            for name, host in envs.items()
+        ],
+    }
+
+
+@app.post("/api/environments")
+def select_environment(
+    env: str = Query(..., description="Environment key to activate, e.g. dev/test/prod"),
+) -> dict:
+    """Switch the active SQL analytics endpoint and re-probe it."""
+    try:
+        active = set_environment(env)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    service.reset()
+    st = service.status(refresh=True)
+    return {"active": active, "connected": st.connected, "error": st.error, "hints": st.hints}
 
 
 @app.get("/api/sources")
