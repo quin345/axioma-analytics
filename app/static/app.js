@@ -168,6 +168,44 @@ async function fillTimeframes(h) {
     .map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
   $("timeframe").value = "1m";
 }
+
+/* ---------------- environment selection ---------------- */
+
+async function fillEnvironments() {
+  const sel = $("environment");
+  if (!sel) return;
+  const data = await api("/api/environments");
+  const envs = data.environments || [];
+  const prev = sel.value;
+  sel.innerHTML = envs.map((e) =>
+    `<option value="${esc(e.key)}">${esc(e.key)}${e.host ? ` \\u00b7 ${esc(e.host)}` : ""}</option>`
+  ).join("");
+  // Keep the current pick when it still exists, otherwise the active one.
+  const has = envs.some((e) => e.key === prev);
+  sel.value = has ? prev : (data.active || (envs[0] && envs[0].key) || "");
+}
+
+async function selectEnvironment() {
+  const sel = $("environment");
+  if (!sel || !sel.value) return;
+  setLoading(true);
+  try {
+    const r = await fetch(`/api/environments?env=${encodeURIComponent(sel.value)}`, { method: "POST" });
+    if (!r.ok) {
+      let msg = `${r.status}`;
+      try { msg = (await r.json()).detail || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    // Health, sources/symbols and the report all belong to the new endpoint.
+    await loadHealth();
+    await loadSources();
+    await analyse();
+  } catch (err) {
+    bannerErr(err.message);
+  } finally {
+    setLoading(false);
+  }
+}
 /* ---------------- KPI tiles ---------------- */
 
 function kpi(label, value, hint, cls = "") {
@@ -418,6 +456,7 @@ async function analyse() {
 
 async function init() {
   try {
+    await fillEnvironments();
     // One health call, reused for both the connection badge and the timeframes.
     const health = await loadHealth();
     await fillTimeframes(health);
@@ -429,6 +468,7 @@ async function init() {
 }
 
 $("run").addEventListener("click", analyse);
+$("environment").addEventListener("change", selectEnvironment);
 $("source").addEventListener("change", async () => { await fillSymbols(); });
 $("refresh").addEventListener("click", async () => {
   setLoading(true);
