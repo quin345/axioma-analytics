@@ -15,7 +15,9 @@ the UI labels them "Live" and "Demo".
 
 ```bash
 pip install -r requirements.txt
-python run.py        # dashboard on http://127.0.0.1:8000
+python run.py             # dashboard on http://127.0.0.1:8000
+python run.py --env prod  # start against the "prod" endpoint
+python run.py --list-envs # show configured endpoints
 ```
 
 If the data source is unreachable the app automatically falls back to the
@@ -26,8 +28,13 @@ synthetic demo source, so the dashboard is always demonstrable.
 ## Configuration (`.env`)
 
 ```ini
-# Data source host and credentials (Entra ID service principal).
-SQL_ANALYTICS_ENDPOINT="<host>"
+# One endpoint per environment (names are free-form; dev/test/prod shown first).
+SQL_ENV="test"                     # which endpoint is active
+SQL_ENDPOINT_DEV="<dev-host>"
+SQL_ENDPOINT_TEST="<test-host>"
+SQL_ENDPOINT_PROD="<prod-host>"
+
+# Credentials (Entra ID service principal).
 FABRIC_TENANT_ID="<tenant-guid>"
 FABRIC_CLIENT_ID="<app-registration-client-id>"
 FABRIC_CLIENT_SECRET="<client-secret>"
@@ -39,7 +46,23 @@ FABRIC_ALLOW_SYNTHETIC="true"   # demo fallback when the data source is unreacha
 MAX_TICKS="200000"
 ```
 
-`.env` is already git-ignored. Never commit the secret.
+`.env` is already git-ignored (see `.env.example` for the template). Never commit
+the secret.
+
+### Environments (dev / test / prod)
+
+Any number of Fabric SQL analytics endpoints can be declared as
+`SQL_ENDPOINT_<NAME>`. The active one is chosen in three ways, in priority order:
+
+1. **Dashboard** — the *Environment* dropdown (`POST /api/environments`).
+2. **Startup flag** — `python run.py --env prod` (`--list-envs` prints them).
+3. **`.env`** — `SQL_ENV` sets the default when nothing else is chosen.
+
+Switching rebuilds the connection settings and drops every cached catalog /
+symbol / report fragment, so the next request reads from the new endpoint. If
+`SQL_ENV` names an unconfigured environment, the first configured one is used;
+an unknown name passed to the API is rejected with `400`. A legacy single
+`SQL_ANALYTICS_ENDPOINT` still works and is exposed as the `default` environment.
 
 ---
 
@@ -56,17 +79,37 @@ Two modes, tried in order:
 
 Fabric workspace roles are **not** Azure RBAC — `az role assignment` does not apply,
 and there is no `az fabric` CLI extension. Grant via the Fabric portal
-(*workspace → Manage access → Add person or service principal → **Viewer***),
-or through the Fabric REST API:
+(*workspace → Manage access → Add people or service principals*), or through the
+Fabric REST API:
 
 ```powershell
 $tok = az account get-access-token --resource https://api.fabric.microsoft.com
 $h = @{ Authorization = "Bearer $($tok.accessToken)" }
-$body = @{ principal = @{ id = "<sp-object-id>"; type = "ServicePrincipal" }; role = "Viewer" } | ConvertTo-Json -Depth 5
+$body = @{ principal = @{ id = "<sp-object-id>"; type = "ServicePrincipal" }; role = "Contributor" } | ConvertTo-Json -Depth 5
 Invoke-RestMethod "https://api.fabric.microsoft.com/v1/workspaces/<workspace-id>/roleAssignments" -Method Post -Headers $h -Body $body -ContentType application/json
 ```
 
-`Viewer` grants `CONNECT` + `ReadData` — the read-only rights this app needs.
+`Contributor` grants `CONNECT` + `ReadData` on every Lakehouse/Warehouse in the
+workspace — the rights this read-only app needs (and it avoids the OneLake
+security filtering that can hide whole tables from `Viewer`).
+
+The service principal needs this role on **every** workspace it reads from, so
+each of `dev_axioma`, `test_axioma` and `prod_axioma` must carry its own
+assignment — adding it to one does not cover the others.
+
+#### Grant it to all three at once
+
+```bash
+python scripts/grant_workspace_access.py            # dev_axioma, test_axioma, prod_axioma
+python scripts/grant_workspace_access.py --dry-run  # preview only
+python scripts/grant_workspace_access.py --list     # show workspaces + ids
+```
+
+Resolves the principal object ID from `FABRIC_CLIENT_ID`, matches workspaces by
+display name, and is idempotent — it skips workspaces already holding the role,
+updates the role when it differs, and creates the assignment only when missing.
+Run it while signed in with `az login` as a workspace **Admin**. Pass
+`--role Viewer` for a read-only grant, or `--workspaces <name>` to target one.
 
 ---
 
@@ -106,7 +149,7 @@ After the guards: **0 crossed books, 100% positive spreads** on the full replay.
 
 ```
 app/
-  config.py      .env -> Settings (secrets redacted)
+  config.py      .env -> Settings, environment selection (secrets redacted)
   auth.py        az CLI / service-principal token minting
   db.py          connection, table resolution, tick fetch, symbol dimension
   books.py       readers for book snapshot shapes (+ classification)
@@ -116,8 +159,10 @@ app/
   service.py     source resolution, health probing, TTL cache
   main.py        FastAPI app + static dashboard
   static/        dashboard (Chart.js)
+scripts/
+  grant_workspace_access.py   grant the SP a role on dev/test/prod workspaces
 tests/
-  test_analytics.py / test_books.py / test_l2.py   no data source required
+  test_analytics.py / test_books.py / test_l2.py / test_config.py   no data source required
 ```
 
 The canonical tick frame is:
@@ -136,6 +181,8 @@ those fields, so most column layouts work without configuration.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/health?refresh=true` | Connection status and hints (no storage details) |
+| `GET /api/environments` | Selectable endpoints (masked) + the active one |
+| `POST /api/environments?env=` | Switch the active endpoint and re-probe it |
 | `GET /api/sources` | The `live` / `synthetic` sources + symbols |
 | `GET /api/symbols?source=` | Symbols for one source |
 | `GET /api/analytics` | Full analytics bundle |
@@ -180,8 +227,9 @@ python -m pytest tests -q
 ```
 
 Covers column mapping, mid derivation, bar consistency, OFI bounds, volume
-profile mass conservation, drawdown sign, strict JSON serialisability, and a
-degenerate flat-price series (guards against divide-by-zero).
+profile mass conservation, drawdown sign, strict JSON serialisability, a
+degenerate flat-price series (guards against divide-by-zero), and environment
+resolution (ordering, selection, blank endpoints, runtime switching, masking).
 
 ---
 
