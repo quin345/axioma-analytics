@@ -7,11 +7,26 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 
 import uvicorn
 
 
+def _force_utf8() -> None:
+    """Windows consoles and redirections default to cp1252, which cannot encode
+    the banner's arrow. Without this, printing the banner raises
+    UnicodeEncodeError before uvicorn ever starts.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main() -> None:
+    _force_utf8()
     ap = argparse.ArgumentParser(description="Axioma Analytics server")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
@@ -44,6 +59,10 @@ def main() -> None:
             set_environment(args.env)
         except ValueError as exc:
             raise SystemExit(f"\n  {exc}\n")
+        # --reload starts the app in a *new* process, which re-imports
+        # app.config and cannot see the in-process selection made above.
+        # Exporting SQL_ENV makes the choice survive into that child process.
+        os.environ["SQL_ENV"] = active_environment()
     env_name = active_environment() or "default"
     print(f"\n  Axioma Analytics  \u2192  http://{args.host}:{args.port}")
     print(f"  Environment: {env_name} ({mask_host(environment_host())})\n")
