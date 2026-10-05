@@ -10,7 +10,21 @@
 <body>
 <header class="topbar">
   <div class="brand">
-    <span class="logo">A</span>
+    <svg class="logo" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <!-- Diamond: the market instrument. Flat top, converging to a point. -->
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <!-- Ascending bar pair: the analytics readout behind the mark. -->
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
+      <defs>
+        <linearGradient id="ax-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4f9dff" />
+          <stop offset="100%" stop-color="#22d3a7" />
+        </linearGradient>
+      </defs>
+    </svg>
     <div>
       <h1>AXIOMA</h1>
       <p class="sub">Tick microstructure &middot; market data analytics</p>
