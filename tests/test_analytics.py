@@ -8,44 +8,49 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from app import analytics, synthetic
-from app.schema import build_column_map, normalise
+from app import analytics
+from app.frames import from_snapshot
+
+
+def _snapshots(n: int = 5000, seed: int = 42) -> pd.DataFrame:
+    """Raw gold-shaped snapshots with a random-walk mid price."""
+    rng = np.random.default_rng(seed)
+    ts = pd.date_range("2026-10-03T10:00:00", periods=n, freq="1s", tz="UTC")
+    mid = 1.0850 + np.cumsum(rng.normal(0, 2e-5, n))
+    half = rng.uniform(0.5e-5, 2e-5, n)
+    bid, ask = mid - half, mid + half
+    return pd.DataFrame({
+        "timestamp": ts,
+        "symbolId": "1",
+        "total_bid": rng.integers(50, 500, n).astype(float),
+        "total_ask": rng.integers(50, 500, n).astype(float),
+        "best_bid": bid,
+        "best_ask": ask,
+        "imbalance": rng.normal(0, 50, n),
+        "imbalance_ratio": rng.uniform(-1, 1, n),
+        "vwap_bid": bid - 1e-5,
+        "vwap_ask": ask + 1e-5,
+        "vwap_spread": ask - bid + 2e-5,
+        "rel_spread": (ask - bid) / mid,
+        "rel_vwap_spread": (ask - bid + 2e-5) / mid,
+    })
 
 
 @pytest.fixture(scope="module")
 def frame():
-    raw = synthetic.generate("EURUSD", ticks=5000, seed=42)
-    return analytics.enrich(analytics.prepare(raw))
+    return analytics.enrich(analytics.prepare(from_snapshot(_snapshots())))
 
 
-# ---------- schema mapping ----------
+# ---------- reader / prepare ----------
 
-def test_column_map_matches_common_aliases():
-    cm = build_column_map(["EventTime", "Symbol", "BidPrice", "AskPrice", "LastSize"])
-    assert cm.ts == "EventTime"
-    assert cm.symbol == "Symbol"
-    assert cm.bid == "BidPrice"
-    assert cm.ask == "AskPrice"
-    assert cm.volume == "LastSize"
-    assert cm.valid
+def test_reader_produces_the_canonical_frame(frame):
+    assert {"ts", "symbol", "bid", "ask", "last", "volume", "mid"} <= set(frame.columns)
 
 
-def test_column_map_rejects_non_tick_tables():
-    cm = build_column_map(["_rid", "_ts"])
-    assert not cm.valid
-
-
-def test_normalise_derives_mid_from_quotes():
-    raw = pd.DataFrame({
-        "t": pd.date_range("2026-01-01", periods=3, freq="1s", tz="UTC"),
-        "sym": ["eurusd"] * 3, "b": [1.0849, 1.0850, 1.0851], "a": [1.0851, 1.0852, 1.0853],
-    })
-    cm = build_column_map(["t", "sym", "b", "a"])
-    out = normalise(raw, cm)
-    assert len(out) == 3
-    assert out["symbol"].iloc[0] == "EURUSD"          # upper-cased
-    assert out["mid"].iloc[0] == pytest.approx(1.0850)
-    assert out["bid"].notna().all() and out["ask"].notna().all()
+def test_prepare_derives_mid_from_last_only():
+    raw = pd.DataFrame({"ts": pd.date_range("2026-01-01", periods=4, freq="1s", tz="UTC"),
+                        "last": [1.0, 1.1, 1.2, 1.15]})
+    assert analytics.prepare(raw)["mid"].tolist() == [1.0, 1.1, 1.2, 1.15]
 
 
 # ---------- summary ----------
@@ -64,13 +69,7 @@ def test_summary_handles_empty():
     assert analytics.summary(pd.DataFrame())["ticks"] == 0
 
 
-def test_prepare_derives_mid_from_last_only():
-    raw = pd.DataFrame({"ts": pd.date_range("2026-01-01", periods=4, freq="1s", tz="UTC"),
-                        "last": [1.0, 1.1, 1.2, 1.15]})
-    out = analytics.prepare(raw)
-    assert out["mid"].tolist() == [1.0, 1.1, 1.2, 1.15]
-
-
+# ---------- bars / microstructure ----------
 # ---------- bars / microstructure ----------
 
 def test_ohlc_bars_are_consistent(frame):

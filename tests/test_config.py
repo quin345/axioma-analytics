@@ -1,83 +1,93 @@
-"""Environment selection for the SQL analytics endpoints (no data source)."""
+"""Tests for the production gold configuration (no data source required)."""
 from __future__ import annotations
-
-import os
 
 import pytest
 
 from app import config
-
-_ENV_KEYS = ("SQL_ENV", "SQL_ENVIRONMENT", "SQL_ANALYTICS_ENDPOINT", "FABRIC_HOST")
+from app.config import Settings
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch):
-    """Strip any real endpoints (e.g. from a loaded .env) around each test."""
-    for key in list(os.environ):
-        if key.upper().startswith(config._ENDPOINT_PREFIX) or key.upper() in _ENV_KEYS:
-            monkeypatch.delenv(key, raising=False)
-    config.set_environment(None)
+def _isolated(monkeypatch):
+    """Build Settings from a known-empty environment, then restore."""
+    for key in ("SQL_ENDPOINT_PROD", "SQL_ANALYTICS_ENDPOINT", "GOLD_DATABASE",
+                "GOLD_SCHEMA", "SNAPSHOT_TABLE", "SYMBOL_TABLES"):
+        monkeypatch.delenv(key, raising=False)
     config.get_settings.cache_clear()
     yield
-    config.set_environment(None)
     config.get_settings.cache_clear()
 
 
-def test_legacy_endpoint_becomes_default(monkeypatch):
+def test_defaults_point_at_the_gold_schema():
+    s = Settings()
+    assert s.gold_database == "ctrader_lakehouse"
+    assert s.gold_schema == "gold"
+    assert s.snapshot_table == "agg_dom_book_snapshot"
+    assert s.symbol_tables == ("symbols_pepperstone", "symbols_icmarkets")
+
+
+def test_prod_endpoint_is_read(monkeypatch):
+    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
+    s = Settings()
+    assert s.host == "prod.host"
+    assert s.server == "prod.host"
+    assert s.port == 1433
+    assert s.is_configured
+
+
+def test_dev_and_test_endpoints_are_ignored(monkeypatch):
+    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
+    monkeypatch.setenv("SQL_ENDPOINT_TEST", "test.host")
+    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
+    assert Settings().host == "prod.host"
+
+
+def test_legacy_endpoint_is_the_fallback(monkeypatch):
     monkeypatch.setenv("SQL_ANALYTICS_ENDPOINT", "legacy.host")
-    assert config.available_environments() == {"default": "legacy.host"}
-    assert config.active_environment() == "default"
-    assert config.get_settings().host == "legacy.host"
-    assert config.get_settings().environment == "default"
+    assert Settings().host == "legacy.host"
 
 
-def test_named_environments_are_ordered(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
-    monkeypatch.setenv("SQL_ENDPOINT_TEST", "test.host")
-    assert list(config.available_environments()) == ["dev", "test", "prod"]
+def test_missing_endpoint_is_reported_not_raised(monkeypatch):
+    s = Settings()
+    assert s.host == ""
+    assert not s.is_configured
 
 
-def test_sql_env_selects_active_endpoint(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
-    monkeypatch.setenv("SQL_ENDPOINT_TEST", "test.host")
-    monkeypatch.setenv("SQL_ENV", "test")
-    assert config.active_environment() == "test"
-    assert config.get_settings().host == "test.host"
-    assert config.get_settings().environment == "test"
+def test_blank_endpoint_falls_through(monkeypatch):
+    monkeypatch.setenv("SQL_ENDPOINT_PROD", "   ")
+    monkeypatch.setenv("SQL_ANALYTICS_ENDPOINT", "legacy.host")
+    assert Settings().host == "legacy.host"
 
 
-def test_blank_endpoints_are_ignored(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "")
-    monkeypatch.setenv("SQL_ENDPOINT_TEST", "test.host")
-    assert config.available_environments() == {"test": "test.host"}
+def test_host_may_carry_an_explicit_port(monkeypatch):
+    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host,1444")
+    s = Settings()
+    assert s.server == "prod.host"
+    assert s.port == 1444
 
 
-def test_runtime_switch_rebuilds_settings(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
-    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
-    assert config.set_environment("dev") == "dev"
-    assert config.get_settings().host == "dev.host"
-    assert config.set_environment("prod") == "prod"
-    assert config.get_settings().host == "prod.host"
+def test_gold_object_names_are_overridable(monkeypatch):
+    monkeypatch.setenv("GOLD_DATABASE", "other_db")
+    monkeypatch.setenv("GOLD_SCHEMA", "silver")
+    monkeypatch.setenv("SNAPSHOT_TABLE", "book")
+    s = Settings()
+    assert (s.gold_database, s.gold_schema, s.snapshot_table) == ("other_db", "silver", "book")
 
 
-def test_unknown_environment_rejected(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
-    with pytest.raises(ValueError):
-        config.set_environment("nope")
+def test_symbol_tables_are_parsed_and_cleaned(monkeypatch):
+    monkeypatch.setenv("SYMBOL_TABLES", "symbols_a, symbols_b ,")
+    assert Settings().symbol_tables == ("symbols_a", "symbols_b")
 
 
-def test_unknown_env_falls_back_to_first_configured(monkeypatch):
-    monkeypatch.setenv("SQL_ENDPOINT_DEV", "dev.host")
-    monkeypatch.setenv("SQL_ENDPOINT_TEST", "test.host")
-    monkeypatch.setenv("SQL_ENV", "staging")  # not configured
-    assert config.active_environment() == "dev"
-    assert config.get_settings().host == "dev.host"
+def test_credentials_drive_has_credentials(monkeypatch):
+    monkeypatch.setenv("FABRIC_TENANT_ID", "t")
+    monkeypatch.setenv("FABRIC_CLIENT_ID", "c")
+    monkeypatch.setenv("FABRIC_CLIENT_SECRET", "")
+    assert not Settings().has_credentials
+    monkeypatch.setenv("FABRIC_CLIENT_SECRET", "s")
+    assert Settings().has_credentials
 
 
-def test_mask_host_hides_middle():
-    assert config.mask_host(None) == ""
-    assert config.mask_host("") == ""
-    assert config.mask_host("short.host") == "short"
-    assert config.mask_host("abcdefghijklmnop.datawarehouse.fabric.microsoft.com") == "abcdef\u2026klmnop"
+def test_get_settings_is_cached():
+    config.get_settings.cache_clear()
+    assert config.get_settings() is config.get_settings()
