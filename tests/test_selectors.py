@@ -1,0 +1,98 @@
+"""Tests for the selector catalogue and the endpoints that back it.
+
+No data source required: `instruments` is seeded directly so these cover the
+two rules the pickers depend on - unclassified instruments are excluded, and
+the asset-class picker keeps every class while a filter is active.
+"""
+from __future__ import annotations
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import service
+from app.main import app
+
+
+def _inst(sid, name, asset_class, ticks):
+    return service.Instrument(symbol_id=sid, name=name, description="",
+                              asset_class=asset_class, ticks=ticks)
+
+
+@pytest.fixture
+def catalogue(monkeypatch):
+    """A seeded catalogue mixing classified and unclassifiable instruments."""
+    rows = {
+        "1": _inst("1", "EURUSD", "fx_major", 500),
+        "2": _inst("2", "XAUUSD", "metal", 400),
+        "3": _inst("3", "BTCUSD", "crypto", 300),
+        # No row in symbols_icmarkets: traded, but nothing to classify it by.
+        "99": _inst("99", "99", "", 900),
+        # Present in the dimension but never traded.
+        "4": _inst("4", "GBPUSD", "fx_major", 0),
+    }
+    monkeypatch.setattr(service, "_instruments", rows, raising=False)
+    return rows
+
+
+@pytest.fixture
+def client(catalogue):
+    return TestClient(app)
+
+
+# ----------------------------------------------------------------------
+# Unclassified instruments are excluded from the selectors
+# ----------------------------------------------------------------------
+
+def test_unclassified_instruments_are_not_offered(catalogue):
+    listed = service.symbol_list(only_traded=True)
+    assert "99" not in [s["symbol"] for s in listed]
+
+
+def test_selector_total_matches_classified_traded_instruments(client):
+    """`total` counts what the user can pick: classified and traded only."""
+    body = client.get("/api/symbols").json()
+    assert body["total"] == 3  # EURUSD, XAUUSD, BTCUSD
+    assert all(s["asset_class"] for s in body["symbols"])
+
+
+def test_symbol_payload_has_no_unclassified_entries(client):
+    body = client.get("/api/symbols").json()
+    assert not [s for s in body["symbols"] if not s["asset_class"]]
+    assert "Unclassified" not in [s["asset_class_label"] for s in body["symbols"]]
+
+
+def test_idle_instruments_still_need_a_class(client):
+    """include_idle adds untraded instruments, but never unclassifiable ones."""
+    body = client.get("/api/symbols?include_idle=true").json()
+    assert body["total"] == 4  # + GBPUSD, which has ticks==0 but a class
+    assert "99" not in [s["symbol"] for s in body["symbols"]]
+
+
+# ----------------------------------------------------------------------
+# The asset-class picker must not collapse when a class is selected
+# ----------------------------------------------------------------------
+
+def test_unknown_asset_class_is_rejected(client):
+    assert client.get("/api/symbols?asset_class=nope").status_code == 400
+
+
+# ----------------------------------------------------------------------
+# Coverage reporting stays truthful
+# ----------------------------------------------------------------------
+
+def test_traded_count_includes_unclassifiable_instruments(catalogue):
+    """`traded_count` reports the snapshot, not just what the pickers show."""
+    assert service.traded_count() == 4
+    assert service.unclassified_count() == 1
+
+
+def test_health_counters_reconcile(client):
+    h = client.get("/api/health").json()
+    assert h["classified_count"] + h["unclassified_count"] == h["symbol_count"]
+    # The unclassifiable instruments are hidden, but still reported.
+    assert h["unclassified_count"] == 1
+
+
+def test_coverage_note_still_mentions_hidden_instruments(catalogue):
+    note = service.coverage_note()
+    assert note and "1 instrument(s)" in note

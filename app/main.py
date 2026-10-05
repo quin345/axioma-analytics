@@ -38,10 +38,16 @@ def health(refresh: bool = Query(False, description="Re-probe the gold endpoint"
     note = None
     if st.connected:
         try:
+            # class_summary now excludes instruments the dimension cannot
+            # classify, because the selectors do. Deriving `traded` from it
+            # would under-report the snapshot and quietly report zero
+            # unclassified while the coverage note still lists them, so the
+            # totals come from the catalogue itself and stay independent of
+            # what the pickers choose to show.
             summary = service.class_summary(only_traded=True)
-            traded = sum(c["count"] for c in summary)
             classes = len(summary)
-            unclassified = sum(c["count"] for c in summary if not c["key"])
+            traded = service.traded_count()
+            unclassified = service.unclassified_count()
             classified = traded - unclassified
             note = service.coverage_note()
         except DataSourceError:

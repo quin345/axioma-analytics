@@ -135,6 +135,15 @@ def status(*, refresh: bool = False) -> Status:
     return _status
 
 
+def traded_count() -> int:
+    """Every instrument with snapshots, classified or not.
+
+    Unlike `_sorted_instruments` this keeps the unclassifiable ones, so it
+    reports the true size of the snapshot rather than what the selectors show.
+    """
+    return sum(1 for i in instruments().values() if i.ticks > 0)
+
+
 def unclassified_count() -> int:
     """Traded instruments the gold dimension does not describe."""
     return sum(1 for i in instruments().values() if i.ticks > 0 and not i.asset_class)
@@ -145,17 +154,17 @@ def coverage_note() -> str | None:
 
     ``agg_dom_book_snapshot`` is shared and accumulates rows from every feed
     that has ever written to it, while ``symbols_icmarkets`` describes only
-    icmarkets. Any other feed's instruments therefore appear as bare ids with
-    no ticker and no asset class - worth saying out loud rather than silently
-    bucketing them as "Unclassified".
+    icmarkets. Any other feed's instruments therefore cannot be named or
+    classified. They are left out of the selectors, so say so rather than
+    leaving the count to be discovered by its absence.
     """
     missing = unclassified_count()
     if not missing:
         return None
     return (
         f"{missing} instrument(s) in the snapshot have no row in "
-        f"symbols_icmarkets, so they show as ids with no ticker or asset class. "
-        f"They come from a feed the icmarkets dimension does not cover."
+        f"symbols_icmarkets and are not shown in the selectors. They come from "
+        f"a feed the icmarkets dimension does not cover."
     )
 
 
@@ -216,7 +225,17 @@ def instruments(*, refresh: bool = False) -> dict[str, Instrument]:
 
 
 def _sorted_instruments(only_traded: bool) -> list[Instrument]:
-    rows = list(instruments().values())
+    """Instruments for the selectors, best-traded first.
+
+    Unclassified instruments are excluded. They carry ticks but no row in the
+    icmarkets dimension, so they have no ticker and no asset class; offering
+    them in the selectors produced a wall of bare ids grouped under
+    "Unclassified" and let a user pick an instrument that cannot be
+    classified at all. The count of such instruments is still reported by
+    `unclassified_count`, so the coverage gap stays visible in the health
+    hints rather than in the pickers.
+    """
+    rows = [i for i in instruments().values() if i.asset_class]
     if only_traded:
         rows = [i for i in rows if i.ticks > 0]
     rows.sort(key=lambda i: (-i.ticks, i.display or i.symbol_id))
