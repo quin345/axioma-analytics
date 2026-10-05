@@ -1,13 +1,15 @@
 # Axioma Analytics
 
-Tick-data microstructure analytics over a single pre-aggregated order-book
-snapshot source, normalised into ticks and rendered as a full microstructure
-dashboard: OHLCV bars, order-flow imbalance, spread evolution, volume-at-price,
-return distribution, drawdown, autocorrelation and large-trade market impact.
+Microstructure analytics over the **production gold database**. Every instrument
+is categorised by asset class using the pipeline's own classification, and the
+dashboard renders OHLCV bars, order-flow imbalance, spread evolution,
+volume-at-price, return distribution, drawdown, autocorrelation and large-trade
+market impact.
 
-Storage internals (warehouse, database, table and endpoint names) are never sent
-to the browser. The API exposes two opaque sources - `live` and `synthetic` - and
-the UI labels them "Live" and "Demo".
+The app talks to exactly one source: `[ctrader_lakehouse].[gold]` on the
+production Fabric SQL analytics endpoint. There is no environment switcher, no
+catalog discovery and no synthetic/demo fallback. Storage internals (endpoint
+host, database, table) are never sent to the browser.
 
 ---
 
@@ -16,53 +18,66 @@ the UI labels them "Live" and "Demo".
 ```bash
 pip install -r requirements.txt
 python run.py             # dashboard on http://127.0.0.1:8000
-python run.py --env prod  # start against the "prod" endpoint
-python run.py --list-envs # show configured endpoints
 ```
-
-If the data source is unreachable the app automatically falls back to the
-synthetic demo source, so the dashboard is always demonstrable.
 
 ---
 
 ## Configuration (`.env`)
 
 ```ini
-# One endpoint per environment (names are free-form; dev/test/prod shown first).
-SQL_ENV="test"                     # which endpoint is active
-SQL_ENDPOINT_DEV="<dev-host>"
-SQL_ENDPOINT_TEST="<test-host>"
+# The production endpoint.
 SQL_ENDPOINT_PROD="<prod-host>"
 
-# Credentials (Entra ID service principal).
+# Entra ID service principal.
 FABRIC_TENANT_ID="<tenant-guid>"
 FABRIC_CLIENT_ID="<app-registration-client-id>"
 FABRIC_CLIENT_SECRET="<client-secret>"
 
-# The single book-snapshot table to read. Resolved server-side only.
-DATA_TABLE="gold.agg_dom_book_snapshot"
+# Gold objects.
+GOLD_DATABASE="ctrader_lakehouse"
+GOLD_SCHEMA="gold"
+SNAPSHOT_TABLE="agg_dom_book_snapshot"
+SYMBOL_TABLES="symbols_pepperstone,symbols_icmarkets"
 
-FABRIC_ALLOW_SYNTHETIC="true"   # demo fallback when the data source is unreachable
 MAX_TICKS="200000"
 ```
 
 `.env` is already git-ignored (see `.env.example` for the template). Never commit
 the secret.
 
-### Environments (dev / test / prod)
+### Asset classification
 
-Any number of Fabric SQL analytics endpoints can be declared as
-`SQL_ENDPOINT_<NAME>`. The active one is chosen in three ways, in priority order:
+The gold layer publishes its own chain, which the app consumes directly rather
+than guessing:
 
-1. **Dashboard** — the *Environment* dropdown (`POST /api/environments`).
-2. **Startup flag** — `python run.py --env prod` (`--list-envs` prints them).
-3. **`.env`** — `SQL_ENV` sets the default when nothing else is chosen.
+```
+gold.symbols_<broker>          symbolId, symbolName, symbolCategoryId, description
+  -> gold.symbols_category_<broker>    symbolCategoryId -> assetClassId
+  -> gold.asset_classes_<broker>       assetClassId    -> name
+```
 
-Switching rebuilds the connection settings and drops every cached catalog /
-symbol / report fragment, so the next request reads from the new endpoint. If
-`SQL_ENV` names an unconfigured environment, the first configured one is used;
-an unknown name passed to the API is rejected with `400`. A legacy single
-`SQL_ANALYTICS_ENDPOINT` still works and is exposed as the `default` environment.
+The broker names nine classes; `app/assets.py` maps them to stable client keys
+and sub-divides FX (majors / crosses / exotics), which the pipeline lumps
+together but a dashboard benefits from:
+
+| Broker class | Client key |
+|---|---|
+| Forex | `fx_major`, `fx_cross`, `fx_exotic` |
+| Metals | `metal` |
+| Oil | `energy` |
+| Commodities | `commodity` |
+| Indices | `index` |
+| Cryptocurrencies | `crypto` |
+| Bonds | `bond` |
+| Futures / Futures Commodities | `future` |
+
+Where the chain has no row — an archive entry, a new listing, a broker whose
+dimension is not published — the classifier falls back to the same cTrader
+signals available in the snapshot (`symbolCategoryId`, the ticker and the
+description), so no instrument silently disappears from the selector. Anything
+still unresolved is reported as `Unclassified`, and `/api/health` says how many
+instruments are affected, because an id with no ticker usually means a broker
+table is missing rather than that the data is bad.
 
 ---
 
@@ -93,55 +108,38 @@ Invoke-RestMethod "https://api.fabric.microsoft.com/v1/workspaces/<workspace-id>
 workspace — the rights this read-only app needs (and it avoids the OneLake
 security filtering that can hide whole tables from `Viewer`).
 
-The service principal needs this role on **every** workspace it reads from, so
-each of `dev_axioma`, `test_axioma` and `prod_axioma` must carry its own
-assignment — adding it to one does not cover the others.
-
-#### Grant it to all three at once
+The service principal needs the role on the workspace it reads from (`prod_axioma`).
+Run the helper while signed in with `az login` as a workspace **Admin**:
 
 ```bash
-python scripts/grant_workspace_access.py            # dev_axioma, test_axioma, prod_axioma
-python scripts/grant_workspace_access.py --dry-run  # preview only
 python scripts/grant_workspace_access.py --list     # show workspaces + ids
+python scripts/grant_workspace_access.py --dry-run  # preview only
+python scripts/grant_workspace_access.py            # apply
 ```
 
 Resolves the principal object ID from `FABRIC_CLIENT_ID`, matches workspaces by
 display name, and is idempotent — it skips workspaces already holding the role,
 updates the role when it differs, and creates the assignment only when missing.
-Run it while signed in with `az login` as a workspace **Admin**. Pass
-`--role Viewer` for a read-only grant, or `--workspaces <name>` to target one.
+Pass `--role Viewer` for a read-only grant, or `--workspaces <name>` to target one.
 
 ---
 
 ## Data source shape
 
-The configured table holds one pre-aggregated row per symbol and timestamp, with
-`best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`, `imbalance_ratio`,
-`vwap_bid`, `vwap_ask`, `vwap_spread` and `rel_spread`. `app/books.py` normalises
-it to the canonical tick frame (`ts | symbol | bid | ask | last | volume`) so every
-dashboard panel works unchanged. The pipeline's own imbalance is used as the
-directional signal; one-sided rows (no best bid or ask) are dropped because they
-cannot produce a mid.
-
-The readers also understand per-level snapshots, raw L2 event deltas and
-conventional tick tables, so the same engine generalises to other shapes.
+`gold.agg_dom_book_snapshot` holds one pre-aggregated row per symbol and
+timestamp, with `best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`,
+`imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread` and `rel_spread`.
+`app/frames.py` normalises it to the canonical tick frame
+(`ts | symbol | bid | ask | last | volume`) so every dashboard panel works
+unchanged. The pipeline's own imbalance is used as the directional signal;
+one-sided rows (no best bid or ask) and crossed rows (`bid >= ask`) are dropped
+because they cannot produce a valid mid.
 
 ### Symbol names
 
-A symbol dimension (`symbolId -> symbolName`) is discovered automatically, so the
-UI shows `BTCUSD`, `ETHUSD`, `EURUSD` instead of raw numeric ids. The dimension
-table's name is likewise never exposed.
-
-### Two correctness guards in the L2 replay
-
-1. **Session reset** - the feed stops overnight and restarts with fresh quote ids.
-   Replaying through a long gap leaves stale levels and produces *crossed books*
-   (observed: 65% of ticks). The book is discarded after `session_gap_seconds`
-   (default 30 min) of silence.
-2. **Crossed-book rejection** - a replay yielding `bid >= ask` is dropped, never
-   emitted as a negative spread.
-
-After the guards: **0 crossed books, 100% positive spreads** on the full replay.
+The per-broker gold dimension supplies `symbolId -> symbolName`, so the UI shows
+`BTCUSD`, `ETHUSD`, `EURUSD` instead of raw numeric ids. Table names are never
+exposed.
 
 ---
 
@@ -149,20 +147,19 @@ After the guards: **0 crossed books, 100% positive spreads** on the full replay.
 
 ```
 app/
-  config.py      .env -> Settings, environment selection (secrets redacted)
+  config.py      .env -> Settings (endpoint, credentials, gold object names)
   auth.py        az CLI / service-principal token minting
-  db.py          connection, table resolution, tick fetch, symbol dimension
-  books.py       readers for book snapshot shapes (+ classification)
-  schema.py      tolerant column mapping -> canonical tick frame
+  db.py          connection, gold queries, snapshot fetch, symbol catalogue
+  frames.py      gold snapshot reader -> canonical tick frame
+  assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
-  synthetic.py   realistic tick generator (fallback/demo)
-  service.py     source resolution, health probing, TTL cache
+  service.py     instrument catalogue, health probing, TTL cache
   main.py        FastAPI app + static dashboard
   static/        dashboard (Chart.js)
 scripts/
-  grant_workspace_access.py   grant the SP a role on dev/test/prod workspaces
+  grant_workspace_access.py   grant the SP a role on the workspace
 tests/
-  test_analytics.py / test_books.py / test_l2.py / test_config.py   no data source required
+  test_analytics.py / test_frames.py / test_assets.py / test_config.py
 ```
 
 The canonical tick frame is:
@@ -171,25 +168,22 @@ The canonical tick frame is:
 ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 ```
 
-`schema.ALIASES` maps many spellings (`bid`, `BidPrice`, `bid_price`, `b`…) onto
-those fields, so most column layouts work without configuration.
-
 ---
 
 ## API
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status and hints (no storage details) |
-| `GET /api/environments` | Selectable endpoints (masked) + the active one |
-| `POST /api/environments?env=` | Switch the active endpoint and re-probe it |
-| `GET /api/sources` | The `live` / `synthetic` sources + symbols |
-| `GET /api/symbols?source=` | Symbols for one source |
+| `GET /api/health?refresh=true` | Connection status, coverage and hints (no storage details) |
+| `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
+| `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
-| `POST /api/query?sql=` | One read-only `SELECT` (schema exploration) |
 
-`/api/analytics` parameters: `source` (`live` or `synthetic`), `symbol`,
-`timeframe`, `window`, `bins`, `limit`, `lookback_days`.
+`/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
+`summary`; omitting `asset_class` returns everything.
+
+`/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
+`lookback_days`. Its `meta` block echoes the symbol's `asset_class`.
 
 ---
 
@@ -226,10 +220,11 @@ those fields, so most column layouts work without configuration.
 python -m pytest tests -q
 ```
 
-Covers column mapping, mid derivation, bar consistency, OFI bounds, volume
-profile mass conservation, drawdown sign, strict JSON serialisability, a
-degenerate flat-price series (guards against divide-by-zero), and environment
-resolution (ordering, selection, blank endpoints, runtime switching, masking).
+Covers snapshot reading (one-sided and crossed books, resting-size volume,
+pipeline imbalance), asset classification from both the broker chain and the
+fallback, production-endpoint resolution, bar consistency, OFI bounds, volume
+profile mass conservation, drawdown sign, strict JSON serialisability, and a
+degenerate flat-price series (guards against divide-by-zero).
 
 ---
 
@@ -237,10 +232,10 @@ resolution (ordering, selection, blank endpoints, runtime switching, masking).
 
 | Symptom | Cause / fix |
 |---|---|
-| `Could not login because the authentication failed (18456)` | SP has no workspace role. Grant **Viewer**. |
+| `Could not login because the authentication failed (18456)` | SP has no workspace role. Grant **Contributor**. |
 | `Invalid value specified for connection string attribute 'PWD'` | Secret missing/blank in `.env`. |
-| `Invalid value ... 'Authentication'` | `Authentication` combined with a token attribute. |
-| `no table matched the tick signature` | Table has no timestamp + bid/ask/last. Check with `scripts/check_connection.py`. |
-| `N of M table(s) are empty` | Ingest pipeline has not written rows yet. |
+| `SQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `SQL_ANALYTICS_ENDPOINT`). |
+| `The production endpoint is not configured` | Same, reached through the API. |
+| `The gold snapshot table is empty` | The ingest pipeline has not written rows yet. |
+| Instruments show as ids with no ticker | That broker's `symbols_<broker>` table is not published; it is listed in `/api/health` hints. |
 | `external policy action ... was denied` | **Viewer** role: OneLake security filters Viewers and hides whole tables. Grant **Contributor**. |
-Until then the **Synthetic** source gives a fully working demo with realistic ticks.
