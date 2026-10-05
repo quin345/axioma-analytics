@@ -116,6 +116,30 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-05 - Data freshness
+
+- [x] `meta.latest_tick` added to `/api/analytics`, the max `ts` actually returned
+- [x] Freshness strip under the controls: 45-minute cadence, latest tick, next
+      refresh, snapshot row count
+- [x] Header gains the last-tick timestamp plus an age badge
+- [x] Age badge goes amber past the 45 minute cadence (`tickage stale`)
+- [x] `REFRESH_MINUTES = 45` in app.js drives the strip and the hint banner
+- [x] Fixed the stale "every hour" wording in the hint banner
+- [x] Verified against live data: a `+08:00` timestamp renders as the correct
+      UTC instant;50min old flags stale; empty meta does not crash
+- [x] `set()` no longer clobbers className when no class is passed
+- [x] `pytest` 133 passed; `node --check` clean
+
+**Notes:**
+- The timestamp is normalised with `toISOString()`, so a `+08:00` offset from
+  the API still displays as UTC. Verified.
+- The cadence is stated as a constant in `app.js`; there is no server-side
+  config for it, so changing the real pipeline interval means editing one line.
+- `latest_tick` describes the loaded window, not the whole table, so it matches
+  the data on screen.
+
+---
+
 ## Open questions
 
 - [ ] Confirm the calendar is right: it is a read-only view of data already in

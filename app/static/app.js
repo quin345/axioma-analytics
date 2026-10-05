@@ -101,8 +101,8 @@ function banner(messages, kind = "warn") {
   // Use a class, not an inline style: an inline border set by bannerErr() would
   // otherwise persist and colour every later "Heads up" banner red.
   el.className = `banner ${kind === "bad" ? "bad" : ""}`;
-  el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Data is updated every hour"}</b>` +
-    (kind === "bad" ? "" : "<p>Snapshots refresh hourly, so results may lag the live book.</p>") +
+  el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Heads up"}</b>` +
+    (kind === "bad" ? "" : `<p>Snapshots refresh every ${REFRESH_MINUTES} minutes, so results may lag the live book.</p>`) +
     "<ul>" + messages.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>";
   el.classList.remove("hidden");
 }
@@ -247,6 +247,74 @@ function renderKpis(s, m) {
   ];
   if (s.total_volume) tiles.push(kpi("Volume", fmt.int(s.total_volume), `${fmt.int(s.large_trades)} large trades`));
   $("kpis").innerHTML = tiles.join("");
+}
+
+/* ---------------- data freshness ---------------- */
+
+/** Ingest cadence for the gold snapshot table, in minutes. */
+const REFRESH_MINUTES = 45;
+
+/** Full UTC stamp: "2026-10-05 11:46:10". */
+function stamp(iso) {
+  if (!iso) return "\u2013";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toISOString().replace("T", " ").slice(0, 19);
+}
+
+/** "4m 12s" / "2h 05m" - how long ago something happened, to the second. */
+function age(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** Wall-clock time the next ingest is expected, given the newest tick. */
+function nextRefresh(lastIso) {
+  const d = lastIso ? new Date(lastIso) : null;
+  if (!d || Number.isNaN(d.getTime())) return null;
+  return new Date(d.getTime() + REFRESH_MINUTES * 60_000);
+}
+
+/**
+ * Publish the newest tick seen in the loaded window.
+ *
+ * `meta.latest_tick` is the max timestamp the analytics query actually
+ * returned, so it describes the data on screen rather than the whole table.
+ * The header badge and the freshness strip both read from here.
+ */
+function renderFreshness(report) {
+  const latest = (report && report.meta && report.meta.latest_tick) || null;
+  const rows = (report && report.meta && report.meta.rows_analysed) || 0;
+  const ageMs = latest ? Date.now() - new Date(latest).getTime() : null;
+  const stampText = stamp(latest);
+  const ageText = age(ageMs);
+
+  // Only touch className when a class is supplied: assigning unconditionally
+  // would strip the styling classes the markup already carries.
+  const set = (id, text, cls) => {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    if (cls) el.className = cls;
+  };
+  set("lastTick", latest ? `Latest tick ${stampText} UTC` : "Latest tick unavailable");
+  // tickAge always gets a class: it must lose a stale highlight once cleared.
+  set("tickAge", ageText ? `${ageText} ago` : "",
+      ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
+  set("fbLastTick", stampText, ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
+
+  const next = nextRefresh(latest);
+  set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
+  set("fbRows", fmt.int(rows));
+  const badge = $("tickAge");
+  if (badge && next) {
+    badge.title = `Last tick ${stampText} UTC. Next refresh expected ${stamp(next.toISOString())} UTC.`;
+  }
 }
 
 /* ---------------- charts ---------------- */
@@ -974,6 +1042,7 @@ async function analyse() {
     renderCalendar(r);
     syncCalendarDetail();
     renderDetails(r);
+    renderFreshness(r);
     renderCoverage(window.__health || {});
   } catch (err) {
     bannerErr(err.message);

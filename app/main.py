@@ -129,6 +129,9 @@ def analytics_report(
     report = analytics.build_report(frame, timeframe=timeframe, window=window, bins=bins)
 
     inst = service.lookup(symbol) if symbol else None
+    # The newest tick actually returned by this query, so the UI can show when
+    # the data on screen arrived rather than when the page was served.
+    latest_tick = None if frame.empty else pd.Timestamp(frame["ts"].max()).isoformat()
     meta = {
         "symbol": symbol or report["summary"].get("symbol"),
         "symbol_name": inst.display if inst else None,
@@ -136,6 +139,7 @@ def analytics_report(
         "asset_class_label": CLASS_LABELS.get(inst.asset_class, "Unclassified") if inst else None,
         "family": inst.family if inst else None,
         "rows_analysed": int(len(frame)),
+        "latest_tick": latest_tick,
         "generated_at": pd.Timestamp.utcnow().isoformat(),
     }
     report["meta"] = meta
