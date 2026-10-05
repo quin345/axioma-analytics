@@ -144,11 +144,31 @@ def analytics_report(
 
 @app.get("/")
 def index() -> Any:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    # The dashboard is assembled from index.html plus app.js. They reference
+    # each other by element id, so a browser that pairs a fresh app.js with a
+    # cached index.html renders controls the script cannot find. Revalidating
+    # both on every load keeps the pair consistent; ETag/Last-Modified still
+    # make the common case a cheap 304.
+    class RevalidatingStatic(StaticFiles):
+        """Static files that must be revalidated on every request."""
+
+        def file_response(self, *args, **kwargs):
+            resp = super().file_response(*args, **kwargs)
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
+
+    app.mount(
+        "/static",
+        RevalidatingStatic(directory=STATIC_DIR),
+        name="static",
+    )
 
 
 @app.exception_handler(DataSourceError)
