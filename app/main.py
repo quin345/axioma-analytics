@@ -90,7 +90,8 @@ def symbols(
     include_idle: bool = Query(False, description="Include instruments with no snapshots"),
 ) -> dict:
     """Instruments with their asset class, grouped for the selector."""
-    groups = service.grouped_symbols(only_traded=not include_idle)
+    only_traded = not include_idle
+    groups = service.grouped_symbols(only_traded=only_traded)
     if family:
         groups = [g for g in groups if g["family"] == family]
     if asset_class:
@@ -98,8 +99,13 @@ def symbols(
         if not groups:
             raise HTTPException(status_code=400, detail=f"Unknown asset class '{asset_class}'.")
 
-    summary = [{k: g[k] for k in ("key", "label", "family", "family_label", "count", "ticks")}
-               for g in groups]
+    # `groups` is narrowed by the filters above, so it cannot also describe the
+    # asset-class picker: rebuilding the dropdown from it would leave a single
+    # option and strand the user. `summary` is always the full rollup.
+    summary = service.class_summary(only_traded=only_traded)
+    if family:
+        keep = {g["key"] for g in groups}
+        summary = [c for c in summary if c["key"] in keep]
     flat = [s for g in groups for s in g["symbols"]]
     return {
         "groups": groups,

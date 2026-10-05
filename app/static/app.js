@@ -163,8 +163,12 @@ async function loadSymbols() {
   const sel = $("assetClass");
   const ac = sel && sel.value;
   const q = ac ? `?asset_class=${encodeURIComponent(ac)}` : "";
-  const { groups, symbols } = await api(`/api/symbols${q}`);
-  fillAssetClasses(groups);
+  const { groups, symbols, summary } = await api(`/api/symbols${q}`);
+  // `groups` is already narrowed to the active asset class, so rebuilding the
+  // class dropdown from it would collapse the list to a single option and
+  // leave the user stuck. `summary` is the full per-class rollup and is what
+  // the picker needs.
+  fillAssetClasses(summary || []);
   fillSymbols(symbols);
 }
 

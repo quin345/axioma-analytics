@@ -72,6 +72,31 @@ def test_idle_instruments_still_need_a_class(client):
 # The asset-class picker must not collapse when a class is selected
 # ----------------------------------------------------------------------
 
+def test_class_summary_is_the_full_rollup_when_unfiltered(client):
+    body = client.get("/api/symbols").json()
+    assert {c["key"] for c in body["summary"]} == {"fx_major", "metal", "crypto"}
+
+
+def test_class_picker_still_lists_every_class_while_filtered(client):
+    """Regression: the picker used to be rebuilt from the filtered groups, so
+    selecting one asset class left it as the only option - unrecoverable
+    without first choosing 'All asset classes'."""
+    unfiltered = client.get("/api/symbols").json()["summary"]
+    expected = {c["key"] for c in unfiltered}
+    for key in expected:
+        body = client.get(f"/api/symbols?asset_class={key}").json()
+        assert {c["key"] for c in body["summary"]} == expected, \
+            f"selecting {key} shrank the asset-class options"
+
+
+def test_filtered_groups_are_still_narrowed(client):
+    """The picker stays complete while the symbol list does narrow."""
+    body = client.get("/api/symbols?asset_class=crypto").json()
+    assert body["total"] == 1
+    assert [s["symbol"] for s in body["symbols"]] == ["3"]
+    assert len(body["groups"]) == 1
+
+
 def test_unknown_asset_class_is_rejected(client):
     assert client.get("/api/symbols?asset_class=nope").status_code == 400
 
