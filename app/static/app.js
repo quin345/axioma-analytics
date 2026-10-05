@@ -95,7 +95,7 @@ function bannerErr(text) {
   banner([text], "bad");
 }
 
-/* ---------------- health + sources ---------------- */
+/* ---------------- health + instrument coverage ---------------- */
 
 async function loadHealth() {
   const h = await api("/api/health?refresh=true");
@@ -105,50 +105,75 @@ async function loadHealth() {
     $("connText").textContent = h.has_data ? "Connected \u00b7 live data" : "Connected \u00b7 no data";
   } else {
     dot.className = "dot bad";
-    $("connText").textContent = h.using_synthetic ? "Offline \u00b7 demo data" : "Offline";
+    $("connText").textContent = "Offline";
   }
-  // Hints are useful even when connected (e.g. "table is empty", "not a tick
-  // table"), so surface them in both states rather than only when offline.
+  // Hints are useful even when connected (empty table, or instruments the
+  // symbol dimension does not cover), so surface them in both states.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
-
-  // Data source panel. Storage internals (table, database, endpoint) are never
-  // sent by the API, so only availability and instrument coverage are shown.
-  const box = $("tables");
-  if (h.connected && h.has_data) {
-    const n = h.symbol_count || 0;
-    box.innerHTML = `<div class="trow">
-      <div><b>Live market data</b>
-        <div class="meta">${n ? n.toLocaleString() + " instruments available" : "loading instruments\u2026"}</div>
-        <div class="meta">Order-book snapshots, normalised into ticks.</div></div>
-      <span class="pill ok">available</span>
-    </div>`;
-  } else {
-    box.innerHTML = `<p class="note">Live data is not available right now. The demo source remains usable.</p>`;
-  }
+  renderCoverage(h);
   return h;
 }
 
-async function loadSources() {
-  const { sources } = await api("/api/sources");
-  const sel = $("source");
-  const prev = sel.value;
-  sel.innerHTML = sources.map((s) =>
-    `<option value="${esc(s.key)}">${esc(s.label)}</option>`).join("");
-  // Keep the current selection when it still exists, otherwise take the first.
-  sel.value = (prev && sources.some((s) => s.key === prev)) ? prev : (sources[0] && sources[0].key) || "";
-  await fillSymbols();
+/** Asset-class mix: one row per class, sized by instrument count. */
+function renderCoverage(h) {
+  const box = $("classes");
+  const tag = $("coverage-tag");
+  if (!box) return;
+  if (!h || !h.connected || !h.has_data) {
+    if (tag) tag.textContent = "";
+    box.innerHTML = `<p class="note">No instrument coverage available.</p>`;
+    return;
+  }
+  if (tag) {
+    tag.textContent = `${h.symbol_count.toLocaleString()} traded \u00b7 ${h.classified_count.toLocaleString()} classified`;
+  }
+  const rows = window.__classSummary;
+  if (!rows || !rows.length) {
+    box.innerHTML = `<p class="note">Loading asset classes\u2026</p>`;
+    return;
+  }
+  const max = Math.max(...rows.map((r) => r.count), 1);
+  box.innerHTML = rows.map((r) => `
+    <div class="classrow">
+      <span class="cname">${esc(r.label)}</span>
+      <span class="cbar"><i style="width:${((r.count / max) * 100).toFixed(1)}%"></i></span>
+      <span class="ccount">${r.count.toLocaleString()}</span>
+    </div>`).join("");
 }
 
-async function fillSymbols() {
+/** Populate the asset-class dropdown from the catalogue groups. */
+function fillAssetClasses(groups) {
+  const sel = $("assetClass");
+  if (!sel) return;
+  const prev = sel.value;
+  const total = groups.reduce((n, g) => n + g.count, 0);
+  sel.innerHTML = `<option value="">All asset classes (${total.toLocaleString()})</option>` +
+    groups.map((g) => `<option value="${esc(g.key)}">${esc(g.label)} (${g.count.toLocaleString()})</option>`).join("");
+  // Keep the current pick when it still exists, otherwise show everything.
+  sel.value = groups.some((g) => g.key === prev) ? prev : "";
+}
+
+async function loadClassSummary() {
+  const data = await api("/api/asset-classes");
+  window.__classSummary = data.summary || [];
+}
+
+/** Load the symbol list, narrowed to the selected asset class. */
+async function loadSymbols() {
+  const sel = $("assetClass");
+  const ac = sel && sel.value;
+  const q = ac ? `?asset_class=${encodeURIComponent(ac)}` : "";
+  const { groups, symbols } = await api(`/api/symbols${q}`);
+  fillAssetClasses(groups);
+  fillSymbols(symbols);
+}
+
+function fillSymbols(symbols) {
   const sel = $("symbol");
-  const src = $("source").value;
-  if (!src) return;
-  const { symbols } = await api(`/api/symbols?source=${encodeURIComponent(src)}`);
   const prev = sel.value;
 
   if (!symbols.length) {
-    // No symbol column: an EMPTY value means "everything".
-    sel.innerHTML = '<option value="">all rows</option>';
+    sel.innerHTML = '<option value="">none available</option>';
     return;
   }
   // Always pick one real symbol. Averaging across symbols would mix
@@ -156,7 +181,8 @@ async function fillSymbols() {
   sel.innerHTML = symbols.map((s) => {
     const id = s.symbol ?? "";
     const name = s.name || "";
-    return `<option value="${esc(id)}">${esc(name || id)}${name ? ` (${esc(id)})` : ""}</option>`;
+    const cls = s.asset_class_label || "Unclassified";
+    return `<option value="${esc(id)}">${esc(name || id)}${name ? ` (${esc(id)})` : ""} \u00b7 ${esc(cls)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
   sel.value = stillThere ? prev : (symbols[0].symbol ?? "");
@@ -169,43 +195,6 @@ async function fillTimeframes(h) {
   $("timeframe").value = "1m";
 }
 
-/* ---------------- environment selection ---------------- */
-
-async function fillEnvironments() {
-  const sel = $("environment");
-  if (!sel) return;
-  const data = await api("/api/environments");
-  const envs = data.environments || [];
-  const prev = sel.value;
-  sel.innerHTML = envs.map((e) =>
-    `<option value="${esc(e.key)}">${esc(e.key)}${e.host ? ` \\u00b7 ${esc(e.host)}` : ""}</option>`
-  ).join("");
-  // Keep the current pick when it still exists, otherwise the active one.
-  const has = envs.some((e) => e.key === prev);
-  sel.value = has ? prev : (data.active || (envs[0] && envs[0].key) || "");
-}
-
-async function selectEnvironment() {
-  const sel = $("environment");
-  if (!sel || !sel.value) return;
-  setLoading(true);
-  try {
-    const r = await fetch(`/api/environments?env=${encodeURIComponent(sel.value)}`, { method: "POST" });
-    if (!r.ok) {
-      let msg = `${r.status}`;
-      try { msg = (await r.json()).detail || msg; } catch (_) {}
-      throw new Error(msg);
-    }
-    // Health, sources/symbols and the report all belong to the new endpoint.
-    await loadHealth();
-    await loadSources();
-    await analyse();
-  } catch (err) {
-    bannerErr(err.message);
-  } finally {
-    setLoading(false);
-  }
-}
 /* ---------------- KPI tiles ---------------- */
 
 function kpi(label, value, hint, cls = "") {
@@ -236,7 +225,7 @@ function renderKpis(s, m) {
 
 function renderCharts(r) {
   const bars = r.ohlcv.bars || [];
-  $("price-tag").textContent = bars.length ? `${r.ohlcv.timeframe} \u00b7 ${bars.length} bars` : "no data";
+  $("bars-tag").textContent = bars.length ? `${r.ohlcv.timeframe} \u00b7 ${bars.length} bars` : "no data";
 
   draw("cPrice", {
     type: "line",
@@ -427,7 +416,6 @@ async function analyse() {
   setLoading(true);
   try {
     const p = new URLSearchParams({
-      source: $("source").value || "synthetic",
       symbol: $("symbol").value || "",
       timeframe: $("timeframe").value || "1m",
       window: $("window").value || 50,
@@ -438,12 +426,7 @@ async function analyse() {
     renderKpis(r.summary, r.microstructure);
     renderCharts(r);
     renderTicks(r.ticks);
-
-    if (r.meta.synthetic) {
-      banner(["Showing SYNTHETIC demo data \u2014 the warehouse source returned no usable ticks."], "warn");
-    } else {
-      hideBanner();
-    }
+    renderPriceTag(r.meta);
   } catch (err) {
     bannerErr(err.message);
     $("kpis").innerHTML =
@@ -454,13 +437,24 @@ async function analyse() {
   }
 }
 
+/** Name the analysed instrument and its asset class above the price chart. */
+function renderPriceTag(meta) {
+  const el = $("price-tag");
+  if (!el || !meta) return;
+  const name = (meta.symbol_name && meta.symbol_name !== meta.symbol)
+    ? `${meta.symbol_name} (${meta.symbol})`
+    : (meta.symbol || "");
+  el.textContent = meta.asset_class_label ? `${name} \u00b7 ${meta.asset_class_label}` : name;
+}
+
 async function init() {
   try {
-    await fillEnvironments();
-    // One health call, reused for both the connection badge and the timeframes.
+    // One health call, reused for the connection badge and the timeframes.
     const health = await loadHealth();
     await fillTimeframes(health);
-    await loadSources();
+    await loadClassSummary();
+    await loadSymbols();
+    renderCoverage(health);
   } catch (err) {
     bannerErr(err.message);
   }
@@ -468,15 +462,17 @@ async function init() {
 }
 
 $("run").addEventListener("click", analyse);
-$("environment").addEventListener("change", selectEnvironment);
-$("source").addEventListener("change", async () => { await fillSymbols(); });
+// Changing the asset class re-filters the symbol list, then re-analyses.
+$("assetClass").addEventListener("change", async () => {
+  try { await loadSymbols(); await analyse(); }
+  catch (err) { bannerErr(err.message); }
+});
 $("refresh").addEventListener("click", async () => {
   setLoading(true);
-  try { await loadHealth(); await loadSources(); await analyse(); }
+  try { await loadHealth(); await loadClassSummary(); await loadSymbols(); await analyse(); }
   catch (err) { bannerErr(err.message); }
   finally { setLoading(false); }
 });
 $("symbol").addEventListener("change", analyse);
 
 document.addEventListener("DOMContentLoaded", init);
-    `Buy ratio ${fmt.pct((ts.buy_ratio ?? 0) * 100, 1)}`;

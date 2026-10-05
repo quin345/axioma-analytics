@@ -25,11 +25,8 @@
 <div id="banner" class="banner hidden"></div>
 
 <section class="controls">
-  <label>Environment
-    <select id="environment" title="SQL analytics endpoint"></select>
-  </label>
-  <label>Source
-    <select id="source"></select>
+  <label>Asset class
+    <select id="assetClass" title="Group instruments by asset class"></select>
   </label>
   <label>Symbol
     <select id="symbol"></select>
@@ -55,7 +52,7 @@
 
   <section class="grid">
     <div class="card span2">
-      <h2>Price &amp; spread <span class="tag" id="price-tag"></span></h2>
+      <h2>Price &amp; spread <span class="tag" id="price-tag"></span> <span class="tag" id="bars-tag"></span></h2>
       <div class="chart tall"><canvas id="cPrice"></canvas></div>
     </div>
 
@@ -127,8 +124,8 @@
   </section>
 
   <section class="card">
-    <h2>Data source</h2>
-    <div id="tables" class="tables"></div>
+    <h2>Instrument coverage <span class="tag" id="coverage-tag"></span></h2>
+    <div id="classes" class="classes"></div>
   </section>
 </main>
 

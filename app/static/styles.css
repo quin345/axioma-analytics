@@ -71,6 +71,15 @@ th:first-child,td:first-child{text-align:left}
 tbody tr:hover{background:rgba(76,154,255,.06)}
 
 .tables{display:flex;flex-direction:column;gap:10px}
+/* Asset-class coverage bars */
+.classes{display:flex;flex-direction:column;gap:7px}
+.classrow{display:grid;grid-template-columns:190px 1fr 56px;align-items:center;gap:12px}
+.classrow .cname{color:var(--muted);font-size:11.5px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.classrow .cbar{height:8px;background:rgba(35,45,66,.75);border-radius:6px;overflow:hidden}
+.classrow .cbar i{display:block;height:100%;background:linear-gradient(90deg,#4c9aff,#8b5cf6);
+  border-radius:6px}
+.classrow .ccount{text-align:right;font-variant-numeric:tabular-nums;font-size:11.5px}
 .trow{display:flex;justify-content:space-between;align-items:center;gap:14px;
   padding:11px 14px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}
 .trow .meta{color:var(--muted);font-size:11.5px;margin-top:3px}
