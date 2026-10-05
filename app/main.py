@@ -1,7 +1,6 @@
 """FastAPI application: static dashboard + JSON analytics API."""
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Any
 
@@ -11,99 +10,102 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, service
-from .config import (active_environment, available_environments, get_settings,
-                     mask_host, set_environment)
-from .db import DataSourceError, connect, query
+from .assets import CLASS_LABELS
+from .config import get_settings
+from .db import DataSourceError
 
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Axioma Analytics",
-    description="Tick-data microstructure analytics.",
-    version="1.0.0",
+    description="Microstructure analytics over the production gold book snapshots.",
+    version="2.0.0",
 )
 
 
 @app.get("/api/health")
-def health(refresh: bool = Query(False, description="Re-probe the data source")) -> dict:
-    """Connection status and actionable hints.
+def health(refresh: bool = Query(False, description="Re-probe the gold endpoint")) -> dict:
+    """Connection status, instrument coverage and hints.
 
-    Storage details (table names, databases, endpoint) are deliberately not
+    Storage internals (endpoint host, database, table) are deliberately not
     exposed: the client only needs to know whether data is available.
     """
     s = get_settings()
     st = service.status(refresh=refresh)
-    # Warm the symbol lookup so the UI can show tickers instead of raw ids.
-    service.symbol_map()
+
+    traded = classified = unclassified = 0
+    classes = 0
+    note = None
+    if st.connected:
+        try:
+            summary = service.class_summary(only_traded=True)
+            traded = sum(c["count"] for c in summary)
+            classes = len(summary)
+            unclassified = sum(c["count"] for c in summary if not c["key"])
+            classified = traded - unclassified
+            note = service.coverage_note()
+        except DataSourceError:
+            pass
+
+    hints = list(st.hints)
+    if note:
+        hints.append(note)
+
     return {
         "app": s.app_name,
-        "environment": active_environment() or "default",
         "connected": st.connected,
-        "synthetic_available": s.allow_synthetic,
-        "using_synthetic": bool(not st.connected and s.allow_synthetic),
         "server_time": st.server_time,
+        "latest_snapshot": st.latest,
+        "row_count": st.row_count,
         "error": st.error,
-        "hints": st.hints,
-        "has_data": bool(st.tables),
-        "symbol_count": len(service._SYMBOL_LABELS),
+        "hints": hints,
+        "has_data": bool(traded),
+        "symbol_count": traded,
+        "classified_count": classified,
+        "unclassified_count": unclassified,
+        "asset_class_count": classes,
         "timeframes": list(analytics.TIMEFRAMES),
     }
 
 
-@app.get("/api/environments")
-def environments() -> dict:
-    """The selectable SQL analytics endpoints and which one is active.
-
-    Endpoint hosts are masked: enough of the unique segment is shown to tell
-    environments apart without exposing the storage location in full.
-    """
-    envs = available_environments()
-    active = active_environment() or (next(iter(envs)) if envs else "")
+@app.get("/api/asset-classes")
+def asset_classes() -> dict:
+    """The asset-class taxonomy plus a per-class instrument rollup."""
     return {
-        "active": active,
-        "environments": [
-            {"key": name, "host": mask_host(host), "active": name == active}
-            for name, host in envs.items()
-        ],
+        "classes": service.taxonomy(),
+        "summary": service.class_summary(only_traded=True) if service.status().connected else [],
     }
 
 
-@app.post("/api/environments")
-def select_environment(
-    env: str = Query(..., description="Environment key to activate, e.g. dev/test/prod"),
-) -> dict:
-    """Switch the active SQL analytics endpoint and re-probe it."""
-    try:
-        active = set_environment(env)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    service.reset()
-    st = service.status(refresh=True)
-    return {"active": active, "connected": st.connected, "error": st.error, "hints": st.hints}
-
-
-@app.get("/api/sources")
-def sources() -> dict:
-    """Available data sources, with their symbols."""
-    out = []
-    for src in service.sources():
-        d = src.to_dict()
-        rows = [{"symbol": s} for s in service.symbols_for(src.key)]
-        d["symbols"] = service.decorate(rows)
-        out.append(d)
-    return {"sources": out}
-
-
 @app.get("/api/symbols")
-def symbols(source: str = Query("live")) -> dict:
-    rows = [{"symbol": s} for s in service.symbols_for(source)]
-    return {"symbols": service.decorate(rows)}
+def symbols(
+    asset_class: str | None = Query(None, description="Filter to one asset class"),
+    family: str | None = Query(None, description="Filter to one broad family"),
+    include_idle: bool = Query(False, description="Include instruments with no snapshots"),
+) -> dict:
+    """Instruments with their asset class, grouped for the selector."""
+    groups = service.grouped_symbols(only_traded=not include_idle)
+    if family:
+        groups = [g for g in groups if g["family"] == family]
+    if asset_class:
+        groups = [g for g in groups if g["key"] == asset_class]
+        if not groups:
+            raise HTTPException(status_code=400, detail=f"Unknown asset class '{asset_class}'.")
+
+    summary = [{k: g[k] for k in ("key", "label", "family", "family_label", "count", "ticks")}
+               for g in groups]
+    flat = [s for g in groups for s in g["symbols"]]
+    return {
+        "groups": groups,
+        "summary": summary,
+        "symbols": flat,
+        "total": len(flat),
+    }
 
 
 @app.get("/api/analytics")
 def analytics_report(
-    source: str = Query("live", description="'live' or 'synthetic'"),
-    symbol: str | None = Query(None),
+    symbol: str | None = Query(None, description="Symbol id; omit to analyse all"),
     timeframe: str = Query("1m"),
     window: int = Query(50, ge=2, le=5000),
     bins: int = Query(60, ge=10, le=300),
@@ -112,43 +114,24 @@ def analytics_report(
 ) -> dict:
     """Full analytics bundle for one symbol."""
     try:
-        frame, is_synthetic = service.load_ticks_cached(source, symbol, limit, lookback_days)
+        frame = service.load_ticks_cached(symbol, limit, lookback_days)
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     report = analytics.build_report(frame, timeframe=timeframe, window=window, bins=bins)
-    report["meta"] = {
-        "source": "live" if source == "live" else "demo",
+
+    inst = service.lookup(symbol) if symbol else None
+    meta = {
         "symbol": symbol or report["summary"].get("symbol"),
-        "symbol_name": service.symbol_map().get(str(symbol)) if symbol else None,
-        "synthetic": is_synthetic,
+        "symbol_name": inst.display if inst else None,
+        "asset_class": inst.asset_class if inst else None,
+        "asset_class_label": CLASS_LABELS.get(inst.asset_class, "Unclassified") if inst else None,
+        "family": inst.family if inst else None,
         "rows_analysed": int(len(frame)),
         "generated_at": pd.Timestamp.utcnow().isoformat(),
     }
+    report["meta"] = meta
     return report
-
-
-_SELECT_ONLY = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
-_FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|truncate|merge|grant|exec|execute)\b", re.IGNORECASE)
-
-
-@app.post("/api/query")
-def ad_hoc_query(sql: str = Query(..., description="A single read-only SELECT statement")) -> dict:
-    """Run one read-only SELECT. Useful for exploring an unfamiliar schema."""
-    if not _SELECT_ONLY.match(sql or ""):
-        raise HTTPException(status_code=400, detail="Only SELECT / WITH queries are allowed.")
-    if _FORBIDDEN.search(sql):
-        raise HTTPException(status_code=400, detail="Only read-only queries are allowed.")
-    try:
-        with connect() as conn:
-            df = query(conn, sql)
-    except DataSourceError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        "columns": list(df.columns),
-        "rows": df.head(200).astype(object).where(pd.notna(df.head(200)), None).to_dict("records"),
-        "row_count": int(len(df)),
-    }
 
 
 @app.get("/")
