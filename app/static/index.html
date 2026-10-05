@@ -75,11 +75,22 @@
   <section class="block" aria-labelledby="h-overview">
     <h2 class="block-title" id="h-overview">Overview</h2>
     <div class="grid">
-      <div class="card span2" data-card="price">
+      <!-- Full row: the price chart is the anchor of the page, and its bar count
+           and window range read better across the full width. -->
+      <div class="card span3" data-card="price">
         <h2 class="card-title">Price, volume &amp; spread <span class="tag" id="price-tag"></span> <span class="tag" id="bars-tag"></span></h2>
         <div class="chart tall"><canvas id="cPrice"></canvas></div>
         <p class="note" id="price-note"></p>
         <div class="card-detail" data-detail-for="price" hidden></div>
+      </div>
+
+      <!-- Two thirds of the row below: the episode timeline joins three
+           timestamps with arrows, which overflows a single column. -->
+      <div class="card span2" data-card="dd">
+        <h2 class="card-title">Drawdown</h2>
+        <div class="chart"><canvas id="cDD"></canvas></div>
+        <p class="note" id="dd-note"></p>
+        <div class="card-detail" data-detail-for="dd" hidden></div>
       </div>
 
       <div class="card" data-card="hist">
@@ -87,13 +98,6 @@
         <div class="chart"><canvas id="cHist"></canvas></div>
         <p class="note" id="hist-note"></p>
         <div class="card-detail" data-detail-for="hist" hidden></div>
-      </div>
-
-      <div class="card" data-card="dd">
-        <h2 class="card-title">Drawdown</h2>
-        <div class="chart"><canvas id="cDD"></canvas></div>
-        <p class="note" id="dd-note"></p>
-        <div class="card-detail" data-detail-for="dd" hidden></div>
       </div>
     </div>
   </section>

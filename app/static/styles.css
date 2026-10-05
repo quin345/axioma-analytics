@@ -63,7 +63,12 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:18px 20px;display:flex;flex-direction:column;min-width:0}
 .card.span2{grid-column:span 2}
-@media (max-width:900px){.card.span2{grid-column:span 1}}
+.card.span3{grid-column:span 3}
+/* The grid holds 3 columns only down to a 1340px viewport (420px minimum
+   track + 16px gaps + 48px page padding); below that it drops to 2, so a
+   span3 must collapse first or it would overflow the row. */
+@media (max-width:1339px){.card.span3{grid-column:span 2}}
+@media (max-width:900px){.card.span3,.card.span2{grid-column:span 1}}
 
 /* Every card is a clickable disclosure: the header is the control. */
 .card[data-card]{cursor:pointer;transition:border-color .14s ease,background .14s ease}
@@ -86,11 +91,19 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
   margin:0 0 10px;font-weight:600}
 .card-detail h3 + h3{margin-top:18px}
 .card-detail p.explain{margin:0 0 14px;font-size:12.5px;line-height:1.6;color:var(--muted)}
-.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:2px 22px;margin:0}
+/* 300px minimum keeps wide values (drawdown episode timelines, hour-by-hour
+   rows) on one line in the full-width cards without crowding the narrow ones. */
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 22px;margin:0}
 .dl div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;
   border-bottom:1px solid rgba(35,45,66,.5);font-size:12.5px}
-.dl dt{color:var(--muted);white-space:nowrap}
-.dl dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.dl dt{color:var(--muted);white-space:nowrap;flex:0 0 auto}
+.dl dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;
+  /* A wide value (a drawdown episode timeline joins three timestamps with
+     arrows) cannot fit beside its label. Wrapping inside the value keeps the
+     row intact, where nowrap made it spill out of the card. */
+  white-space:normal;overflow-wrap:anywhere;line-height:1.45;
+  /* Absorbs the slack so the value hugs the right edge, even when wrapped. */
+  margin-left:auto}
 
 .chart{position:relative;height:260px}
 .chart.tall{height:360px}

@@ -78,6 +78,44 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-05 - Drawdown card overflow
+
+- [x] `dd` card spans a full grid row (`span3`) instead of one column
+- [x] Added `.card.span3` with responsive collapse (3 -> 2 at 1400px, -> 1 at 900px)
+- [x] `.dl dd` no longer `nowrap`: a wide value wraps inside its own cell
+- [x] `.dl dt` pinned with `flex:0 0 auto`, `.dl dd` given `margin-left:auto`
+      so a wrapped value still hugs the right edge
+- [x] `.dl` min column 230px -> 300px to give wide values more room
+- [x] Verified against live data: episode timelines are ~79 chars / ~521px
+- [x] `node --check` clean; `pytest` 133 passed
+
+**Notes:**
+- Root cause was `white-space:nowrap` on `.dl dd`, not the card width alone.
+  Widening alone would have hidden it; both were needed.
+- Full-width row avoids an empty grid cell, since price (span2) + hist (span1)
+  already fills the row above.
+- Other cards benefit from the `.dl` fix too (hour-by-hour, episode timelines).
+
+---
+
+## 2026-10-05 - Overview block re-layout
+
+- [x] `price` takes the full row (`span3`), so the anchor chart is full width
+- [x] Row below: `dd` at 2/3 (`span2`), `hist` at 1/3
+- [x] Reordered the markup so the grid flows: price, drawdown, return distribution
+- [x] Fixed the `span3` breakpoint: was 1400px, correct value is 1339px
+- [x] Verified card order and spans served by the app; `pytest` 133 passed
+
+**Notes:**
+- The grid keeps 3 columns down to a 1340px viewport (420px min track + 16px
+  gaps + 48px padding); below that it drops to 2, so `span3` collapses first.
+  At the old 1400px breakpoint, `span3` would have overflowed a 2-column grid
+  between 1340 and 1400px.
+- The drawdown card stays at 2/3, which keeps its episode timeline readable
+  now that `.dl dd` wraps rather than spills.
+
+---
+
 ## Open questions
 
 - [ ] Confirm the calendar is right: it is a read-only view of data already in
