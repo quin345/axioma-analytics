@@ -73,6 +73,21 @@ async function api(path) {
 
 function setLoading(on) { $("loading").classList.toggle("hidden", !on); }
 
+/**
+ * Read a control's value, falling back when the element is absent.
+ *
+ * The page is assembled from two separately cached files (index.html and
+ * app.js). If a browser serves a newer app.js against an older cached HTML, a
+ * control this build expects simply does not exist, and reading `.value` off
+ * null threw "Cannot read properties of null (reading 'value')" -- reported as
+ * a connection problem even though the API was fine. Defaults keep the
+ * dashboard working on whatever controls the served HTML does have.
+ */
+function val(id, fallback = "") {
+  const el = $(id);
+  return el ? el.value : fallback;
+}
+
 function hideBanner() {
   const el = $("banner");
   el.className = "banner";   // reset any state classes (and clear inline border colour)
@@ -175,6 +190,7 @@ async function loadSymbols() {
 
 function fillSymbols(symbols) {
   const sel = $("symbol");
+  if (!sel) return;
   const prev = sel.value;
 
   if (!symbols.length) {
@@ -195,9 +211,11 @@ function fillSymbols(symbols) {
 
 async function fillTimeframes(h) {
   const health = h || (await api("/api/health"));
-  $("timeframe").innerHTML = health.timeframes
+  const sel = $("timeframe");
+  if (!sel) return;
+  sel.innerHTML = health.timeframes
     .map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
-  $("timeframe").value = "1m";
+  sel.value = "1m";
 }
 
 /* ---------------- KPI tiles ---------------- */
@@ -417,15 +435,15 @@ function renderTicks(rows) {
 
 async function analyse() {
   const btn = $("run");
-  btn.disabled = true;
+  if (btn) btn.disabled = true;
   setLoading(true);
   try {
     const p = new URLSearchParams({
-      symbol: $("symbol").value || "",
-      timeframe: $("timeframe").value || "1m",
-      window: $("window").value || 50,
-      limit: $("limit").value || 50000,
-      lookback_hours: $("lookback").value || 24,
+      symbol: val("symbol"),
+      timeframe: val("timeframe", "1m") || "1m",
+      window: val("window", 50) || 50,
+      limit: val("limit", 50000) || 50000,
+      lookback_hours: val("lookback", 24) || 24,
     });
     const r = await api(`/api/analytics?${p}`);
     renderKpis(r.summary, r.microstructure);
@@ -437,7 +455,7 @@ async function analyse() {
     $("kpis").innerHTML =
       `<div class="kpi"><div class="label">Error</div><div class="value err">${esc(err.message)}</div></div>`;
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
     setLoading(false);
   }
 }
@@ -466,18 +484,22 @@ async function init() {
   await analyse();
 }
 
-$("run").addEventListener("click", analyse);
+// on() tolerates a control the served HTML does not have, so a stale
+// HTML/JS mix degrades to a working subset instead of killing the whole page.
+function on(id, ev, fn) { const el = $(id); if (el) el.addEventListener(ev, fn); }
+
+on("run", "click", analyse);
 // Changing the asset class re-filters the symbol list, then re-analyses.
-$("assetClass").addEventListener("change", async () => {
+on("assetClass", "change", async () => {
   try { await loadSymbols(); await analyse(); }
   catch (err) { bannerErr(err.message); }
 });
-$("refresh").addEventListener("click", async () => {
+on("refresh", "click", async () => {
   setLoading(true);
   try { await loadHealth(); await loadClassSummary(); await loadSymbols(); await analyse(); }
   catch (err) { bannerErr(err.message); }
   finally { setLoading(false); }
 });
-$("symbol").addEventListener("change", analyse);
+on("symbol", "change", analyse);
 
 document.addEventListener("DOMContentLoaded", init);
