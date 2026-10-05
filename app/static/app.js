@@ -86,8 +86,9 @@ function banner(messages, kind = "warn") {
   // Use a class, not an inline style: an inline border set by bannerErr() would
   // otherwise persist and colour every later "Heads up" banner red.
   el.className = `banner ${kind === "bad" ? "bad" : ""}`;
-  el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Heads up"}</b><ul>` +
-    messages.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>";
+  el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Data is updated every hour"}</b>` +
+    (kind === "bad" ? "" : "<p>Snapshots refresh hourly, so results may lag the live book.</p>") +
+    "<ul>" + messages.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>";
   el.classList.remove("hidden");
 }
 
