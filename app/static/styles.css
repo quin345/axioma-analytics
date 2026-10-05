@@ -42,32 +42,94 @@ button.ghost{background:transparent;border-color:var(--line);color:var(--muted)}
 button.ghost:hover{color:var(--fg);border-color:var(--accent)}
 button:disabled{opacity:.5;cursor:not-allowed}
 
-main{padding:20px 24px 60px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:12px;margin-bottom:18px}
-.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
+
+/* Section headings give the page a readable top-to-bottom shape instead of
+   one undifferentiated wall of cards. */
+.block{margin-bottom:34px}
+.block-title{font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--accent);margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line)}
+.stack{display:grid;gap:16px;grid-template-columns:1fr}
+
+.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;margin-bottom:26px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
 .kpi .label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
-.kpi .value{font-size:21px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums}
-.kpi .hint{font-size:11px;color:var(--muted);margin-top:3px}
+.kpi .value{font-size:22px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums;
+  line-height:1.15}
+.kpi .hint{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.45}
 .up{color:var(--up)} .down{color:var(--down)}
 
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(400px,1fr));gap:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:18px 20px;display:flex;flex-direction:column;min-width:0}
 .card.span2{grid-column:span 2}
 @media (max-width:900px){.card.span2{grid-column:span 1}}
-.chart{position:relative;height:250px}
-.chart.tall{height:340px}
-.chart.short{height:200px}
-.note{color:var(--muted);font-size:11.5px;margin:10px 0 0}
-.tag{font-size:10px;background:var(--panel2);border:1px solid var(--line);
-  padding:2px 7px;border-radius:6px;color:var(--muted);letter-spacing:.03em}
 
-.tablewrap{max-height:340px;overflow:auto;border-radius:9px;border:1px solid var(--line)}
+/* Every card is a clickable disclosure: the header is the control. */
+.card[data-card]{cursor:pointer;transition:border-color .14s ease,background .14s ease}
+.card[data-card]:hover{border-color:#31405e}
+.card[data-card]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.card.open{border-color:var(--accent);background:var(--panel2)}
+.card-title{font-size:13px;margin:0 0 14px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--muted);display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  /* keep the chevron clear of the tag that follows the title text */
+  position:relative;padding-right:20px}
+.card-title::after{content:"";position:absolute;right:2px;top:50%;width:7px;height:7px;
+  margin-top:-5px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;
+  transform:rotate(45deg);transition:transform .16s ease;opacity:.65}
+.card.open .card-title::after{transform:rotate(-135deg);margin-top:-2px}
+.card.open .card-title{color:var(--fg)}
+
+/* Expanded detail body */
+.card-detail{margin-top:16px;padding-top:15px;border-top:1px solid var(--line)}
+.card-detail h3{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+  margin:0 0 10px;font-weight:600}
+.card-detail h3 + h3{margin-top:18px}
+.card-detail p.explain{margin:0 0 14px;font-size:12.5px;line-height:1.6;color:var(--muted)}
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:2px 22px;margin:0}
+.dl div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;
+  border-bottom:1px solid rgba(35,45,66,.5);font-size:12.5px}
+.dl dt{color:var(--muted);white-space:nowrap}
+.dl dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+
+.chart{position:relative;height:260px}
+.chart.tall{height:360px}
+.chart.short{height:210px}
+.note{color:var(--muted);font-size:12px;margin:12px 0 0;line-height:1.55}
+.tag{font-size:10px;background:var(--panel2);border:1px solid var(--line);
+  padding:2px 7px;border-radius:6px;color:var(--muted);letter-spacing:.03em;
+  text-transform:none;font-weight:500}
+
+/* Calendar */
+.calbar{display:flex;align-items:center;gap:10px;margin:12px 0 14px}
+.callabel{font-size:13.5px;min-width:190px;text-align:center;font-variant-numeric:tabular-nums}
+button.ghost.sm{padding:6px 12px;font-size:12px}
+.calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+.calhead{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;
+  text-align:center;padding:4px 0}
+.calday{position:relative;aspect-ratio:1/.82;border:1px solid var(--line);border-radius:9px;
+  background:var(--panel2);display:flex;flex-direction:column;justify-content:space-between;
+  padding:7px 8px;color:var(--fg);font-family:inherit;font-size:12px;cursor:pointer;
+  text-align:left;overflow:hidden}
+.calday:hover{border-color:var(--accent)}
+.calday.empty{visibility:hidden}
+.calday.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+.calday.today .cnum{color:var(--accent);font-weight:700}
+.calday .cnum{font-variant-numeric:tabular-nums;font-weight:600}
+.calday .cticks{font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.calday .cbar{position:absolute;left:0;right:0;bottom:0;height:3px;
+  background:linear-gradient(90deg,#4c9aff,#22d3a7)}
+.calday.up .cbar{background:var(--up)}
+.calday.down .cbar{background:var(--down)}
+
+.tablewrap{max-height:360px;overflow:auto;border-radius:9px;border:1px solid var(--line)}
 table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
 th{position:sticky;top:0;background:var(--panel2);text-align:right;padding:9px 12px;
   color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);white-space:nowrap}
 td{text-align:right;padding:7px 12px;border-bottom:1px solid rgba(35,45,66,.5);white-space:nowrap}
 th:first-child,td:first-child{text-align:left}
 tbody tr:hover{background:rgba(76,154,255,.06)}
+th{cursor:default}
 
 .tables{display:flex;flex-direction:column;gap:10px}
 /* Asset-class coverage bars */

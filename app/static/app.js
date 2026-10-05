@@ -115,6 +115,9 @@ function bannerErr(text) {
 
 async function loadHealth() {
   const h = await api("/api/health?refresh=true");
+  // Kept for the expanded Instrument-coverage card, which reads feed totals
+  // that /api/analytics does not return.
+  window.__health = h;
   const dot = $("connDot");
   if (h.connected) {
     dot.className = "dot ok";
@@ -199,11 +202,13 @@ function fillSymbols(symbols) {
   }
   // Always pick one real symbol. Averaging across symbols would mix
   // incomparable price scales and produce meaningless statistics.
+  // Show the readable ticker and asset class. The raw symbolId stays the option
+  // value (the API needs it) but is kept out of the visible label.
   sel.innerHTML = symbols.map((s) => {
     const id = s.symbol ?? "";
-    const name = s.name || "";
+    const label = s.name || id;
     const cls = s.asset_class_label || "Unclassified";
-    return `<option value="${esc(id)}">${esc(name || id)}${name ? ` (${esc(id)})` : ""} \u00b7 ${esc(cls)}</option>`;
+    return `<option value="${esc(id)}">${esc(label)} \u00b7 ${esc(cls)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
   sel.value = stillThere ? prev : (symbols[0].symbol ?? "");
@@ -412,6 +417,29 @@ const sp = r.microstructure.spread || [];
     options: baseOpts({ scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } },
       y: { grid: { color: "rgba(35,45,66,.55)" } } } }),
   });
+  setNote("large", lt.length
+    ? `${fmt.int(lt.length)} trades above p95 volume`
+    : "No trades above the p95 volume threshold");
+
+  // Footnotes for the cards that previously had none, so every chart states
+  // its own headline number without needing to be expanded.
+  setNote("price", `${r.ohlcv.timeframe} bars \u00b7 ${fmt.time(r.summary.start)} \u2192 ${fmt.time(r.summary.end)}`);
+  setNote("spread", `${fmt.n(r.summary.avg_spread, 3)} bps avg \u00b7 p95 ${fmt.n(r.summary.p95_spread, 3)}`);
+  setNote("iarr", `Mean gap ${fmt.n(r.summary.avg_interarrival_ms, 1)} ms \u00b7 median ${fmt.n(r.summary.median_interarrival_ms, 1)} ms`);
+  setNote("vol", `Window ${fmt.int(r.rolling.window)} ticks`);
+  setNote("hour", (() => {
+    const hours = (r.hourly || {}).hourly || [];
+    if (!hours.length) return "No hourly data";
+    const top = hours.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0))[0];
+    return `Busiest ${String(top.hour).padStart(2, "0")}:00 UTC \u00b7 ${fmt.int(top.ticks)} ticks`;
+  })());
+  setNote("ticks", `${fmt.int((r.ticks || []).length)} rows shown`);
+}
+
+/** Write a card footnote, tolerating HTML that predates the element. */
+function setNote(key, text) {
+  const el = document.querySelector(`.card[data-card="${key}"] .note`);
+  if (el) el.textContent = text;
 }
 
 function renderTicks(rows) {
@@ -431,6 +459,499 @@ function renderTicks(rows) {
       return `<td>${fmt.num(v)}</td>`;
     }).join("")}</tr>`).join("") + "</tbody>";
 }
+/* ---------------- expandable cards ---------------- */
+
+/** One definition row. Values are pre-formatted strings. */
+/** One definition row list. Tolerates a missing/null pair list. */
+function dl(pairs) {
+  const rows = (pairs || []).filter(([, v]) => v !== null && v !== undefined && v !== "");
+  if (!rows.length) return "";
+  return `<dl class="dl">${rows.map(([k, v]) =>
+    `<div><dt>${esc(k)}</dt><dd>${v}</dd></div>`).join("")}</dl>`;
+}
+
+/** A detail block: optional heading, prose, then label/value rows. */
+function block(title, prose, pairs) {
+  const body = dl(pairs);
+  if (!prose && !body) return "";
+  return `${title ? `<h3>${esc(title)}</h3>` : ""}` +
+    (prose ? `<p class="explain">${prose}</p>` : "") + body;
+}
+
+/** The last point of a series, or null. */
+function last(series, key) {
+  const v = series && series.length ? series[series.length - 1][key] : null;
+  return v === null || v === undefined ? null : v;
+}
+
+/** Mean of one numeric field across a series, or null. */
+function mean(series, key) {
+  const vs = (series || []).map((p) => Number(p[key])).filter((n) => Number.isFinite(n));
+  return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+}
+
+/** Highest and lowest point of a series, or nulls. */
+function extremes(series, key) {
+  const vs = (series || []).map((p) => Number(p[key])).filter((n) => Number.isFinite(n));
+  return vs.length ? { max: Math.max(...vs), min: Math.min(...vs) } : { max: null, min: null };
+}
+
+/**
+ * Detail copy for every expandable card, keyed by the card's data-card value.
+ *
+ * Each entry returns the full body for that card; an empty string leaves the
+ * card chart-only. Numbers are formatted in the same place as the prose, so
+ * the two cannot drift apart.
+ */
+const DETAILS = {
+  price: (r) => {
+    const s = r.summary, b = r.ohlcv || {};
+    return block("Session",
+      "Mid price on the right axis, traded volume on the left, resampled into " +
+      `${esc(b.timeframe || "")} bars. Each bar aggregates every tick in its interval.`,
+      [["Timeframe", esc(b.timeframe || "\u2013")],
+       ["Bars", fmt.int((b.bars || []).length)],
+       ["Window start", esc(fmt.time(s.start))],
+       ["Window end", esc(fmt.time(s.end))],
+       ["Sessions", fmt.int((s.session_span || []).length)],
+       ["Open / close", `${fmt.px(s.open)} / ${fmt.px(s.close)}`],
+       ["High / low", `${fmt.px(s.high)} / ${fmt.px(s.low)}`],
+       ["VWAP", fmt.px(s.vwap)],
+       ["Mean / stdev mid", `${fmt.px(s.mean_mid)} / ${fmt.px(s.std_mid)}`],
+       ["Change", `${fmt.px(s.change)} (${fmt.pct(s.change_pct)})`],
+       ["Total volume", fmt.int(s.total_volume)],
+       ["Avg tick size", fmt.num(s.avg_tick_size)]]) +
+      block("Coverage",
+        "How much history the lookback actually returned. Fewer ticks than expected " +
+        "usually means a quiet instrument rather than a missing feed.",
+        [["Rows analysed", fmt.int(r.meta && r.meta.rows_analysed)],
+         ["Duration", `${fmt.n(s.duration_seconds / 3600, 2)} h`],
+         ["Ticks / minute", fmt.n(s.ticks_per_minute, 1)],
+         ["Realised vol", `${fmt.n(s.realized_vol_bps, 2)} bps`],
+         ["Annualised vol", `${fmt.n(s.annualised_vol_pct, 1)}%`]]);
+  },
+
+  ofi: (r) => {
+    const ts = r.microstructure.trade_sign || {};
+    const ofi = r.microstructure.order_flow || [];
+    return block("How it is measured",
+      "Aggressive volume signed by tick direction, normalised to \u00b11. Bars above " +
+      "zero mean buyers lifted the offer more than sellers hit the bid.", [
+        ["Buy ticks", fmt.int(ts.buy_ticks)],
+        ["Sell ticks", fmt.int(ts.sell_ticks)],
+        ["Unchanged", fmt.int(ts.unchanged_ticks)],
+        ["Buy ratio", fmt.pct((ts.buy_ratio ?? 0) * 100, 1)],
+        ["Sell ratio", fmt.pct((ts.sell_ratio ?? 0) * 100, 1)],
+        ["Net imbalance", fmt.pct((ts.imbalance ?? 0) * 100, 1)],
+        ["Latest reading", fmt.n(last(ofi, "imbalance"), 3)],
+        ["Window mean", fmt.n(mean(ofi, "imbalance"), 3)],
+      ]);
+  },
+
+  depth: (r) => {
+    const d = r.depth || { available: false };
+    if (!d.available) return "";
+    const im = d.imbalance_series || [];
+    return block("Resting size",
+      "Depth is only present for snapshot or level-based sources. A bid share above " +
+      "50% means more resting size sits on the buy side than on the offer.", [
+        ["Avg bid depth", fmt.int(d.avg_bid_depth)],
+        ["Avg ask depth", fmt.int(d.avg_ask_depth)],
+        ["Max bid depth", fmt.int(d.max_bid_depth)],
+        ["Max ask depth", fmt.int(d.max_ask_depth)],
+        ["Bid share", fmt.pct((d.avg_imbalance_share ?? 0) * 100, 1)],
+        ["Bid levels", fmt.n(d.avg_levels_bid, 1)],
+        ["Ask levels", fmt.n(d.avg_levels_ask, 1)],
+        ["Latest imbalance", fmt.n(last(im, "v"), 3)],
+      ]);
+  },
+
+  profile: (r) => {
+    const p = r.volume_profile || {};
+    const va = p.value_area;
+    const hvn = p.high_volume_nodes || [];
+    const rows = hvn.map((n) => [fmt.px(n.price), `${fmt.int(n.volume)} \u00b7 ${fmt.int(n.ticks)} ticks`]);
+    return block("Support and resistance",
+      "Volume is bucketed by traded price. The point of control is the busiest price; " +
+      "the value area is the narrow band holding 70% of all volume. High-volume " +
+      "nodes are candidate support or resistance levels.", [
+        ["Point of control", fmt.px(p.poc)],
+        ["Value area low", va ? fmt.px(va[0]) : null],
+        ["Value area high", va ? fmt.px(va[1]) : null],
+        ["Bins", fmt.int((p.bins || []).length)],
+      ]) + (hvn.length ? block("High-volume nodes", null, rows) : "");
+  },
+
+  hist: (r) => {
+    const st = (r.distribution || {}).stats || {};
+    return block("Higher moments",
+      "Per-tick returns in basis points. Excess kurtosis above zero means fat tails: " +
+      "large moves are more common than a normal distribution would predict. A high " +
+      "Jarque-Bera statistic likewise rejects normality.", [
+        ["Mean", `${fmt.n(st.mean_bps, 3)} bps`],
+        ["Std dev", `${fmt.n(st.std_bps, 3)} bps`],
+        ["Median", `${fmt.n(st.median_bps, 3)} bps`],
+        ["Min / max", `${fmt.n(st.min_bps, 2)} / ${fmt.n(st.max_bps, 2)}`],
+        ["1% / 99%", `${fmt.n(st.p01_bps, 2)} / ${fmt.n(st.p99_bps, 2)}`],
+        ["Skew", fmt.n(st.skew, 3)],
+        ["Excess kurtosis", fmt.n(st.excess_kurtosis, 3)],
+        ["Jarque-Bera", fmt.n(st.jarque_bera, 1)],
+        ["Bullish ratio", fmt.pct((st.bullish_ratio ?? 0) * 100, 1)],
+      ]);
+  },
+
+  vol: (r) => {
+    const rv = r.rolling.volatility || [];
+    const ex = extremes(rv, "v");
+    return block("Rolling window",
+      `Annualised realised volatility over a rolling window of ${fmt.int(r.rolling.window)} ` +
+      "ticks. It rises into turbulent stretches and flattens when the book is quiet.", [
+        ["Window", `${fmt.int(r.rolling.window)} ticks`],
+        ["Latest", `${fmt.n(last(rv, "v"), 2)}%`],
+        ["Window mean", `${fmt.n(mean(rv, "v"), 2)}%`],
+        ["Min / max", `${fmt.n(ex.min, 2)}% / ${fmt.n(ex.max, 2)}%`],
+        ["Points", fmt.int(rv.length)],
+      ]);
+  },
+
+  dd: (r) => {
+    const d = r.drawdown || {};
+    const eps = d.episodes || [];
+    const rows = eps.map((e, i) => [
+      `#${i + 1} \u00b7 ${fmt.pct(e.depth_pct, 2)}`,
+      `${fmt.time(e.peak_ts)} \u2192 ${fmt.time(e.trough_ts)}` +
+        (e.recovered_ts ? ` \u2192 ${fmt.time(e.recovered_ts)}` : " \u00b7 unrecovered"),
+    ]);
+    return block("Worst episodes",
+      "Drawdown is measured from the running peak. The deepest episodes are listed " +
+      "first; an unrecovered trough means the window ends below its prior high.", [
+        ["Max drawdown", fmt.pct(d.max_drawdown_pct, 2)],
+        ["Episodes", fmt.int(eps.length)],
+      ]) + (rows.length ? block("Episode timeline", null, rows) : "");
+  },
+
+  spread: (r) => {
+    const sp = r.microstructure.spread || [];
+    const ex = extremes(sp, "spread_bps");
+    const s = r.summary;
+    return block("Quoted cost",
+      "Spread in basis points at each tick. Wider quotes mean a more expensive round " +
+      "trip, whether or not liquidity was actually taken.", [
+        ["Latest", `${fmt.n(last(sp, "spread_bps"), 3)} bps`],
+        ["Series mean", `${fmt.n(mean(sp, "spread_bps"), 3)} bps`],
+        ["Min / max", `${fmt.n(ex.min, 3)} / ${fmt.n(ex.max, 3)} bps`],
+        ["Window average", `${fmt.n(s.avg_spread, 3)} bps`],
+        ["Median", `${fmt.n(s.median_spread, 3)} bps`],
+        ["95th percentile", `${fmt.n(s.p95_spread, 3)} bps`],
+        ["Observations", fmt.int(sp.length)],
+      ]);
+  },
+
+  iarr: (r) => {
+    const ia = r.microstructure.interarrival || [];
+    const ex = extremes(ia, "ms");
+    const s = r.summary;
+    return block("Arrival intensity",
+      "Time between consecutive ticks. Short gaps mean an active, liquid market; long " +
+      "gaps usually mark a session break or a quiet instrument.", [
+        ["Latest", `${fmt.n(last(ia, "ms"), 0)} ms`],
+        ["Series mean", `${fmt.n(mean(ia, "ms"), 1)} ms`],
+        ["Min / max", `${fmt.n(ex.min, 1)} / ${fmt.n(ex.max, 0)} ms`],
+        ["Window average", `${fmt.n(s.avg_interarrival_ms, 1)} ms`],
+        ["Median", `${fmt.n(s.median_interarrival_ms, 1)} ms`],
+        ["Longest gap", `${fmt.n(s.max_interarrival_ms, 0)} ms`],
+      ]);
+  },
+
+  hour: (r) => {
+    const hr = (r.hourly || {}).hourly || [];
+    if (!hr.length) return block("", "No hourly breakdown available for this window.", null);
+    const busiest = hr.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0))[0];
+    const mostVol = hr.slice().sort((a, b) => (b.volatility_bps ?? -1) - (a.volatility_bps ?? -1))[0];
+    const quiet = hr.slice().sort((a, b) => (a.ticks || 0) - (b.ticks || 0))[0];
+    const hh = (n) => `${String(n).padStart(2, "0")}:00`;
+    const rows = hr.map((h) => [hh(h.hour),
+      `${fmt.int(h.ticks)} ticks \u00b7 ${fmt.n(h.volatility_bps, 2)} bps vol`]);
+    return block("Daily shape",
+      "Activity and directional bias by hour of day, UTC. The busiest hour is when the " +
+      "instrument is most worth trading; the quietest is when spreads usually widen.", [
+        ["Busiest hour", `${hh(busiest.hour)} \u00b7 ${fmt.int(busiest.ticks)} ticks`],
+        ["Quietest hour", `${hh(quiet.hour)} \u00b7 ${fmt.int(quiet.ticks)} ticks`],
+        ["Most volatile hour", `${hh(mostVol.hour)} \u00b7 ${fmt.n(mostVol.volatility_bps, 2)} bps`],
+        ["Hours with data", fmt.int(hr.length)],
+      ]) + block("Hour by hour", null, rows);
+  },
+
+  acf: (r) => {
+    const b = r.behaviour || {};
+    const acf = b.autocorrelation || [];
+    const ex = extremes(acf, "acf");
+    const regime = b.hurst === null || b.hurst === undefined ? "unknown"
+      : b.hurst > 0.55 ? "trending" : b.hurst < 0.45 ? "mean-reverting" : "random walk";
+    const lag1 = (acf.find((a) => a.lag === 1) || {}).acf;
+    const vr = b.variance_ratio || [];
+    return block("Price behaviour",
+      "Autocorrelation measures whether a return predicts the next one. An efficiency " +
+      "ratio near 1 means the price travels in a straight line; near 0 means it chops " +
+      "back and forth. Hurst classifies the series overall.", [
+        ["Lag-1 autocorrelation", fmt.n(lag1, 4)],
+        ["Autocorr min / max", `${fmt.n(ex.min, 3)} / ${fmt.n(ex.max, 3)}`],
+        ["Efficiency ratio", fmt.n(b.efficiency_ratio, 4)],
+        ["Hurst exponent", `${fmt.n(b.hurst, 3)} \u00b7 ${regime}`],
+        ["Lags computed", fmt.int(acf.length)],
+      ]) + (vr.length ? block("Variance ratios",
+        "A ratio above 1 at lag k means the price drifts more over k steps than " +
+        "random-walk variance alone would predict.", vr.slice(0, 10).map((v) =>
+          [`Lag ${v.lag}`, fmt.n(v.vr ?? v.variance_ratio, 3)])) : "");
+  },
+
+  large: (r) => {
+    const lt = r.microstructure.large_trades || [];
+    const rows = lt.slice(-10).reverse().map((t) => [
+      `${fmt.time(t.t)} \u00b7 ${t.direction}`,
+      `${fmt.int(t.volume)} @ ${fmt.px(t.price)} \u2192 ${fmt.n(t.impact_bps_1tick, 2)} bps`,
+    ]);
+    return block("Impact",
+      "A trade above the 95th-percentile volume, plotted by how far the mid moved on " +
+      "the following tick. Positive means the trade pushed price up.", [
+        ["Threshold (p95 volume)", fmt.int(r.microstructure.large_trade_threshold)],
+        ["Large trades", fmt.int(r.summary.large_trades)],
+        ["Mean 1-tick impact", `${fmt.n(mean(lt, "impact_bps_1tick"), 3)} bps`],
+        ["Latest impact", `${fmt.n(last(lt, "impact_bps_1tick"), 3)} bps`],
+      ]) + (rows.length ? block("Most recent", null, rows) : "");
+  },
+
+  ticks: (r) => {
+    const s = r.summary;
+    return block("About this table",
+      "The raw book snapshots behind every chart above, newest first. Dir is the sign " +
+      "of the mid change on that tick.", [
+        ["Rows shown", fmt.int((r.ticks || []).length)],
+        ["Session start", esc(fmt.time(s.start))],
+        ["Session end", esc(fmt.time(s.end))],
+        ["Ticks in window", fmt.int(s.ticks)],
+        ["Buy / sell / flat", `${fmt.int(s.buy_ticks)} / ${fmt.int(s.sell_ticks)} / ${fmt.int(s.unchanged_ticks)}`],
+        ["Columns", "ts, bid, ask, mid, volume, spread_bps, tick_dir"],
+      ]);
+  },
+
+  coverage: () => {
+    const rows = window.__classSummary || [];
+    const h = window.__health || {};
+    const top = rows.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0)).slice(0, 5)
+      .map((c) => [esc(c.label), `${fmt.int(c.count)} instruments \u00b7 ${fmt.int(c.ticks)} ticks`]);
+    return block("Feed scope",
+      "Instruments are grouped by asset class from the gold symbol dimension; the " +
+      "family field collapses those into broader groups.", [
+        ["Traded instruments", fmt.int(h.symbol_count)],
+        ["Classified", fmt.int(h.classified_count)],
+        ["Unclassified", fmt.int(h.unclassified_count)],
+        ["Asset classes", fmt.int(h.asset_class_count)],
+        ["Snapshot rows", fmt.int(h.row_count)],
+        ["Latest snapshot", esc(fmt.time(h.latest_snapshot))],
+      ]) + (top.length ? block("Busiest classes", null, top) : "");
+  },
+
+  calendar: () => {
+    const day = window.__calSelected;
+    if (!day) return "";
+    return block(`Selected day \u00b7 ${day.date}`,
+      "One calendar day of the loaded window, aggregated from the same bars the price " +
+      "chart is drawn from.", [
+        ["Date", esc(day.date)],
+        ["Bars", fmt.int(day.bars)],
+        ["Ticks", fmt.int(day.ticks)],
+        ["Volume", fmt.int(day.volume)],
+        ["Open / close", `${fmt.px(day.open)} / ${fmt.px(day.close)}`],
+        ["High / low", `${fmt.px(day.high)} / ${fmt.px(day.low)}`],
+        ["Change", fmt.pct(day.change)],
+        ["Mean spread", `${fmt.n(day.spread, 3)} bps`],
+        ["Busiest hour", esc(day.busiest)],
+      ]);
+  },
+};
+
+/** Fill every card's detail body from one report. */
+function renderDetails(r) {
+  document.querySelectorAll(".card-detail[data-detail-for]").forEach((el) => {
+    const build = DETAILS[el.dataset.detailFor];
+    el.innerHTML = build ? build(r) : "";
+  });
+}
+
+/**
+ * Toggle a card between its compact and expanded form.
+ *
+ * The whole card is the hit target, but a click that lands inside the detail
+ * body (text selection, a control) must not collapse it again.
+ */
+function toggleCard(card) {
+  const open = card.classList.toggle("open");
+  card.querySelectorAll(".card-detail").forEach((d) => { d.hidden = !open; });
+  card.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+/** Make every card keyboard- and mouse-operable as a disclosure. */
+function wireCards() {
+  document.querySelectorAll(".card[data-card]").forEach((card) => {
+    card.setAttribute("tabindex", "0");
+    card.setAttribute("role", "button");
+    card.setAttribute("aria-expanded", "false");
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".card-detail, a, button, input, select")) return;
+      toggleCard(card);
+    });
+    card.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      toggleCard(card);
+    });
+  });
+}
+
+/* ---------------- calendar ---------------- */
+
+const MONTHS = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+
+/** UTC day key. Grouping is UTC throughout, to match the hourly profile. */
+function dayKey(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+/** Collapse the OHLCV bars into one record per UTC day, for the calendar. */
+function calendarDays(r) {
+  const out = new Map();
+  for (const b of (r.ohlcv || {}).bars || []) {
+    const key = dayKey(b.t);
+    if (!key) continue;
+    const d = out.get(key) || {
+      date: key, bars: 0, ticks: 0, volume: 0, open: b.o, close: b.c,
+      high: b.h, low: b.l, spreadSum: 0, spreadN: 0, hours: new Map(),
+    };
+    d.bars += 1;
+    d.ticks += b.n || 0;
+    d.volume += b.v || 0;
+    if (d.open === null || d.open === undefined) d.open = b.o;
+    d.close = b.c;
+    d.high = d.high === null || d.high === undefined ? b.h : Math.max(d.high, b.h);
+    d.low = d.low === null || d.low === undefined ? b.l : Math.min(d.low, b.l);
+    if (b.spread !== null && b.spread !== undefined) { d.spreadSum += b.spread; d.spreadN += 1; }
+    const h = new Date(b.t).getUTCHours();
+    d.hours.set(h, (d.hours.get(h) || 0) + (b.n || 0));
+    out.set(key, d);
+  }
+  return [...out.values()].map((d) => {
+    let busiest = null;
+    for (const [h, n] of d.hours) if (busiest === null || n > busiest[1]) busiest = [h, n];
+    return {
+      ...d,
+      spread: d.spreadN ? d.spreadSum / d.spreadN : null,
+      change: d.open ? (d.close - d.open) / d.open * 100 : null,
+      busiest: busiest ? `${String(busiest[0]).padStart(2, "0")}:00` : null,
+    };
+  }).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+const cal = { days: [], selected: null };
+
+/** Paint the month grid for the currently selected day. */
+function renderMonth() {
+  const box = $("calendar");
+  const label = $("calLabel");
+  const first = cal.days[0];
+  const lastDay = cal.days[cal.days.length - 1];
+  const [year, month] = (cal.selected || first.date).split("-").map(Number);
+  const byDate = new Map(cal.days.map((d) => [d.date, d]));
+  const maxTicks = Math.max(...cal.days.map((d) => d.ticks || 0), 1);
+  if (label) {
+    label.textContent = `${MONTHS[month - 1]} ${year}` +
+      (first.date === lastDay.date ? "" : ` \u00b7 ${first.date} \u2192 ${lastDay.date}`);
+  }
+
+  const cells = [];
+  const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const today = dayKey(new Date().toISOString());
+  for (let i = 0; i < firstDow; i += 1) cells.push(`<div class="calday empty" aria-hidden="true"></div>`);
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const key = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const d = byDate.get(key);
+    if (!d) { cells.push(`<div class="calday empty" aria-hidden="true"></div>`); continue; }
+    const dir = d.change === null || d.change === undefined ? "" : (d.change >= 0 ? "up" : "down");
+    const width = Math.max(((d.ticks || 0) / maxTicks) * 100, 4);
+    cells.push(
+      `<button class="calday ${dir}${key === today ? " today" : ""}${key === cal.selected ? " sel" : ""}" ` +
+      `data-date="${key}" title="${esc(key)} \u00b7 ${fmt.int(d.ticks)} ticks">` +
+      `<span class="cnum">${day}</span><span class="cticks">${fmt.int(d.ticks)}</span>` +
+      `<span class="cbar" style="width:${width.toFixed(1)}%"></span></button>`);
+  }
+
+  box.innerHTML = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    .map((d) => `<div class="calhead" role="columnheader">${d}</div>`).join("") + cells.join("");
+  box.querySelectorAll(".calday[data-date]").forEach((b) => {
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cal.selected = b.dataset.date;
+      renderMonth();
+      syncCalendarDetail();
+    });
+  });
+}
+
+function renderCalendar(r) {
+  const box = $("calendar");
+  if (!box) return;
+  cal.days = calendarDays(r);
+  const tag = $("cal-tag");
+  if (tag) {
+    tag.textContent = cal.days.length
+      ? `${cal.days.length} day${cal.days.length === 1 ? "" : "s"} in window`
+      : "no data";
+  }
+  if (!cal.days.length) {
+    box.innerHTML = `<p class="note">No calendar days in the selected window. Widen the lookback.</p>`;
+    const label = $("calLabel");
+    if (label) label.textContent = "\u2013";
+    return;
+  }
+  // Default to the last day that actually carries data rather than to "today",
+  // which usually falls outside a lookback measured in hours.
+  if (!cal.selected || !cal.days.some((d) => d.date === cal.selected)) {
+    cal.selected = cal.days[cal.days.length - 1].date;
+  }
+  renderMonth();
+}
+
+/** Step the cursor a whole month, keeping the selection on a loaded day. */
+function shiftMonth(delta) {
+  if (!cal.days.length) return;
+  const [y, m, d] = cal.selected.split("-").map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1 + delta, 1));
+  const prefix = `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
+  const key = `${prefix}-${String(d).padStart(2, "0")}`;
+  if (cal.days.some((x) => x.date === key)) cal.selected = key;
+  else {
+    // No data on that exact day: fall back to the first loaded day of the month.
+    const opts = cal.days.filter((x) => x.date.startsWith(prefix));
+    if (opts.length) cal.selected = opts[0].date;
+  }
+  renderMonth();
+  syncCalendarDetail();
+}
+
+/** Refresh only the calendar card's detail body from the current selection. */
+function syncCalendarDetail() {
+  const card = document.querySelector('.card[data-card="calendar"]');
+  const el = card && card.querySelector(".card-detail");
+  if (!el) return;
+  window.__calSelected = cal.days.find((x) => x.date === cal.selected) || null;
+  el.innerHTML = DETAILS.calendar ? DETAILS.calendar(null) : "";
+}
+
 /* ---------------- orchestration ---------------- */
 
 async function analyse() {
@@ -450,6 +971,10 @@ async function analyse() {
     renderCharts(r);
     renderTicks(r.ticks);
     renderPriceTag(r.meta);
+    renderCalendar(r);
+    syncCalendarDetail();
+    renderDetails(r);
+    renderCoverage(window.__health || {});
   } catch (err) {
     bannerErr(err.message);
     $("kpis").innerHTML =
@@ -464,10 +989,10 @@ async function analyse() {
 function renderPriceTag(meta) {
   const el = $("price-tag");
   if (!el || !meta) return;
-  const name = (meta.symbol_name && meta.symbol_name !== meta.symbol)
-    ? `${meta.symbol_name} (${meta.symbol})`
-    : (meta.symbol || "");
-  el.textContent = meta.asset_class_label ? `${name} \u00b7 ${meta.asset_class_label}` : name;
+  // Only the display name and class are shown; the raw symbolId is an internal
+  // join key and adds nothing for a reader.
+  el.textContent = [meta.symbol_name || meta.symbol || "", meta.asset_class_label || ""]
+    .filter(Boolean).join(" \u00b7 ");
 }
 
 async function init() {
@@ -501,5 +1026,16 @@ on("refresh", "click", async () => {
   finally { setLoading(false); }
 });
 on("symbol", "change", analyse);
+on("calPrev", "click", () => shiftMonth(-1));
+on("calNext", "click", () => shiftMonth(1));
+on("calToday", "click", () => {
+  // Jump to the most recent loaded day; "today" is usually outside the window.
+  if (cal.days.length) cal.selected = cal.days[cal.days.length - 1].date;
+  renderMonth();
+  syncCalendarDetail();
+});
 
-document.addEventListener("DOMContentLoaded", init);
+document.addEventListener("DOMContentLoaded", () => {
+  wireCards();
+  init();
+});

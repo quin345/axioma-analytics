@@ -4,6 +4,14 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>AXIOMA</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<!-- Raster fallbacks: older browsers, bookmark bars, and iOS home screens. -->
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256" />
+<link rel="icon" href="/static/icon-32.png" type="image/png" sizes="32x32" />
+<link rel="icon" href="/static/icon-180.png" type="image/png" sizes="180x180" />
+<link rel="apple-touch-icon" href="/static/icon-180.png" />
+<link rel="mask-icon" href="/static/favicon.svg" color="#4c9aff" />
+<meta name="theme-color" content="#0b0f17" />
 <link rel="stylesheet" href="/static/styles.css" />
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 </head>
@@ -62,84 +70,138 @@
 </section>
 
 <main>
-  <section id="kpis" class="kpis"></section>
+  <section id="kpis" class="kpis" aria-label="Headline metrics"></section>
 
-  <section class="grid">
-    <div class="card span2">
-      <h2>Price &amp; spread <span class="tag" id="price-tag"></span> <span class="tag" id="bars-tag"></span></h2>
-      <div class="chart tall"><canvas id="cPrice"></canvas></div>
-    </div>
+  <section class="block" aria-labelledby="h-overview">
+    <h2 class="block-title" id="h-overview">Overview</h2>
+    <div class="grid">
+      <div class="card span2" data-card="price">
+        <h2 class="card-title">Price, volume &amp; spread <span class="tag" id="price-tag"></span> <span class="tag" id="bars-tag"></span></h2>
+        <div class="chart tall"><canvas id="cPrice"></canvas></div>
+        <p class="note" id="price-note"></p>
+        <div class="card-detail" data-detail-for="price" hidden></div>
+      </div>
 
-    <div class="card">
-      <h2>Order-flow imbalance</h2>
-      <div class="chart"><canvas id="cOFI"></canvas></div>
-      <p class="note" id="ofi-note"></p>
-    </div>
+      <div class="card" data-card="hist">
+        <h2 class="card-title">Return distribution</h2>
+        <div class="chart"><canvas id="cHist"></canvas></div>
+        <p class="note" id="hist-note"></p>
+        <div class="card-detail" data-detail-for="hist" hidden></div>
+      </div>
 
-    <div class="card" id="depthCard">
-      <h2>Book depth &amp; imbalance</h2>
-      <div class="chart"><canvas id="cDepth"></canvas></div>
-      <p class="note" id="depth-note"></p>
-    </div>
-
-    <div class="card">
-      <h2>Volume at price</h2>
-      <div class="chart"><canvas id="cProfile"></canvas></div>
-      <p class="note" id="profile-note"></p>
-    </div>
-
-    <div class="card">
-      <h2>Return distribution</h2>
-      <div class="chart"><canvas id="cHist"></canvas></div>
-      <p class="note" id="hist-note"></p>
-    </div>
-
-    <div class="card">
-      <h2>Rolling volatility</h2>
-      <div class="chart"><canvas id="cVol"></canvas></div>
-    </div>
-
-    <div class="card">
-      <h2>Drawdown</h2>
-      <div class="chart"><canvas id="cDD"></canvas></div>
-      <p class="note" id="dd-note"></p>
-    </div>
-
-    <div class="card">
-      <h2>Bid-ask spread (bps)</h2>
-      <div class="chart"><canvas id="cSpread"></canvas></div>
-    </div>
-
-    <div class="card">
-      <h2>Tick inter-arrival</h2>
-      <div class="chart"><canvas id="cIArr"></canvas></div>
-    </div>
-
-    <div class="card">
-      <h2>Activity by hour (UTC)</h2>
-      <div class="chart"><canvas id="cHour"></canvas></div>
-    </div>
-
-    <div class="card">
-      <h2>Return autocorrelation</h2>
-      <div class="chart"><canvas id="cAcf"></canvas></div>
-      <p class="note" id="acf-note"></p>
-    </div>
-
-    <div class="card span2">
-      <h2>Large trades &amp; market impact</h2>
-      <div class="chart short"><canvas id="cLarge"></canvas></div>
+      <div class="card" data-card="dd">
+        <h2 class="card-title">Drawdown</h2>
+        <div class="chart"><canvas id="cDD"></canvas></div>
+        <p class="note" id="dd-note"></p>
+        <div class="card-detail" data-detail-for="dd" hidden></div>
+      </div>
     </div>
   </section>
 
-  <section class="card">
-    <h2>Latest ticks</h2>
-    <div class="tablewrap"><table id="tickTable"><thead></thead><tbody></tbody></table></div>
+  <section class="block" aria-labelledby="h-micro">
+    <h2 class="block-title" id="h-micro">Microstructure</h2>
+    <div class="grid">
+      <div class="card" data-card="ofi">
+        <h2 class="card-title">Order-flow imbalance</h2>
+        <div class="chart"><canvas id="cOFI"></canvas></div>
+        <p class="note" id="ofi-note"></p>
+        <div class="card-detail" data-detail-for="ofi" hidden></div>
+      </div>
+
+      <div class="card" data-card="depth" id="depthCard">
+        <h2 class="card-title">Book depth &amp; imbalance</h2>
+        <div class="chart"><canvas id="cDepth"></canvas></div>
+        <p class="note" id="depth-note"></p>
+        <div class="card-detail" data-detail-for="depth" hidden></div>
+      </div>
+
+      <div class="card" data-card="acf">
+        <h2 class="card-title">Return autocorrelation</h2>
+        <div class="chart"><canvas id="cAcf"></canvas></div>
+        <p class="note" id="acf-note"></p>
+        <div class="card-detail" data-detail-for="acf" hidden></div>
+      </div>
+
+      <div class="card span2" data-card="large">
+        <h2 class="card-title">Large trades &amp; market impact</h2>
+        <div class="chart short"><canvas id="cLarge"></canvas></div>
+        <div class="card-detail" data-detail-for="large" hidden></div>
+      </div>
+    </div>
   </section>
 
-  <section class="card">
-    <h2>Instrument coverage <span class="tag" id="coverage-tag"></span></h2>
-    <div id="classes" class="classes"></div>
+  <section class="block" aria-labelledby="h-liq">
+    <h2 class="block-title" id="h-liq">Liquidity &amp; activity</h2>
+    <div class="grid">
+      <div class="card" data-card="profile">
+        <h2 class="card-title">Volume at price</h2>
+        <div class="chart"><canvas id="cProfile"></canvas></div>
+        <p class="note" id="profile-note"></p>
+        <div class="card-detail" data-detail-for="profile" hidden></div>
+      </div>
+
+      <div class="card" data-card="spread">
+        <h2 class="card-title">Bid-ask spread (bps)</h2>
+        <div class="chart"><canvas id="cSpread"></canvas></div>
+        <p class="note" id="spread-note"></p>
+        <div class="card-detail" data-detail-for="spread" hidden></div>
+      </div>
+
+      <div class="card" data-card="iarr">
+        <h2 class="card-title">Tick inter-arrival</h2>
+        <div class="chart"><canvas id="cIArr"></canvas></div>
+        <p class="note" id="iarr-note"></p>
+        <div class="card-detail" data-detail-for="iarr" hidden></div>
+      </div>
+
+      <div class="card" data-card="hour">
+        <h2 class="card-title">Activity by hour (UTC)</h2>
+        <div class="chart"><canvas id="cHour"></canvas></div>
+        <p class="note" id="hour-note"></p>
+        <div class="card-detail" data-detail-for="hour" hidden></div>
+      </div>
+
+      <div class="card" data-card="vol">
+        <h2 class="card-title">Rolling volatility</h2>
+        <div class="chart"><canvas id="cVol"></canvas></div>
+        <p class="note" id="vol-note"></p>
+        <div class="card-detail" data-detail-for="vol" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-data">
+    <h2 class="block-title" id="h-data">Data</h2>
+    <div class="stack">
+      <div class="card" data-card="ticks">
+        <h2 class="card-title">Latest ticks</h2>
+        <div class="tablewrap"><table id="tickTable"><thead></thead><tbody></tbody></table></div>
+        <div class="card-detail" data-detail-for="ticks" hidden></div>
+      </div>
+
+      <div class="card" data-card="coverage">
+        <h2 class="card-title">Instrument coverage <span class="tag" id="coverage-tag"></span></h2>
+        <div id="classes" class="classes"></div>
+        <div class="card-detail" data-detail-for="coverage" hidden></div>
+      </div>
+    </div>
+  </section>
+<section class="block" aria-labelledby="h-cal">
+    <h2 class="block-title" id="h-cal">Calendar</h2>
+    <div class="stack">
+      <div class="card" data-card="calendar">
+        <h2 class="card-title">Data calendar <span class="tag" id="cal-tag"></span></h2>
+        <p class="note">Every day in the current window, sized by tick count. Click a day to see its detail.</p>
+        <div class="calbar">
+          <button id="calPrev" class="ghost sm" aria-label="Previous day">&larr;</button>
+          <strong id="calLabel" class="callabel">&ndash;</strong>
+          <button id="calNext" class="ghost sm" aria-label="Next day">&rarr;</button>
+          <button id="calToday" class="ghost sm">Today</button>
+        </div>
+        <div id="calendar" class="calendar" role="grid" aria-label="Tick activity by day"></div>
+        <div class="card-detail" data-detail-for="calendar" hidden></div>
+      </div>
+    </div>
   </section>
 </main>
 
