@@ -14,6 +14,9 @@ import pandas as pd
 
 from .db import TICK_COLUMNS
 
+# Resting sizes arrive in units of 100 lots; canonical volume is in lots.
+VOLUME_SCALE = 100.0
+
 
 def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
     """Normalise raw gold snapshots into the canonical tick frame.
@@ -33,10 +36,12 @@ def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
 
     bid_depth = pd.to_numeric(raw.get("total_bid"), errors="coerce")
     ask_depth = pd.to_numeric(raw.get("total_ask"), errors="coerce")
-    # Top-of-book resting size is the only "volume" a snapshot guarantees.
+    # Top-of-book resting size is the only "volume" a snapshot guarantees. The
+    # feed reports it in units of 100 lots, so scale to lots before anything
+    # downstream (KPI totals, volume profile, imbalance) reads it.
     out["bid_depth"] = bid_depth
     out["ask_depth"] = ask_depth
-    out["volume"] = bid_depth.fillna(0.0) + ask_depth.fillna(0.0)
+    out["volume"] = (bid_depth.fillna(0.0) + ask_depth.fillna(0.0)) / VOLUME_SCALE
     out["last"] = (out["bid"] + out["ask"]) / 2.0
 
     for name in ("imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask",

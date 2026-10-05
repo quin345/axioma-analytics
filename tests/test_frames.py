@@ -40,9 +40,10 @@ def test_keeps_pipeline_imbalance_and_spread():
     assert out["imbalance_ratio"].iloc[0] == pytest.approx(0.25)
 
 
-def test_volume_is_resting_size():
+def test_volume_is_resting_size_in_lots():
+    """The feed reports resting size per 100 lots; canonical volume is lots."""
     out = from_snapshot(_rows())
-    assert out["volume"].iloc[0] == pytest.approx(160.0)
+    assert out["volume"].iloc[0] == pytest.approx(1.6)
     assert out["bid_depth"].iloc[0] == pytest.approx(100.0)
     assert out["ask_depth"].iloc[0] == pytest.approx(60.0)
 
