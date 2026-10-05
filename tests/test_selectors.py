@@ -118,6 +118,7 @@ def test_health_counters_reconcile(client):
     assert h["unclassified_count"] == 1
 
 
-def test_coverage_note_still_mentions_hidden_instruments(catalogue):
-    note = service.coverage_note()
-    assert note and "1 instrument(s)" in note
+def test_coverage_note_is_no_longer_surfaced(client):
+    """The hidden-instrument warning was removed from the health hints."""
+    hints = client.get("/api/health").json()["hints"]
+    assert not any("symbols_icmarkets" in hint for hint in hints)

@@ -35,7 +35,6 @@ def health(refresh: bool = Query(False, description="Re-probe the gold endpoint"
 
     traded = classified = unclassified = 0
     classes = 0
-    note = None
     if st.connected:
         try:
             # class_summary now excludes instruments the dimension cannot
@@ -49,13 +48,10 @@ def health(refresh: bool = Query(False, description="Re-probe the gold endpoint"
             traded = service.traded_count()
             unclassified = service.unclassified_count()
             classified = traded - unclassified
-            note = service.coverage_note()
         except DataSourceError:
             pass
 
     hints = list(st.hints)
-    if note:
-        hints.append(note)
 
     return {
         "app": s.app_name,
