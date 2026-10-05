@@ -200,7 +200,7 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ```bash
 curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
-curl -sk https://axiomanalytics.info/api/health            # through nginx
+curl -sk https://app.axiomanalytics.info/api/health            # through nginx
 ```
 
 `connected: true` with a non-zero `row_count` means the full path works.
@@ -214,6 +214,33 @@ sudo systemctl restart axioma.service
 
 `/etc/nginx/sites-available/axiomanalytics.bak` keeps the previous proxy
 config for reference.
+
+The certificate covers exactly two names — `axiomanalytics.info` and
+`app.axiomanalytics.info`. `app` is a CNAME to the bare domain in DNS.
+**`www.axiomanalytics.info` is not on the certificate.** It is reserved for
+other use and has no DNS record pointing here. Do not add it to the renewal
+command — Let's Encrypt HTTP-01 validation needs to resolve the name, so the
+issuance would fail and take the working certificate down with it.
+
+Renew with only the two certified names:
+
+```bash
+sudo certbot certonly --nginx -d axiomanalytics.info -d app.axiomanalytics.info --expand
+```
+
+`www` still has an nginx block, but it only exists to catch requests that
+arrive with that `Host` before DNS is repointed. It serves the `app`
+certificate and 301s to `https://app.axiomanalytics.info` rather than
+returning 444, which browsers rendered as a connection/privacy error. A
+browser will still flag a cert-name mismatch on `www` itself — that is
+expected and unavoidable until either the name is added to the certificate
+or DNS for `www` is pointed somewhere else. Once DNS is repointed, delete the
+block.
+
+`Strict-Transport-Security: max-age=31536000` is set on the HTTPS servers
+without `includeSubDomains` or `preload`: those directives would apply to
+`www`, which cannot be validated, so including them would make the warning
+sticky and un-dismissable.
 
 ---
 
