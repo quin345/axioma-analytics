@@ -5,8 +5,8 @@ endpoint. Two kinds of object are read:
 
 * `gold.agg_dom_book_snapshot` - one pre-aggregated row per symbol and
   timestamp, already carrying best bid/ask and resting sizes.
-* `gold.symbols_*`             - the per-broker instrument dimensions, which
-  supply the human ticker, the description and the category id that
+* `gold.symbols_icmarkets`        - the icmarkets instrument dimension,
+  supplying the human ticker, the description and the category id that
   `app.assets` turns into an asset class.
 """
 from __future__ import annotations
@@ -133,48 +133,38 @@ _DIM_COLUMNS = ["symbolId", "symbolName", "symbolCategoryId", "description", "as
 
 
 def symbol_catalogue(conn: pyodbc.Connection, settings: Settings | None = None) -> pd.DataFrame:
-    """Instrument dimension joined to its asset class, from the gold tables.
+    """icmarkets instrument dimension joined to its asset class.
 
     The asset class comes from the pipeline's own chain
-    (``symbols`` -> ``symbols_category`` -> ``asset_classes``) rather than being
-    inferred here, so the dashboard groups instruments exactly as the broker
-    does. Each broker table is attempted independently and skipped if it is
-    not published, so one stale table cannot empty the catalogue.
+    (``symbols_icmarkets`` -> ``symbols_category_icmarkets`` ->
+    ``asset_classes_icmarkets``) rather than being inferred here, so the
+    dashboard groups instruments exactly as the broker does.
+
+    The joins are LEFT joins: an instrument whose category is missing from the
+    reference tables still appears in the catalogue, with a blank asset class,
+    rather than disappearing from the selector.
     """
     s = settings or get_settings()
-    frames: list[pd.DataFrame] = []
-    for table in s.symbol_tables:
-        sym = qualified(s.gold_database, s.gold_schema, table)
-        # The dimension tables are per-broker, so the auxiliary tables share the
-        # broker suffix (symbols_icmarkets -> asset_classes_icmarkets).
-        suffix = table.split("_", 1)[1] if "_" in table else table
-        cat = qualified(s.gold_database, s.gold_schema, f"symbols_category_{suffix}")
-        cls = qualified(s.gold_database, s.gold_schema, f"asset_classes_{suffix}")
-        try:
-            df = query(conn, f"""
-                SELECT s.{ident('symbolId')}, s.{ident('symbolName')},
-                       s.{ident('symbolCategoryId')}, s.{ident('description')},
-                       a.{ident('name')} AS {ident('assetClassName')}
-                FROM {sym} AS s
-                LEFT JOIN {cat} AS c
-                       ON c.{ident('symbolCategoryId')} = s.{ident('symbolCategoryId')}
-                LEFT JOIN {cls} AS a
-                       ON a.{ident('assetClassId')} = c.{ident('assetClassId')}
-                WHERE s.{ident('symbolId')} IS NOT NULL""")
-        except DataSourceError:
-            continue          # broker table or its asset-class chain not published
-        if not df.empty:
-            frames.append(df)
-    if not frames:
-        return pd.DataFrame(columns=_DIM_COLUMNS)
 
-    out = pd.concat(frames, ignore_index=True)
-    out = out.drop_duplicates(subset=["symbolId"], keep="first")
+    def gold(name: str) -> str:
+        return qualified(s.gold_database, s.gold_schema, name)
+
+    df = query(conn, f"""
+        SELECT s.{ident('symbolId')}, s.{ident('symbolName')},
+               s.{ident('symbolCategoryId')}, s.{ident('description')},
+               a.{ident('name')} AS {ident('assetClassName')}
+        FROM {gold(s.symbol_table)} AS s
+        LEFT JOIN {gold('symbols_category_icmarkets')} AS c
+               ON c.{ident('symbolCategoryId')} = s.{ident('symbolCategoryId')}
+        LEFT JOIN {gold('asset_classes_icmarkets')} AS a
+               ON a.{ident('assetClassId')} = c.{ident('assetClassId')}
+        WHERE s.{ident('symbolId')} IS NOT NULL""")
+
+    out = df.drop_duplicates(subset=["symbolId"], keep="first")
     out["symbolId"] = out["symbolId"].astype(str).str.strip()
-    for col in ("symbolName", "description"):
+    for col in ("symbolName", "description", "assetClassName"):
         out[col] = out[col].astype("string").str.strip()
-    out["assetClassName"] = out["assetClassName"].astype("string").str.strip()
-    return out.reset_index(drop=True)
+    return out[_DIM_COLUMNS].reset_index(drop=True)
 
 
 def symbol_tick_counts(conn: pyodbc.Connection, settings: Settings | None = None) -> dict[str, int]:

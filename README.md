@@ -37,7 +37,7 @@ FABRIC_CLIENT_SECRET="<client-secret>"
 GOLD_DATABASE="ctrader_lakehouse"
 GOLD_SCHEMA="gold"
 SNAPSHOT_TABLE="agg_dom_book_snapshot"
-SYMBOL_TABLES="symbols_pepperstone,symbols_icmarkets"
+SYMBOL_TABLE="symbols_icmarkets"
 
 MAX_TICKS="200000"
 ```
@@ -51,12 +51,12 @@ The gold layer publishes its own chain, which the app consumes directly rather
 than guessing:
 
 ```
-gold.symbols_<broker>          symbolId, symbolName, symbolCategoryId, description
-  -> gold.symbols_category_<broker>    symbolCategoryId -> assetClassId
-  -> gold.asset_classes_<broker>       assetClassId    -> name
+gold.symbols_icmarkets          symbolId, symbolName, symbolCategoryId, description
+  -> gold.symbols_category_icmarkets    symbolCategoryId -> assetClassId
+  -> gold.asset_classes_icmarkets       assetClassId    -> name
 ```
 
-The broker names nine classes; `app/assets.py` maps them to stable client keys
+icmarkets names nine classes; `app/assets.py` maps them to stable client keys
 and sub-divides FX (majors / crosses / exotics), which the pipeline lumps
 together but a dashboard benefits from:
 
@@ -71,13 +71,16 @@ together but a dashboard benefits from:
 | Bonds | `bond` |
 | Futures / Futures Commodities | `future` |
 
-Where the chain has no row — an archive entry, a new listing, a broker whose
-dimension is not published — the classifier falls back to the same cTrader
-signals available in the snapshot (`symbolCategoryId`, the ticker and the
-description), so no instrument silently disappears from the selector. Anything
-still unresolved is reported as `Unclassified`, and `/api/health` says how many
-instruments are affected, because an id with no ticker usually means a broker
-table is missing rather than that the data is bad.
+Where the chain has no row — an archive entry, or a new listing — the classifier
+falls back to the same cTrader signals present in the symbol rows
+(`symbolCategoryId`, the ticker and the description), so no instrument silently
+disappears from the selector. Anything still unresolved is reported as
+`Unclassified`, and `/api/health` says how many instruments are affected.
+
+Note that `agg_dom_book_snapshot` is shared and accumulates rows from every feed
+that writes to it, while `symbols_icmarkets` describes only icmarkets. Any
+other feed's instruments therefore appear as bare ids with no ticker — the
+health hint names that explicitly rather than leaving it to be guessed at.
 
 ---
 
@@ -137,7 +140,7 @@ because they cannot produce a valid mid.
 
 ### Symbol names
 
-The per-broker gold dimension supplies `symbolId -> symbolName`, so the UI shows
+`gold.symbols_icmarkets` supplies `symbolId -> symbolName`, so the UI shows
 `BTCUSD`, `ETHUSD`, `EURUSD` instead of raw numeric ids. Table names are never
 exposed.
 
@@ -221,7 +224,7 @@ python -m pytest tests -q
 ```
 
 Covers snapshot reading (one-sided and crossed books, resting-size volume,
-pipeline imbalance), asset classification from both the broker chain and the
+pipeline imbalance), asset classification from both the gold chain and the
 fallback, production-endpoint resolution, bar consistency, OFI bounds, volume
 profile mass conservation, drawdown sign, strict JSON serialisability, and a
 degenerate flat-price series (guards against divide-by-zero).
@@ -237,5 +240,5 @@ degenerate flat-price series (guards against divide-by-zero).
 | `SQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `SQL_ANALYTICS_ENDPOINT`). |
 | `The production endpoint is not configured` | Same, reached through the API. |
 | `The gold snapshot table is empty` | The ingest pipeline has not written rows yet. |
-| Instruments show as ids with no ticker | That broker's `symbols_<broker>` table is not published; it is listed in `/api/health` hints. |
+| Instruments show as ids with no ticker | They come from a feed other than icmarkets; see the `/api/health` hint. |
 | `external policy action ... was denied` | **Viewer** role: OneLake security filters Viewers and hides whole tables. Grant **Contributor**. |

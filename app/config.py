@@ -48,13 +48,9 @@ class Settings:
     snapshot_table: str = field(
         default_factory=lambda: _env("SNAPSHOT_TABLE", default="agg_dom_book_snapshot") or "agg_dom_book_snapshot"
     )
-    #: Per-broker symbol dimensions in the gold schema, in precedence order.
-    symbol_tables: tuple[str, ...] = field(
-        default_factory=lambda: tuple(
-            t.strip() for t in
-            (_env("SYMBOL_TABLES", default="symbols_pepperstone,symbols_icmarkets") or "").split(",")
-            if t.strip()
-        )
+    #: The icmarkets instrument dimension in the gold schema.
+    symbol_table: str = field(
+        default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
     )
 
     app_name: str = "Axioma Analytics"

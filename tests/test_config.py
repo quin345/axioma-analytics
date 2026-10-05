@@ -11,7 +11,7 @@ from app.config import Settings
 def _isolated(monkeypatch):
     """Build Settings from a known-empty environment, then restore."""
     for key in ("SQL_ENDPOINT_PROD", "SQL_ANALYTICS_ENDPOINT", "GOLD_DATABASE",
-                "GOLD_SCHEMA", "SNAPSHOT_TABLE", "SYMBOL_TABLES"):
+                "GOLD_SCHEMA", "SNAPSHOT_TABLE", "SYMBOL_TABLE"):
         monkeypatch.delenv(key, raising=False)
     config.get_settings.cache_clear()
     yield
@@ -23,7 +23,7 @@ def test_defaults_point_at_the_gold_schema():
     assert s.gold_database == "ctrader_lakehouse"
     assert s.gold_schema == "gold"
     assert s.snapshot_table == "agg_dom_book_snapshot"
-    assert s.symbol_tables == ("symbols_pepperstone", "symbols_icmarkets")
+    assert s.symbol_table == "symbols_icmarkets"
 
 
 def test_prod_endpoint_is_read(monkeypatch):
@@ -74,9 +74,9 @@ def test_gold_object_names_are_overridable(monkeypatch):
     assert (s.gold_database, s.gold_schema, s.snapshot_table) == ("other_db", "silver", "book")
 
 
-def test_symbol_tables_are_parsed_and_cleaned(monkeypatch):
-    monkeypatch.setenv("SYMBOL_TABLES", "symbols_a, symbols_b ,")
-    assert Settings().symbol_tables == ("symbols_a", "symbols_b")
+def test_symbol_table_is_overridable(monkeypatch):
+    monkeypatch.setenv("SYMBOL_TABLE", "symbols_other")
+    assert Settings().symbol_table == "symbols_other"
 
 
 def test_credentials_drive_has_credentials(monkeypatch):

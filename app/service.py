@@ -143,18 +143,19 @@ def unclassified_count() -> int:
 def coverage_note() -> str | None:
     """Warning when the snapshot holds instruments the dimension cannot name.
 
-    The snapshot table spans every broker that has ever written to it, while the
-    dimension is published per broker. A broker whose dimension is missing
-    therefore shows up as symbols with no ticker and no asset class - worth
-    saying out loud rather than silently bucketing them as "Other".
+    ``agg_dom_book_snapshot`` is shared and accumulates rows from every feed
+    that has ever written to it, while ``symbols_icmarkets`` describes only
+    icmarkets. Any other feed's instruments therefore appear as bare ids with
+    no ticker and no asset class - worth saying out loud rather than silently
+    bucketing them as "Unclassified".
     """
     missing = unclassified_count()
     if not missing:
         return None
     return (
-        f"{missing} instrument(s) in the snapshot have no row in the symbol "
-        f"dimension, so they show as ids with no ticker or asset class. Their "
-        f"broker's symbols table is not published in the gold schema."
+        f"{missing} instrument(s) in the snapshot have no row in "
+        f"symbols_icmarkets, so they show as ids with no ticker or asset class. "
+        f"They come from a feed the icmarkets dimension does not cover."
     )
 
 
