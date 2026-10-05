@@ -1,8 +1,17 @@
-"""Data source access: connection, table resolution, and tick fetching."""
+"""Gold database access: connection, snapshot fetch, symbol catalogue.
+
+Every query in the app targets `[ctrader_lakehouse].[gold]` on the production
+endpoint. Two kinds of object are read:
+
+* `gold.agg_dom_book_snapshot` - one pre-aggregated row per symbol and
+  timestamp, already carrying best bid/ask and resting sizes.
+* `gold.symbols_*`             - the per-broker instrument dimensions, which
+  supply the human ticker, the description and the category id that
+  `app.assets` turns into an asset class.
+"""
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, Iterator
 
 import pandas as pd
@@ -10,9 +19,10 @@ import pyodbc
 
 from .auth import TokenError, get_access_token
 from .config import Settings, get_settings
-from .books import classify as classify_book_table
-from .l2 import is_l2_table, map_l2_columns
-from .schema import ColumnMap, build_column_map
+
+
+class DataSourceError(RuntimeError):
+    """The gold endpoint could not be reached or a query failed."""
 
 
 def ident(name: str) -> str:
@@ -20,57 +30,27 @@ def ident(name: str) -> str:
     return "[" + str(name).replace("]", "]]") + "]"
 
 
-class DataSourceError(RuntimeError):
-    pass
+def qualified(database: str, schema: str, table: str) -> str:
+    """Fully qualified, cross-database safe object name."""
+    return f"{ident(database)}.{ident(schema)}.{ident(table)}"
 
 
-@dataclass
-class TableInfo:
-    schema: str
-    table: str
-    columns: list[str]
-    column_map: ColumnMap
-    is_l2: bool = False
-    _kind: str = ""
-    database: str = ""   # empty means "the connection default database"
+def snapshot_object(settings: Settings | None = None) -> str:
+    """Qualified name of the aggregate book-snapshot table."""
+    s = settings or get_settings()
+    return qualified(s.gold_database, s.gold_schema, s.snapshot_table)
 
-    @property
-    def qualified(self) -> str:
-        """Fully qualified, cross-database safe object name."""
-        if self.database:
-            return f"{ident(self.database)}.{ident(self.schema)}.{ident(self.table)}"
-        return f"{ident(self.schema)}.{ident(self.table)}"
 
-    @property
-    def label(self) -> str:
-        if self.database:
-            return f"{self.database}.{self.schema}.{self.table}"
-        return f"{self.schema}.{self.table}"
-
-    @property
-    def kind(self) -> str:
-        """Reader that applies to this table: agg | levels | l2 | flat."""
-        return self._kind or ("l2" if self.is_l2 else "flat")
-
-    def to_dict(self) -> dict:
-        """Internal health payload.
-
-        Deliberately omits schema/table/database: physical names stay inside the
-        server and are never exposed over the API.
-        """
-        return {
-            "kind": self.kind,
-            "column_count": len(self.columns),
-            "synthetic": False,
-        }
-
+# --------------------------------------------------------------------------
+# Connection
+# --------------------------------------------------------------------------
 
 def connection_string(settings: Settings | None = None) -> str:
-    """Base connection string.
+    """ODBC connection string for the production endpoint.
 
     Service-principal credentials are embedded here. The `az login` token path
-    cannot be expressed as a connection string (the JWT is rejected as a PWD
-    value), so it is applied separately via `attrs_before` in `connect()`.
+    cannot be expressed as a connection string (the driver rejects a JWT passed
+    as PWD), so it is applied separately via `attrs_before` in `connect()`.
     """
     s = settings or get_settings()
     parts = [
@@ -97,29 +77,32 @@ _ACCESS_TOKEN_ATTR = 1256
 def connect(settings: Settings | None = None) -> Iterator[pyodbc.Connection]:
     s = settings or get_settings()
     if not s.host:
-        raise DataSourceError("The data source host is not configured")
+        raise DataSourceError(
+            "The production endpoint is not configured. Set SQL_ENDPOINT_PROD in .env."
+        )
 
     attrs: dict | None = None
-    try:
-        cs = connection_string(s)
-        if not s.has_credentials:
+    if not s.has_credentials:
+        try:
             token = get_access_token()
-            if token is None:
-                raise DataSourceError(
-                    "No credentials configured. Set the credential variables in "
-                    ".env, or run `az login`."
-                )
-            # Not valid together with Authentication / Trusted_Connection in the string.
-            attrs = {_ACCESS_TOKEN_ATTR: token.value}
-    except TokenError as exc:
-        raise DataSourceError(str(exc)) from exc
+        except TokenError as exc:
+            raise DataSourceError(str(exc)) from exc
+        if token is None:
+            raise DataSourceError(
+                "No credentials configured. Set the FABRIC_* variables in .env, "
+                "or run `az login`."
+            )
+        # Not valid together with Authentication / Trusted_Connection in the string.
+        attrs = {_ACCESS_TOKEN_ATTR: token.value}
 
     try:
-        conn = pyodbc.connect(cs, autocommit=True, attrs_before=attrs) if attrs else \
-            pyodbc.connect(cs, autocommit=True)
+        if attrs:
+            conn = pyodbc.connect(connection_string(s), autocommit=True, attrs_before=attrs)
+        else:
+            conn = pyodbc.connect(connection_string(s), autocommit=True)
     except pyodbc.Error as exc:
         raise DataSourceError(
-            f"Could not connect to the data source: {exc}\n"
+            f"Could not connect to the production endpoint: {exc}\n"
             "Check that the configured credentials and host are correct, and that "
             "the principal has read access to the workspace."
         ) from exc
@@ -130,6 +113,7 @@ def connect(settings: Settings | None = None) -> Iterator[pyodbc.Connection]:
 
 
 def query(conn: pyodbc.Connection, sql: str, params: tuple | None = None) -> pd.DataFrame:
+    """Run one statement and return the rows as a DataFrame."""
     cur = conn.cursor()
     try:
         cur.execute(sql, params) if params else cur.execute(sql)
@@ -142,207 +126,127 @@ def query(conn: pyodbc.Connection, sql: str, params: tuple | None = None) -> pd.
 
 
 # --------------------------------------------------------------------------
-# Catalog discovery
+# Symbol catalogue
 # --------------------------------------------------------------------------
 
-_DISCOVERY_SQL = """
-SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
-FROM INFORMATION_SCHEMA.COLUMNS
-ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
-"""
-
-_SKIP_SCHEMAS = {"sys", "sysinternal", "information_schema", "dbfs", "graph", "guest"}
-_SYSTEM_DATABASES = {"master", "tempdb", "model", "msdb"}
+_DIM_COLUMNS = ["symbolId", "symbolName", "symbolCategoryId", "description", "assetClassName"]
 
 
-def list_databases(conn: pyodbc.Connection) -> list[str]:
-    """All user databases on this endpoint.
+def symbol_catalogue(conn: pyodbc.Connection, settings: Settings | None = None) -> pd.DataFrame:
+    """Instrument dimension joined to its asset class, from the gold tables.
 
-    A Fabric SQL analytics endpoint fronts every Warehouse/Lakehouse in the
-    workspace, and INFORMATION_SCHEMA only sees the *default* database - so the
-    other databases must be enumerated explicitly.
+    The asset class comes from the pipeline's own chain
+    (``symbols`` -> ``symbols_category`` -> ``asset_classes``) rather than being
+    inferred here, so the dashboard groups instruments exactly as the broker
+    does. Each broker table is attempted independently and skipped if it is
+    not published, so one stale table cannot empty the catalogue.
     """
-    try:
-        df = query(conn, "SELECT name FROM sys.databases ORDER BY name")
-    except pyodbc.Error:
-        return []
-    return [str(n) for n in df["name"] if str(n).lower() not in _SYSTEM_DATABASES]
-
-
-def list_all_tables(conn: pyodbc.Connection) -> list[TableInfo]:
-    """Every user table in every database (no tick-signature filtering).
-
-    Used for the catalog view and to locate symbol-dimension tables that are not
-    tick sources themselves.
-    """
-    out: list[TableInfo] = []
-    for db in list_databases(conn):
+    s = settings or get_settings()
+    frames: list[pd.DataFrame] = []
+    for table in s.symbol_tables:
+        sym = qualified(s.gold_database, s.gold_schema, table)
+        # The dimension tables are per-broker, so the auxiliary tables share the
+        # broker suffix (symbols_icmarkets -> asset_classes_icmarkets).
+        suffix = table.split("_", 1)[1] if "_" in table else table
+        cat = qualified(s.gold_database, s.gold_schema, f"symbols_category_{suffix}")
+        cls = qualified(s.gold_database, s.gold_schema, f"asset_classes_{suffix}")
         try:
             df = query(conn, f"""
-                SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME
-                FROM {ident(db)}.INFORMATION_SCHEMA.COLUMNS
-                ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION""")
+                SELECT s.{ident('symbolId')}, s.{ident('symbolName')},
+                       s.{ident('symbolCategoryId')}, s.{ident('description')},
+                       a.{ident('name')} AS {ident('assetClassName')}
+                FROM {sym} AS s
+                LEFT JOIN {cat} AS c
+                       ON c.{ident('symbolCategoryId')} = s.{ident('symbolCategoryId')}
+                LEFT JOIN {cls} AS a
+                       ON a.{ident('assetClassId')} = c.{ident('assetClassId')}
+                WHERE s.{ident('symbolId')} IS NOT NULL""")
         except DataSourceError:
-            continue
-        grouped: dict[tuple[str, str], list[str]] = {}
-        for schema, table, col in zip(df["TABLE_SCHEMA"], df["TABLE_NAME"], df["COLUMN_NAME"]):
-            if str(schema).lower() in _SKIP_SCHEMAS:
-                continue
-            grouped.setdefault((str(schema), str(table)), []).append(str(col))
-        for (schema, table), cols in grouped.items():
-            cm = build_column_map(cols)
-            out.append(TableInfo(schema=schema, table=table, columns=cols,
-                                 column_map=cm, is_l2=is_l2_table(cols),
-                                 _kind=classify_book_table(cols), database=db))
-    return out
+            continue          # broker table or its asset-class chain not published
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=_DIM_COLUMNS)
+
+    out = pd.concat(frames, ignore_index=True)
+    out = out.drop_duplicates(subset=["symbolId"], keep="first")
+    out["symbolId"] = out["symbolId"].astype(str).str.strip()
+    for col in ("symbolName", "description"):
+        out[col] = out[col].astype("string").str.strip()
+    out["assetClassName"] = out["assetClassName"].astype("string").str.strip()
+    return out.reset_index(drop=True)
 
 
-# Column names used by common symbol-dimension tables (gold/silver layers).
-_SYMBOL_ID_ALIASES = ("symbolid", "symbol_id", "instrumentid", "tickerid")
-_SYMBOL_NAME_ALIASES = ("symbolname", "symbol_name", "name", "displayname", "ticker")
+def symbol_tick_counts(conn: pyodbc.Connection, settings: Settings | None = None) -> dict[str, int]:
+    """{symbolId: snapshot rows} from the gold book-snapshot table."""
+    obj = snapshot_object(settings)
+    df = query(conn, f"""
+        SELECT {ident('symbolId')} AS symbolId, COUNT_BIG(*) AS ticks
+        FROM {obj}
+        WHERE {ident('symbolId')} IS NOT NULL
+        GROUP BY {ident('symbolId')}""")
+    return {str(r.symbolId).strip(): int(r.ticks) for r in df.itertuples() if r.symbolId is not None}
 
 
-def find_symbol_dimension(conn: pyodbc.Connection, tables: list[TableInfo] | None = None
-                           ) -> TableInfo | None:
-    """Locate a symbolId -> symbolName lookup table across all databases."""
-    tables = tables if tables is not None else list_all_tables(conn)
-    best: TableInfo | None = None
-    best_name = ""
-    for t in tables:
-        lowered = {c.strip().lower(): c for c in t.columns}
-        id_col = next((lowered[a] for a in _SYMBOL_ID_ALIASES if a in lowered), None)
-        if not id_col:
-            continue
-        # Prefer the most specific name column (symbolName over generic "name").
-        for alias in _SYMBOL_NAME_ALIASES:
-            if alias in lowered:
-                if len(alias) > len(best_name):
-                    best, best_name = t, alias
-                break
-        if best is not None and best is not t:
-            continue
-    return best
-
-
-def symbol_labels(conn: pyodbc.Connection, dim: TableInfo | None = None,
-                  *, limit: int = 20_000) -> dict[str, str]:
-    """Load {symbolId: symbolName} from the symbol dimension, if one exists."""
-    dim = dim or find_symbol_dimension(conn)
-    if dim is None:
-        return {}
-    lowered = {c.strip().lower(): c for c in dim.columns}
-    id_col = next((lowered[a] for a in _SYMBOL_ID_ALIASES if a in lowered), None)
-    name_col = next((lowered[a] for a in _SYMBOL_NAME_ALIASES if a in lowered), None)
-    if not id_col or not name_col:
-        return {}
-    try:
-        df = query(conn, f"SELECT TOP ({int(limit)}) {ident(id_col)} AS id, {ident(name_col)} AS nm "
-                          f"FROM {dim.qualified} WHERE {ident(name_col)} IS NOT NULL")
-    except DataSourceError:
-        return {}
-    out: dict[str, str] = {}
-    for i, n in zip(df["id"], df["nm"]):
-        if i is None or n is None:
-            continue
-        out[str(i).strip()] = str(n).strip()
-    return out
-
-
-def get_symbols(conn: pyodbc.Connection, ti: TableInfo, *, limit: int = 500) -> list[dict]:
-    """Symbols ranked by tick count, for the UI selector."""
-    sym_col = None
-    if ti.kind in ("agg", "levels"):
-        from .books import map_agg_columns, map_level_columns
-        mapper = map_agg_columns if ti.kind == "agg" else map_level_columns
-        sym_col = mapper(ti.columns).get("symbol")
-    elif ti.is_l2:
-        sym_col = map_l2_columns(ti.columns).get("symbol")
-    sym_col = sym_col or ti.column_map.symbol
-    if not sym_col:
-        return []
-    sql = (
-        f"SELECT TOP ({int(limit)}) {ident(sym_col)} AS symbol, COUNT_BIG(*) AS ticks "
-        f"FROM {ti.qualified} WHERE {ident(sym_col)} IS NOT NULL "
-        f"GROUP BY {ident(sym_col)} ORDER BY COUNT_BIG(*) DESC"
-    )
-    try:
-        df = query(conn, sql)
-    except DataSourceError:
-        return []
-    if df.empty:
-        return []
-    return [
-        {"symbol": str(r.symbol).strip().upper(), "ticks": int(r.ticks)}
-        for r in df.itertuples()
-        if r.symbol is not None
-    ]
-    return ";".join(parts)
 # --------------------------------------------------------------------------
-# Tick retrieval
+# Ticks
 # --------------------------------------------------------------------------
 
-def fetch_ticks(
-    conn: pyodbc.Connection,
-    ti: TableInfo,
-    *,
-    symbol: str | None = None,
-    start: str | None = None,
-    end: str | None = None,
-    limit: int = 50_000,
-    lookback_days: int | None = None,
-) -> tuple[pd.DataFrame, ColumnMap]:
-    """Pull raw ticks as a DataFrame plus the column map used to build the SQL.
+#: Columns of the canonical tick frame produced by ``frames.ticks_from_snapshot``.
+TICK_COLUMNS = [
+    "ts", "symbol", "bid", "ask", "last", "volume",
+    "bid_depth", "ask_depth", "signed_volume",
+    "imbalance", "imbalance_ratio",
+    "vwap_bid", "vwap_ask", "vwap_spread", "rel_spread", "rel_vwap_spread",
+]
 
-    When `lookback_days` is set and no explicit range is given, the query is
-    anchored on the newest tick so you always get the most recent session
-    rather than an arbitrary slice of history.
+_SNAPSHOT_COLUMNS = [
+    "timestamp", "symbolId", "total_bid", "total_ask", "best_bid", "best_ask",
+    "imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask", "vwap_spread",
+    "rel_spread", "rel_vwap_spread",
+]
+
+
+def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
+                start: str | None = None, end: str | None = None,
+                limit: int = 50_000, lookback_days: int | None = None) -> pd.DataFrame:
+    """Read raw book snapshots for one symbol.
+
+    With ``lookback_days`` and no explicit range, the window is anchored on the
+    newest snapshot so the result is the most recent session rather than an
+    arbitrary slice of history.
     """
-    cm = ti.column_map
-    q = ti.qualified
+    obj = snapshot_object()
+    cols = ", ".join(ident(c) for c in _SNAPSHOT_COLUMNS)
     clauses: list[str] = []
     params: list[Any] = []
 
-    # DOM tables carry their own timestamp/symbol column names.
-    l2m = map_l2_columns(ti.columns) if ti.is_l2 else {}
-    ts_col = l2m.get("ts") or cm.ts
-    sym_col = l2m.get("symbol") or cm.symbol
-
-    if sym_col and symbol:
-        clauses.append(f"{ident(sym_col)} = ?")
-        params.append(symbol.strip())
+    if symbol:
+        clauses.append(f"{ident('symbolId')} = ?")
+        params.append(str(symbol).strip())
 
     if lookback_days and not start and not end:
         anchor_where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         try:
-            anchor = query(conn, f"SELECT MAX({ident(ts_col)}) AS mx FROM {q}{anchor_where}",
+            anchor = query(conn, f"SELECT MAX({ident('timestamp')}) AS mx FROM {obj}{anchor_where}",
                            tuple(params) if params else None)
             mx = None if anchor.empty else anchor["mx"].iloc[0]
         except DataSourceError:
             mx = None
         if mx is not None and not pd.isna(mx):
             cutoff = pd.Timestamp(mx) - pd.Timedelta(days=int(lookback_days))
-            clauses.append(f"{ident(ts_col)} >= ?")
+            clauses.append(f"{ident('timestamp')} >= ?")
             params.append(cutoff.tz_localize(None) if cutoff.tzinfo else cutoff)
 
     if start:
-        clauses.append(f"{ident(ts_col)} >= ?")
+        clauses.append(f"{ident('timestamp')} >= ?")
         params.append(start)
     if end:
-        clauses.append(f"{ident(ts_col)} <= ?")
+        clauses.append(f"{ident('timestamp')} <= ?")
         params.append(end)
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = (f"SELECT TOP ({int(limit)}) {cols} FROM {obj}{where} "
+           f"ORDER BY {ident('timestamp')} ASC")
+    return query(conn, sql, tuple(params) if params else None)
 
-    if ti.is_l2:
-        # Only the DOM event columns are needed; fetching * would drag in
-        # _rid/_ts delta bookkeeping columns.
-        l2m = map_l2_columns(ti.columns)
-        wanted = sorted({l2m[f] for f in ("ts", "symbol", "new_quotes", "deleted_quotes", "digits")
-                         if l2m.get(f)})
-        select = ", ".join(ident(c) for c in wanted)
-        order = ident(l2m["ts"])
-    else:
-        select, order = "*", ident(cm.ts)
-
-    sql = f"SELECT TOP ({int(limit)}) {select} FROM {q}{where} ORDER BY {order} ASC"
-    return query(conn, sql, tuple(params) if params else None), cm
