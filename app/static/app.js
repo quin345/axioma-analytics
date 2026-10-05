@@ -425,7 +425,7 @@ async function analyse() {
       timeframe: $("timeframe").value || "1m",
       window: $("window").value || 50,
       limit: $("limit").value || 50000,
-      lookback_days: $("lookback").value || 3,
+      lookback_hours: $("lookback").value || 24,
     });
     const r = await api(`/api/analytics?${p}`);
     renderKpis(r.summary, r.microstructure);
