@@ -48,9 +48,14 @@ def snapshot_object(settings: Settings | None = None) -> str:
 def connection_string(settings: Settings | None = None) -> str:
     """ODBC connection string for the production endpoint.
 
-    Service-principal credentials are embedded here. The `az login` token path
-    cannot be expressed as a connection string (the driver rejects a JWT passed
-    as PWD), so it is applied separately via `attrs_before` in `connect()`.
+    Three authentication modes, in the order `connect()` applies them:
+
+    * managed identity -> ``Authentication=ActiveDirectoryMSI``; the driver
+      fetches the token itself, so nothing is handed to it by hand.
+    * service principal -> credentials embedded in the string.
+    * ``az login`` token -> cannot be expressed as a connection string (the
+      driver rejects a JWT passed as PWD), so it is applied separately via
+      ``attrs_before`` in ``connect()``.
     """
     s = settings or get_settings()
     parts = [
@@ -60,7 +65,13 @@ def connection_string(settings: Settings | None = None) -> str:
         "TrustServerCertificate=yes",
         f"Connection Timeout={s.connect_timeout}",
     ]
-    if s.has_credentials:
+    if s.use_managed_identity:
+        # `ActiveDirectoryMSI` is the spelling the Microsoft driver accepts;
+        # `ActiveDirectoryManagedIdentity` is rejected as an invalid value.
+        parts += ["Authentication=ActiveDirectoryMSI"]
+        if s.managed_identity_client_id:
+            parts.append(f"ClientId={s.managed_identity_client_id}")
+    elif s.has_credentials:
         parts += [
             "Authentication=ActiveDirectoryServicePrincipal",
             f"UID={s.client_id}",
@@ -82,7 +93,7 @@ def connect(settings: Settings | None = None) -> Iterator[pyodbc.Connection]:
         )
 
     attrs: dict | None = None
-    if not s.has_credentials:
+    if not s.use_managed_identity and not s.has_credentials:
         try:
             token = get_access_token()
         except TokenError as exc:

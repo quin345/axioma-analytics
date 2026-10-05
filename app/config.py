@@ -38,6 +38,17 @@ class Settings:
         default_factory=lambda: _env("FABRIC_ODBC_DRIVER", default="ODBC Driver 18 for SQL Server") or ""
     )
     connect_timeout: int = field(default_factory=lambda: int(_env("FABRIC_CONNECT_TIMEOUT", default="15") or 15))
+    #: Azure managed identity: system-assigned when blank, user-assigned when a
+    #: client id is given. Preferred over `az login` because it needs no
+    #: interactive session and, unlike the CLI-token path, does not hand a JWT
+    #: to the driver through SQL_COPT_SS_ACCESS_TOKEN.
+    managed_identity: bool = field(
+        default_factory=lambda: str(_env("FABRIC_MANAGED_IDENTITY", default="") or "").lower()
+        in ("1", "true", "yes", "on")
+    )
+    managed_identity_client_id: str | None = field(
+        default_factory=lambda: _env("FABRIC_MANAGED_IDENTITY_CLIENT_ID")
+    )
 
     # --- Gold objects ---
     # Physical names are resolved here and never sent to the browser.
@@ -68,6 +79,16 @@ class Settings:
     @property
     def has_credentials(self) -> bool:
         return bool(self.tenant_id and self.client_id and self.client_secret)
+
+    @property
+    def use_managed_identity(self) -> bool:
+        """Managed identity wins over any credential in the environment.
+
+        It is the only mode that works unattended: the driver mints and
+        refreshes its own tokens, so the service needs neither a stored secret
+        nor an `az login` session.
+        """
+        return self.managed_identity
 
     @property
     def is_configured(self) -> bool:

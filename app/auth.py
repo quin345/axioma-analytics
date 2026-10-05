@@ -80,11 +80,16 @@ _cli_provider = CliTokenProvider()
 
 
 def get_access_token() -> AccessToken | None:
-    """Return a service-principal token if configured, else fall back to `az login`."""
+    """Return a service-principal token if configured, else fall back to `az login`.
+
+    Returns None when the driver is authenticating on its own behalf (managed
+    identity, or service-principal credentials in the connection string), so
+    `connect()` never reaches for a CLI session that does not exist.
+    """
     from .config import get_settings
 
     s = get_settings()
-    if s.has_credentials:
+    if s.use_managed_identity or s.has_credentials:
         # Handled directly in the connection string (no token minting needed).
         return None
     return _cli_provider.get()

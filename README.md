@@ -28,10 +28,8 @@ python run.py             # dashboard on http://127.0.0.1:8000
 # The production endpoint.
 SQL_ENDPOINT_PROD="<prod-host>"
 
-# Entra ID service principal.
-FABRIC_TENANT_ID="<tenant-guid>"
-FABRIC_CLIENT_ID="<app-registration-client-id>"
-FABRIC_CLIENT_SECRET="<client-secret>"
+# Authentication - see the table below.
+FABRIC_MANAGED_IDENTITY="true"
 
 # Gold objects.
 GOLD_DATABASE="ctrader_lakehouse"
@@ -86,12 +84,27 @@ health hint names that explicitly rather than leaving it to be guessed at.
 
 ## Authentication
 
-Two modes, tried in order:
+Three modes, tried in order:
 
 | Mode | When | Notes |
 |---|---|---|
-| **Service principal** | `FABRIC_*` credentials present | Headless, recommended. Needs the **Contributor** workspace role (see below). |
-| **`az login` token** | No credentials set | Mints a token via the Azure CLI and passes it as `SQL_COPT_SS_ACCESS_TOKEN`. Convenient for local debugging. |
+| **Managed identity** | `FABRIC_MANAGED_IDENTITY="true"` | Headless, recommended on Azure. The ODBC driver mints and refreshes its own tokens from the instance metadata endpoint, so there is no secret on the box and no `az login` session for a background service to lose. Needs the **Contributor** workspace role (see below). |
+| **Service principal** | `FABRIC_*` credentials present | Headless. Needs **Contributor**. Ignored while managed identity is on, so a leftover secret cannot silently change the auth path. |
+| **`az login` token** | Neither of the above | Mints a token via the Azure CLI and passes it as `SQL_COPT_SS_ACCESS_TOKEN`. Convenient for local debugging; not suitable for a service. |
+
+Give the identity a role with `scripts/grant_workspace_access.py`, or set it by
+hand in the Fabric portal (*workspace → Manage access*). The principal id to
+grant for a system-assigned identity is the **VM's own client id**:
+
+```bash
+az vm get -g <resource-group> -n <vm> --query identity.principalId -o tsv
+```
+
+Verify access without starting the app:
+
+```bash
+python scripts/grant_workspace_access.py --list
+```
 
 ### Granting access
 
@@ -127,6 +140,83 @@ Pass `--role Viewer` for a read-only grant, or `--workspaces <name>` to target o
 
 ---
 
+## Deployment (production)
+
+The app is a single-process FastAPI/uvicorn server. nginx terminates TLS and is
+the only public entry point; the app itself binds to loopback, so it is
+unreachable except through the proxy.
+
+```
+internet ──TLS──> nginx (443) ──HTTP──> uvicorn (127.0.0.1:8000) ──TDS──> Fabric
+```
+
+### systemd unit
+
+`/etc/systemd/system/axioma.service` runs the app as `azureuser`:
+
+```ini
+[Service]
+Type=exec
+User=azureuser
+WorkingDirectory=/home/azureuser/axioma-analytics
+ExecStart=/usr/bin/python3 /home/azureuser/axioma-analytics/run.py --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+```
+
+Production means **no `--reload`** (that is a single-process development server)
+and a **loopback bind**. The unit also sets `ProtectSystem=strict` with
+`ReadWritePaths` for the repo, drops all capabilities, and filters syscalls.
+Managed identity needs only outbound HTTPS to the instance metadata endpoint, so
+no extra capability is granted.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now axioma.service
+systemctl status axioma.service
+journalctl -u axioma.service -f
+```
+
+### nginx
+
+`/etc/nginx/sites-available/axiomanalytics` is symlinked into `sites-enabled`.
+It redirects HTTP to HTTPS (with the ACME challenge path carved out so
+`certbot renew` keeps working) and proxies three location groups:
+
+| Location | Why it differs |
+|---|---|
+| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off. Analytics queries scan the gold table and return large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, and buffering would hold big payloads in nginx memory. |
+| `/static/` | Short `expires`, so unversioned filenames still revalidate. |
+| `/` | Dashboard and everything else. |
+
+`client_max_body_size` is raised to 8 MB because analytics payloads run past
+nginx's 1 MB default.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Verifying
+
+```bash
+curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
+curl -sk https://axiomanalytics.info/api/health            # through nginx
+```
+
+`connected: true` with a non-zero `row_count` means the full path works.
+
+### Deploying an update
+
+```bash
+git -C /home/azureuser/axioma-analytics pull
+sudo systemctl restart axioma.service
+```
+
+`/etc/nginx/sites-available/axiomanalytics.bak` keeps the previous proxy
+config for reference.
+
+---
+
 ## Data source shape
 
 `gold.agg_dom_book_snapshot` holds one pre-aggregated row per symbol and
@@ -151,7 +241,7 @@ exposed.
 ```
 app/
   config.py      .env -> Settings (endpoint, credentials, gold object names)
-  auth.py        az CLI / service-principal token minting
+  auth.py        managed identity / service principal / az CLI token minting
   db.py          connection, gold queries, snapshot fetch, symbol catalogue
   frames.py      gold snapshot reader -> canonical tick frame
   assets.py      asset-class taxonomy and classification
@@ -235,7 +325,9 @@ degenerate flat-price series (guards against divide-by-zero).
 
 | Symptom | Cause / fix |
 |---|---|
-| `Could not login because the authentication failed (18456)` | SP has no workspace role. Grant **Contributor**. |
+| `Could not login because the authentication failed (18456)` | The identity has no workspace role. Grant **Contributor**. |
+| `Invalid value specified for connection string attribute 'Authentication'` | Wrong keyword spelling. The driver wants `ActiveDirectoryMSI`, not `ActiveDirectoryManagedIdentity`; `connection_string()` emits the accepted form. |
+| App exits immediately with a segmentation fault | The `az login` token path (`SQL_COPT_SS_ACCESS_TOKEN`) crashes pyodbc 5.3 against this driver. Switch to managed identity or a service principal. |
 | `Invalid value specified for connection string attribute 'PWD'` | Secret missing/blank in `.env`. |
 | `SQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `SQL_ANALYTICS_ENDPOINT`). |
 | `The production endpoint is not configured` | Same, reached through the API. |
