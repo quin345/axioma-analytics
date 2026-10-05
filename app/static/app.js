@@ -103,7 +103,7 @@ async function loadHealth() {
   const dot = $("connDot");
   if (h.connected) {
     dot.className = "dot ok";
-    $("connText").textContent = h.has_data ? "Connected \u00b7 live data" : "Connected \u00b7 no data";
+    $("connText").textContent = h.has_data ? "Connected" : "Connected \u00b7 no data";
   } else {
     dot.className = "dot bad";
     $("connText").textContent = "Offline";
