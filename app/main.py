@@ -122,11 +122,11 @@ def analytics_report(
     window: int = Query(50, ge=2, le=5000),
     bins: int = Query(60, ge=10, le=300),
     limit: int = Query(50_000, ge=100, le=500_000),
-    lookback_days: int = Query(3, ge=1, le=90),
+    lookback_hours: int = Query(24, ge=1, le=2160),
 ) -> dict:
     """Full analytics bundle for one symbol."""
     try:
-        frame = service.load_ticks_cached(symbol, limit, lookback_days)
+        frame = service.load_ticks_cached(symbol, limit, lookback_hours)
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
