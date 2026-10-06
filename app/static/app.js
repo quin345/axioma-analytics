@@ -182,7 +182,8 @@ async function loadSymbols() {
   const sel = $("assetClass");
   const ac = sel && sel.value;
   const q = ac ? `?asset_class=${encodeURIComponent(ac)}` : "";
-  const { groups, symbols, summary } = await api(`/api/symbols${q}`);
+  const { groups, symbols, summary, default_symbol } = await api(`/api/symbols${q}`);
+  window.__defaultSymbol = default_symbol || null;
   // `groups` is already narrowed to the active asset class, so rebuilding the
   // class dropdown from it would collapse the list to a single option and
   // leave the user stuck. `summary` is the full per-class rollup and is what
@@ -211,7 +212,14 @@ function fillSymbols(symbols) {
     return `<option value="${esc(id)}">${esc(label)} \u00b7 ${esc(cls)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
-  sel.value = stillThere ? prev : (symbols[0].symbol ?? "");
+  // Default to XAUUSD (the pinned default from /api/symbols) on first load, so
+  // the dashboard opens on gold rather than the most-traded instrument.
+  const pinned = window.__defaultSymbol
+    && symbols.some((s) => (s.symbol ?? "") === window.__defaultSymbol)
+    ? window.__defaultSymbol : null;
+  const byName = symbols.find((s) => (s.name || "").toUpperCase() === "XAUUSD");
+  const fallback = pinned || (byName && byName.symbol) || (symbols[0].symbol ?? "");
+  sel.value = stillThere ? prev : fallback;
 }
 
 async function fillTimeframes(h) {

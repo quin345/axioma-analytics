@@ -224,8 +224,33 @@ def instruments(*, refresh: bool = False) -> dict[str, Instrument]:
     return _instruments
 
 
+def _default_key() -> str:
+    """Configured default ticker, normalised for comparison."""
+    try:
+        return (get_settings().default_symbol or "").strip().upper()
+    except Exception:
+        return "XAUUSD"
+
+
+def default_symbol_id(only_traded: bool = True) -> str | None:
+    """Symbol id of the configured default ticker, when it is selectable."""
+    want = _default_key()
+    if not want:
+        return None
+    rows = [i for i in instruments().values() if i.asset_class]
+    if only_traded:
+        rows = [i for i in rows if i.ticks > 0]
+    for i in rows:
+        if (i.name or "").strip().upper() == want:
+            return i.symbol_id
+    for i in rows:
+        if i.symbol_id.strip().upper() == want:
+            return i.symbol_id
+    return None
+
+
 def _sorted_instruments(only_traded: bool) -> list[Instrument]:
-    """Instruments for the selectors, best-traded first.
+    """Instruments for the selectors, default ticker first, then best-traded.
 
     Unclassified instruments are excluded. They carry ticks but no row in the
     icmarkets dimension, so they have no ticker and no asset class; offering
@@ -238,7 +263,10 @@ def _sorted_instruments(only_traded: bool) -> list[Instrument]:
     rows = [i for i in instruments().values() if i.asset_class]
     if only_traded:
         rows = [i for i in rows if i.ticks > 0]
-    rows.sort(key=lambda i: (-i.ticks, i.display or i.symbol_id))
+    default_id = default_symbol_id(only_traded=only_traded)
+    rows.sort(key=lambda i: (
+        0 if (default_id is not None and i.symbol_id == default_id) else 1,
+        -i.ticks, i.display or i.symbol_id))
     return rows
 
 

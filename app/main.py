@@ -108,6 +108,7 @@ def symbols(
         "summary": summary,
         "symbols": flat,
         "total": len(flat),
+        "default_symbol": service.default_symbol_id(only_traded=only_traded),
     }
 
 
