@@ -67,6 +67,16 @@ class Settings:
     app_name: str = "Axioma Analytics"
     max_ticks: int = field(default_factory=lambda: int(_env("MAX_TICKS", default="200000") or 200000))
 
+    # --- Availability -------------------------------------------------------
+    #: Serve the branded "temporarily unavailable" page instead of the
+    #: dashboard, with a 503. For a planned maintenance window: set
+    #: MAINTENANCE_MODE=1, restart, unset it afterwards. The API stays up so
+    #: the page's own static assets and health checks keep working.
+    maintenance: bool = field(
+        default_factory=lambda: str(_env("MAINTENANCE_MODE", default="") or "").lower()
+        in ("1", "true", "yes", "on")
+    )
+
     @property
     def server(self) -> str:
         return self.host.split(",")[0].strip()

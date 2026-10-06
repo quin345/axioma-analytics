@@ -146,8 +146,32 @@ def analytics_report(
     return report
 
 
+@app.get("/unavailable")
+def unavailable() -> Any:
+    """The branded holding page, always reachable.
+
+    Served at its own path so it can be previewed (and linked to) while the
+    dashboard is still up; `/` only swaps to it when MAINTENANCE_MODE is on.
+    """
+    return FileResponse(
+        STATIC_DIR / "unavailable.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
 @app.get("/")
 def index() -> Any:
+    """The dashboard, or the holding page while maintenance mode is on.
+
+    503 rather than 200 while unavailable: it is a temporary condition, and a
+    non-2xx keeps proxies and uptime checks from caching the outage as healthy.
+    """
+    if get_settings().maintenance:
+        return FileResponse(
+            STATIC_DIR / "unavailable.html",
+            status_code=503,
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
     return FileResponse(
         STATIC_DIR / "index.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},

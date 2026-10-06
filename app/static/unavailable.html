@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Temporarily unavailable &middot; AXIOMA</title>
+<!-- The branding set is shared with the dashboard: same mark, same favicons. -->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<!-- Raster fallbacks: older browsers, bookmark bars, and iOS home screens. -->
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256" />
+<link rel="icon" href="/static/icon-32.png" type="image/png" sizes="32x32" />
+<link rel="icon" href="/static/icon-180.png" type="image/png" sizes="180x180" />
+<link rel="apple-touch-icon" href="/static/icon-180.png" />
+<link rel="mask-icon" href="/static/favicon.svg" color="#4c9aff" />
+<meta name="theme-color" content="#0b0f17" />
+<!--
+  Self-contained on purpose: this page has to render when the app itself is
+  unhealthy, so it must not depend on styles.css or app.js being loadable.
+  The tokens below mirror :root in styles.css - keep them in step.
+-->
+<style>
+:root{
+  --bg:#0b0f17; --panel:#121826; --panel2:#182032; --line:#232d42;
+  --fg:#e6ecf7; --muted:#8798b4; --accent:#4c9aff; --up:#22c55e; --down:#ef4444;
+  --warn:#f59e0b; --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 "Inter",-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:flex;flex-direction:column;min-height:100vh}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;
+  padding:16px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:38px;height:38px;flex:0 0 38px;display:block}
+h1{font-size:19px;margin:0}
+.sub{margin:2px 0 0;color:var(--muted);font-size:12px}
+.conn{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--down);
+  box-shadow:0 0 8px var(--down);animation:blink 1.8s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* Centre column: the notice is the only thing on the page. */
+.wrap{flex:1;display:grid;place-items:center;padding:40px 24px}
+.card{width:100%;max-width:520px;text-align:center;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:44px 36px 36px}
+.mark{width:76px;height:76px;margin:0 auto 22px;display:block;
+  filter:drop-shadow(0 6px 22px rgba(76,154,255,.22));
+  animation:breathe 3.2s ease-in-out infinite}
+@keyframes breathe{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.045);opacity:1}}
+
+.pill{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  padding:4px 12px;border-radius:20px;background:rgba(239,68,68,.14);color:var(--down);
+  border:1px solid rgba(239,68,68,.32)}
+.headline{margin:16px 0 8px;font-size:24px;font-weight:650;letter-spacing:-.01em}
+.body{margin:0 auto;max-width:40ch;color:var(--muted);font-size:14px}
+.note{margin:18px 0 0;font-size:12.5px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+
+.actions{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:center;
+  margin-top:26px;padding-top:22px;border-top:1px solid var(--line)}
+button{padding:9px 18px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;
+  border:1px solid transparent;font-family:inherit}
+button.primary{background:var(--accent);color:#04101f}
+button.primary:hover{filter:brightness(1.1)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.retry-hint{font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+footer{padding:18px 24px;border-top:1px solid var(--line);background:var(--panel);
+  color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:6px 14px;
+  align-items:center;justify-content:center;text-align:center}
+footer .sep{width:1px;height:12px;background:var(--line)}
+
+@media (max-width:700px){
+  .topbar{padding:14px 16px}
+  .conn .conn-label{display:none}
+  .card{padding:34px 20px 28px}
+  .headline{font-size:21px}
+  footer .sep{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  .dot,.mark{animation:none}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <!-- Diamond: the market instrument. Flat top, converging to a point. -->
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <!-- Ascending bar pair: the analytics readout behind the mark. -->
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
+      <defs>
+        <linearGradient id="ax-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4f9dff" />
+          <stop offset="100%" stop-color="#22d3a7" />
+        </linearGradient>
+      </defs>
+    </svg>
+    <div>
+      <h1>AXIOMA</h1>
+      <p class="sub">Tick microstructure &middot; market data analytics</p>
+    </div>
+  </div>
+  <div class="conn">
+    <span class="dot" aria-hidden="true"></span>
+    <span class="conn-label">Offline</span>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="card" role="alert" aria-live="polite">
+    <svg class="mark" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
+    </svg>
+
+    <span class="pill">Temporarily unavailable</span>
+    <h1 class="headline">We&rsquo;ll be back shortly</h1>
+    <p class="body">
+      AXIOMA Analytics is offline while we carry out maintenance on the data
+      pipeline. Charts, tick history and the API are paused; no data has been
+      lost.
+    </p>
+
+    <div class="actions">
+      <button type="button" class="primary" id="retry">Try again now</button>
+      <span class="retry-hint">Auto-refresh in <strong id="cd">30</strong>s</span>
+    </div>
+
+    <p class="note" id="checked">&nbsp;</p>
+  </section>
+</main>
+
+<footer>
+  <span>AXIOMA Analytics</span>
+  <span class="sep" aria-hidden="true"></span>
+  <span>Tick microstructure &middot; market data analytics</span>
+  <span class="sep" aria-hidden="true"></span>
+  <span>If this persists, contact the data platform team.</span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var PERIOD = 30;               // seconds between automatic reloads
+  var left = PERIOD;
+  var cd = document.getElementById("cd");
+  var checked = document.getElementById("checked");
+
+  // Show when the page was served, so a stale tab is obvious.
+  checked.textContent = "Last checked " +
+    new Date().toISOString().slice(11, 19) + " UTC";
+
+  document.getElementById("retry").addEventListener("click", function () {
+    location.reload();
+  });
+
+  // A tab left in the background should check the moment it comes back,
+  // not wait out a countdown nobody has been watching.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) location.reload();
+  });
+
+  setInterval(function () {
+    left -= 1;
+    if (left <= 0) { location.reload(); return; }
+    cd.textContent = String(left);
+  }, 1000);
+})();
+</script>
+</body>
+</html>
+

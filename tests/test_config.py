@@ -13,7 +13,8 @@ def _isolated(monkeypatch):
     """Build Settings from a known-empty environment, then restore."""
     for key in ("SQL_ENDPOINT_PROD", "SQL_ANALYTICS_ENDPOINT", "GOLD_DATABASE",
                 "GOLD_SCHEMA", "SNAPSHOT_TABLE", "SYMBOL_TABLE",
-                "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID"):
+                "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
+                "MAINTENANCE_MODE"):
         monkeypatch.delenv(key, raising=False)
     config.get_settings.cache_clear()
     yield
@@ -194,3 +195,24 @@ def test_connection_string_always_pins_tls_and_the_server():
 def test_get_settings_is_cached():
     config.get_settings.cache_clear()
     assert config.get_settings() is config.get_settings()
+
+
+# --- Maintenance mode -----------------------------------------------------
+# The flag decides whether / serves the branded holding page, so a stray value
+# in the environment must never turn it on by accident: only the affirmative
+# spellings count.
+
+def test_maintenance_is_off_by_default():
+    assert Settings().maintenance is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on"])
+def test_maintenance_affirmative_values_turn_it_on(monkeypatch, raw):
+    monkeypatch.setenv("MAINTENANCE_MODE", raw)
+    assert Settings().maintenance is True
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "false", "0", "no", "off"])
+def test_maintenance_other_values_leave_it_off(monkeypatch, raw):
+    monkeypatch.setenv("MAINTENANCE_MODE", raw)
+    assert Settings().maintenance is False
