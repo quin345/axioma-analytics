@@ -23,7 +23,13 @@ def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
 
     Rows missing a best bid or ask are one-sided books: they have no mid price,
     so they are dropped rather than faked. A crossed book (bid >= ask) is
-    likewise discarded as a desynchronised snapshot.
+    likewise discarded as a desynchronised snapshot - *unless* most of the frame
+    is crossed, which means the feed itself is mirrored rather than the rows
+    being out of sync: the pipeline then has best_bid/best_ask the wrong way
+    round (its own vwap quotes stay correctly oriented), and dropping would
+    empty the whole window. Mirrored frames are repaired by swapping the quotes
+    back; the mid price is identical either way, only the spread sign changes,
+    which is exactly what a mirrored feed gets wrong.
     """
     if raw is None or raw.empty:
         return pd.DataFrame(columns=TICK_COLUMNS)
@@ -50,7 +56,21 @@ def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
         out[name] = pd.to_numeric(src, errors="coerce") if src is not None else np.nan
 
     out = out.dropna(subset=["ts", "symbol", "bid", "ask"])
-    out = out[(out["bid"] > 0) & (out["ask"] > 0) & (out["ask"] > out["bid"])]
+    out = out[(out["bid"] > 0) & (out["ask"] > 0)].copy()
+
+    # Majority-crossed frame => the quotes arrived mirrored. Swap them back
+    # (and the pipeline's own relative spread with them) instead of throwing
+    # the window away; a genuine one-off crossed snapshot is still a minority
+    # here and is dropped below as before.
+    crossed = out["bid"] > out["ask"]
+    if len(out) and bool(crossed.mean() > 0.5):
+        mirrored = crossed.to_numpy()
+        original_bid = out.loc[mirrored, "bid"].to_numpy(copy=True)
+        out.loc[mirrored, "bid"] = out.loc[mirrored, "ask"].to_numpy()
+        out.loc[mirrored, "ask"] = original_bid
+        out.loc[mirrored, "rel_spread"] = -out.loc[mirrored, "rel_spread"]
+
+    out = out[out["ask"] > out["bid"]]
     out = out.sort_values("ts").reset_index(drop=True)
     if out.empty:
         return pd.DataFrame(columns=TICK_COLUMNS)

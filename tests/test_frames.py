@@ -69,6 +69,47 @@ def test_drops_crossed_books():
     assert len(out) == 1
 
 
+def _mirror(rows):
+    """Rewrite rows the way a mirrored feed would ship them: quotes flipped
+    and the pipeline's own relative spread computed from the flipped quotes."""
+    rows = rows.copy()
+    rows[["best_bid", "best_ask"]] = rows[["best_ask", "best_bid"]].to_numpy()
+    rows["rel_spread"] = -rows["rel_spread"]
+    return rows
+
+
+def test_majority_crossed_frame_is_repaired_not_dropped():
+    """A feed that writes best_bid/best_ask the wrong way round would otherwise
+    empty every window: the mid price survives the swap, so repair it."""
+    rows = _mirror(_rows())
+    assert (rows["best_bid"] > rows["best_ask"]).all()   # precondition: crossed
+
+    out = from_snapshot(rows)
+    assert len(out) == 2
+    assert (out["ask"] > out["bid"]).all()
+    assert out["bid"].iloc[0] == pytest.approx(1.0850)   # orientation restored
+    assert out["ask"].iloc[0] == pytest.approx(1.0852)
+    assert out["last"].iloc[0] == pytest.approx(1.0851)  # mid unchanged by the swap
+    assert out["rel_spread"].iloc[0] == pytest.approx(0.0002)
+
+
+def test_single_row_mirrored_window_is_repaired():
+    """Sparse feeds leave one-row windows; a lone crossed row is the whole
+    frame there, so the majority rule must still repair it."""
+    out = from_snapshot(_mirror(_rows().iloc[[0]]))
+    assert len(out) == 1
+    assert out["ask"].iloc[0] > out["bid"].iloc[0]
+
+
+def test_minority_crossed_rows_are_still_dropped():
+    """One crossed snapshot among healthy ones stays desynchronised noise."""
+    rows = _rows()
+    rows.loc[0, "best_bid"] = 1.0860                  # 1 of 2 crossed
+    out = from_snapshot(rows)
+    assert len(out) == 1
+    assert out["bid"].iloc[0] == pytest.approx(1.0851)
+
+
 def test_drops_non_positive_prices():
     rows = _rows()
     rows.loc[0, "best_bid"] = 0.0
