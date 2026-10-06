@@ -306,7 +306,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 `summary`; omitting `asset_class` returns everything.
 
 `/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
-`lookback_hours`. Its `meta` block echoes the symbol's `asset_class`.
+`lookback_minutes`. Its `meta` block echoes the symbol's `asset_class`.
 
 ---
 

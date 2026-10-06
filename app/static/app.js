@@ -987,7 +987,7 @@ function renderCalendar(r) {
     return;
   }
   // Default to the last day that actually carries data rather than to "today",
-  // which usually falls outside a lookback measured in hours.
+  // which usually falls outside a lookback measured in minutes.
   if (!cal.selected || !cal.days.some((d) => d.date === cal.selected)) {
     cal.selected = cal.days[cal.days.length - 1].date;
   }
@@ -1032,7 +1032,7 @@ async function analyse() {
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
-      lookback_hours: val("lookback", 24) || 24,
+      lookback_minutes: val("lookback", 5) || 5,
     });
     const r = await api(`/api/analytics?${p}`);
     renderKpis(r.summary, r.microstructure);

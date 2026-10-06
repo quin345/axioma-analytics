@@ -309,28 +309,28 @@ def lookup(symbol_id: str) -> Instrument | None:
 # --------------------------------------------------------------------------
 
 def load_ticks(symbol: str | None = None, *, limit: int | None = None,
-               lookback_hours: int = 24) -> pd.DataFrame:
+               lookback_minutes: int = 5) -> pd.DataFrame:
     """Canonical ticks for one symbol. Raises DataSourceError when empty."""
     s = get_settings()
     with connect(s) as conn:
         raw = fetch_ticks(conn, symbol=symbol, limit=int(limit or s.max_ticks),
-                          lookback_hours=lookback_hours)
+                          lookback_minutes=lookback_minutes)
     frame = from_snapshot(raw)
     if frame.empty:
         raise DataSourceError(
             f"No usable snapshots for {symbol or 'any instrument'} "
-            f"in the last {lookback_hours} hour(s)."
+            f"in the last {lookback_minutes} minute(s)."
         )
     return frame
 
 
-def load_ticks_cached(symbol: str | None, limit: int | None, lookback_hours: int) -> pd.DataFrame:
+def load_ticks_cached(symbol: str | None, limit: int | None, lookback_minutes: int) -> pd.DataFrame:
     """Cached tick fetch keyed on endpoint + parameters."""
-    key = f"ticks|{_endpoint_key(get_settings())}|{symbol}|{limit}|{lookback_hours}"
+    key = f"ticks|{_endpoint_key(get_settings())}|{symbol}|{limit}|{lookback_minutes}"
     hit = _cache.get(key)
     if hit is not None:
         return hit
-    frame = load_ticks(symbol, limit=limit, lookback_hours=lookback_hours)
+    frame = load_ticks(symbol, limit=limit, lookback_minutes=lookback_minutes)
     _cache.set(key, frame)
     return frame
 

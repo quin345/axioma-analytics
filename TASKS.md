@@ -45,7 +45,7 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 - `tests/test_config.py::test_plain_connection_has_no_authentication_when_unset`
   fails in this checkout and is **pre-existing**. It reads credentials from the
   local `.env`, so it fails whenever those are set. Untouched by this work.
-- A 24h lookback yields one calendar day. Use `lookback_hours=2160` (the field
+- A 24h lookback yields one calendar day. Use `lookback_minutes=129600` (the field
   max) for a populated month grid.
 
 ---

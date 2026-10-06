@@ -211,10 +211,10 @@ _SNAPSHOT_COLUMNS = [
 
 def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
                 start: str | None = None, end: str | None = None,
-                limit: int = 50_000, lookback_hours: int | None = None) -> pd.DataFrame:
+                limit: int = 50_000, lookback_minutes: int | None = None) -> pd.DataFrame:
     """Read raw state snapshots for one symbol.
 
-    With ``lookback_hours`` and no explicit range, the window is anchored on the
+    With ``lookback_minutes`` and no explicit range, the window is anchored on the
     newest snapshot so the result is the most recent session rather than an
     arbitrary slice of history.
     """
@@ -227,7 +227,7 @@ def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
         clauses.append(f"{ident('symbolId')} = ?")
         params.append(str(symbol).strip())
 
-    if lookback_hours and not start and not end:
+    if lookback_minutes and not start and not end:
         anchor_where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         try:
             anchor = query(conn, f"SELECT MAX({ident('timestamp')}) AS mx FROM {obj}{anchor_where}",
@@ -236,7 +236,7 @@ def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
         except DataSourceError:
             mx = None
         if mx is not None and not pd.isna(mx):
-            cutoff = pd.Timestamp(mx) - pd.Timedelta(hours=int(lookback_hours))
+            cutoff = pd.Timestamp(mx) - pd.Timedelta(minutes=int(lookback_minutes))
             clauses.append(f"{ident('timestamp')} >= ?")
             params.append(cutoff.tz_localize(None) if cutoff.tzinfo else cutoff)
 
