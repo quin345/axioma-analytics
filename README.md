@@ -249,7 +249,10 @@ sticky and un-dismissable.
 `gold.agg_dom_book_snapshot` holds one pre-aggregated row per symbol and
 timestamp, with `best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`,
 `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread` and `rel_spread`.
-`app/frames.py` normalises it to the canonical tick frame
+Each row is a point-in-time state snapshot — top-of-book quotes and
+aggregate resting sizes — rather than a reconstruction of the full order
+book.
+`app/frames.py` normalises it to the canonical state snapshot frame
 (`ts | symbol | bid | ask | last | volume`) so every dashboard panel works
 unchanged. The pipeline's own imbalance is used as the directional signal;
 one-sided rows (no best bid or ask) and crossed rows (`bid >= ask`) are dropped
@@ -270,7 +273,7 @@ app/
   config.py      .env -> Settings (endpoint, credentials, gold object names)
   auth.py        managed identity / service principal / az CLI token minting
   db.py          connection, gold queries, snapshot fetch, symbol catalogue
-  frames.py      gold snapshot reader -> canonical tick frame
+  frames.py      gold snapshot reader -> canonical state snapshot frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
   service.py     instrument catalogue, health probing, TTL cache
@@ -282,7 +285,7 @@ tests/
   test_analytics.py / test_frames.py / test_assets.py / test_config.py
 ```
 
-The canonical tick frame is:
+The canonical state snapshot frame is:
 
 ```
 ts (datetime, UTC) | symbol | bid | ask | last | volume | mid

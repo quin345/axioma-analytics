@@ -36,7 +36,7 @@ def qualified(database: str, schema: str, table: str) -> str:
 
 
 def snapshot_object(settings: Settings | None = None) -> str:
-    """Qualified name of the aggregate book-snapshot table."""
+    """Qualified name of the aggregate state-snapshot table."""
     s = settings or get_settings()
     return qualified(s.gold_database, s.gold_schema, s.snapshot_table)
 
@@ -179,7 +179,7 @@ def symbol_catalogue(conn: pyodbc.Connection, settings: Settings | None = None) 
 
 
 def symbol_tick_counts(conn: pyodbc.Connection, settings: Settings | None = None) -> dict[str, int]:
-    """{symbolId: snapshot rows} from the gold book-snapshot table."""
+    """{symbolId: snapshot rows} from the gold state-snapshot table."""
     obj = snapshot_object(settings)
     df = query(conn, f"""
         SELECT {ident('symbolId')} AS symbolId, COUNT_BIG(*) AS ticks
@@ -193,7 +193,8 @@ def symbol_tick_counts(conn: pyodbc.Connection, settings: Settings | None = None
 # Ticks
 # --------------------------------------------------------------------------
 
-#: Columns of the canonical tick frame produced by ``frames.ticks_from_snapshot``.
+#: Columns of the canonical state snapshot frame produced by
+#: ``frames.ticks_from_snapshot``.
 TICK_COLUMNS = [
     "ts", "symbol", "bid", "ask", "last", "volume",
     "bid_depth", "ask_depth", "signed_volume",
@@ -211,7 +212,7 @@ _SNAPSHOT_COLUMNS = [
 def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
                 start: str | None = None, end: str | None = None,
                 limit: int = 50_000, lookback_hours: int | None = None) -> pd.DataFrame:
-    """Read raw book snapshots for one symbol.
+    """Read raw state snapshots for one symbol.
 
     With ``lookback_hours`` and no explicit range, the window is anchored on the
     newest snapshot so the result is the most recent session rather than an

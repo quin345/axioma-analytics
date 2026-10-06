@@ -102,7 +102,7 @@ function banner(messages, kind = "warn") {
   // otherwise persist and colour every later "Heads up" banner red.
   el.className = `banner ${kind === "bad" ? "bad" : ""}`;
   el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Heads up"}</b>` +
-    (kind === "bad" ? "" : `<p>Snapshots refresh every ${REFRESH_MINUTES} minutes, so results may lag the live book.</p>`) +
+    (kind === "bad" ? "" : `<p>Snapshots refresh every ${REFRESH_MINUTES} minutes, so results may lag the live market.</p>`) +
     "<ul>" + messages.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>";
   el.classList.remove("hidden");
 }
@@ -792,7 +792,7 @@ const DETAILS = {
   ticks: (r) => {
     const s = r.summary;
     return block("About this table",
-      "The raw book snapshots behind every chart above, newest first. Dir is the sign " +
+      "The raw state snapshots behind every chart above, newest first. Dir is the sign " +
       "of the mid change on that tick.", [
         ["Rows shown", fmt.int((r.ticks || []).length)],
         ["Session start", esc(fmt.time(s.start))],

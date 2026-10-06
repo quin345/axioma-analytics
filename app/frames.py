@@ -1,9 +1,9 @@
-"""Reader for the gold aggregate book snapshots.
+"""Reader for the gold aggregate state snapshots.
 
 `gold.agg_dom_book_snapshot` holds one row per symbol and timestamp with best
 bid/ask, resting sizes and the pipeline's own imbalance and spread measures.
-`from_snapshot` projects it onto the canonical tick frame the analytics engine
-consumes:
+`from_snapshot` projects it onto the canonical state snapshot frame the
+analytics engine consumes:
 
     ts | symbol | bid | ask | last | volume | mid
 """
@@ -19,7 +19,7 @@ VOLUME_SCALE = 100.0
 
 
 def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
-    """Normalise raw gold snapshots into the canonical tick frame.
+    """Normalise raw gold snapshots into the canonical state snapshot frame.
 
     Rows missing a best bid or ask are one-sided books: they have no mid price,
     so they are dropped rather than faked. A crossed book (bid >= ask) is

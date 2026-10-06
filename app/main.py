@@ -18,7 +18,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Axioma Analytics",
-    description="Microstructure analytics over the production gold book snapshots.",
+    description="Microstructure analytics over the production gold state snapshots.",
     version="2.0.0",
 )
 
