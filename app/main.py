@@ -136,6 +136,7 @@ def analytics_report(
     meta = {
         "symbol": symbol or report["summary"].get("symbol"),
         "symbol_name": inst.display if inst else None,
+        "symbol_description": inst.description if inst else None,
         "asset_class": inst.asset_class if inst else None,
         "asset_class_label": CLASS_LABELS.get(inst.asset_class, "Unclassified") if inst else None,
         "family": inst.family if inst else None,

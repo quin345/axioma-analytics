@@ -29,6 +29,15 @@ const fmt = {
     if (Number.isNaN(d.getTime())) return String(iso);
     return d.toISOString().replace("T", " ").slice(5, 19);
   },
+  /** Full timestamp with millis: "10-06 22:09:14.747". Tick snapshots can
+   * repeat the same quote many times a second, so second precision made every
+   * row in Latest ticks look identical even though the instants differed. */
+  timems: (iso) => {
+    if (!iso) return "\u2013";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toISOString().replace("T", " ").slice(5, 23);
+  },
   num: (v) => {
     if (v === null || v === undefined || Number.isNaN(Number(v))) return "\u2013";
     return Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 });
@@ -205,11 +214,19 @@ function fillSymbols(symbols) {
   // incomparable price scales and produce meaningless statistics.
   // Show the readable ticker and asset class. The raw symbolId stays the option
   // value (the API needs it) but is kept out of the visible label.
+  // The picker is pinned to XAUUSD (the default symbol): it stays first and
+  // selectable while every other instrument is shown greyed-out and disabled,
+  // with the broker description alongside the ticker and asset class.
   sel.innerHTML = symbols.map((s) => {
     const id = s.symbol ?? "";
     const label = s.name || id;
     const cls = s.asset_class_label || "Unclassified";
-    return `<option value="${esc(id)}">${esc(label)} \u00b7 ${esc(cls)}</option>`;
+    const desc = (s.description || "").trim();
+    const isDefault = window.__defaultSymbol
+      ? id === window.__defaultSymbol
+      : (s.name || "").toUpperCase() === "XAUUSD";
+    const text = desc ? `${label} \u00b7 ${cls} \u2014 ${desc}` : `${label} \u00b7 ${cls}`;
+    return `<option value="${esc(id)}"${isDefault ? "" : " disabled"}>${esc(text)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
   // Default to XAUUSD (the pinned default from /api/symbols) on first load, so
@@ -509,7 +526,10 @@ const sp = r.microstructure.spread || [];
     const top = hours.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0))[0];
     return `Busiest ${String(top.hour).padStart(2, "0")}:00 UTC \u00b7 ${fmt.int(top.ticks)} ticks`;
   })());
-  setNote("ticks", `${fmt.int((r.ticks || []).length)} rows shown`);
+  setNote("ticks", (() => {
+    const n = (r.ticks || []).length;
+    return `${fmt.int(n)} snapshot${n === 1 ? "" : "s"} shown`;
+  })());
 }
 
 /** Write a card footnote, tolerating HTML that predates the element. */
@@ -524,16 +544,36 @@ function renderTicks(rows) {
     t.innerHTML = `<thead></thead><tbody><tr><td class="note">No ticks in range.</td></tr></tbody>`;
     return;
   }
+  // Consecutive snapshots often repeat the same quote while only the instant
+  // moves, which read as "all the same values". Collapse those repeats so the
+  // table shows each distinct quote plus how many snapshots carried it.
+  const groups = [];
+  for (const r of rows.slice().reverse()) {
+    const g = groups[groups.length - 1];
+    if (g && g.bid === r.bid && g.ask === r.ask && g.mid === r.mid
+        && g.volume === r.volume && g.spread_bps === r.spread_bps) {
+      g.repeats += 1;
+      g.first_ts = r.ts;
+    } else {
+      groups.push({ ...r, repeats: 1, first_ts: r.ts });
+    }
+  }
   const cols = ["ts", "bid", "ask", "mid", "volume", "spread_bps", "tick_dir"];
+  const head = cols.map((c) => `<th>${c}</th>`).join("") + `<th title="Snapshots carrying this quote">x</th>`;
   t.innerHTML =
-    `<thead><tr>${cols.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>` +
-    rows.slice().reverse().map((r) => `<tr>${cols.map((c) => {
+    `<thead><tr>${head}</tr></thead><tbody>` +
+    groups.map((r) => `<tr>${cols.map((c) => {
       const v = r[c];
       if (v === null || v === undefined) return "<td>\u2013</td>";
-      if (c === "ts") return `<td>${esc(fmt.time(v))}</td>`;
+      if (c === "ts") {
+        // A held quote spans first..last instant; repeats show the range.
+        const first = fmt.timems(r.first_ts || v);
+        const lastTs = fmt.timems(v);
+        return `<td>${esc(r.repeats > 1 ? `${lastTs} \u2192 ${first}` : lastTs)}</td>`;
+      }
       if (c === "tick_dir") return `<td class="${v > 0 ? "up" : v < 0 ? "down" : ""}">${v > 0 ? "\u25b2" : v < 0 ? "\u25bc" : "\u2013"}</td>`;
       return `<td>${fmt.num(v)}</td>`;
-    }).join("")}</tr>`).join("") + "</tbody>";
+    }).join("")}<td>${r.repeats > 1 ? `\u00d7${r.repeats}` : ""}</td></tr>`).join("") + "</tbody>";
 }
 /* ---------------- expandable cards ---------------- */
 
@@ -1066,9 +1106,10 @@ async function analyse() {
 function renderPriceTag(meta) {
   const el = $("price-tag");
   if (!el || !meta) return;
-  // Only the display name and class are shown; the raw symbolId is an internal
-  // join key and adds nothing for a reader.
-  el.textContent = [meta.symbol_name || meta.symbol || "", meta.asset_class_label || ""]
+  // Only the display name, description and class are shown; the raw symbolId
+  // is an internal join key and adds nothing for a reader.
+  el.textContent = [meta.symbol_name || meta.symbol || "",
+    meta.symbol_description || "", meta.asset_class_label || ""]
     .filter(Boolean).join(" \u00b7 ");
 }
 

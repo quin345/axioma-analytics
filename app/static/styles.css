@@ -53,6 +53,7 @@ h2{font-size:13px;margin:0 0 12px;letter-spacing:.06em;text-transform:uppercase;
 select,input{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
   padding:8px 11px;border-radius:9px;font-size:13px;min-width:132px;font-family:inherit}
 select:focus,input:focus{outline:2px solid var(--accent);outline-offset:1px}
+select option:disabled{color:#5a6a86}
 button{padding:9px 18px;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;
   border:1px solid transparent;font-family:inherit}
 button.primary{background:var(--accent);color:#04101f}
