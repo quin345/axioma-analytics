@@ -229,7 +229,7 @@ def _default_key() -> str:
     try:
         return (get_settings().default_symbol or "").strip().upper()
     except Exception:
-        return "XAUUSD"
+        return "BTCUSD"
 
 
 def default_symbol_id(only_traded: bool = True) -> str | None:

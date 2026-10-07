@@ -68,7 +68,7 @@ class Settings:
     max_ticks: int = field(default_factory=lambda: int(_env("MAX_TICKS", default="200000") or 200000))
     #: Ticker pinned as the dashboard default (matched by symbolName, then id).
     default_symbol: str = field(
-        default_factory=lambda: _env("DEFAULT_SYMBOL", default="XAUUSD") or "XAUUSD"
+        default_factory=lambda: _env("DEFAULT_SYMBOL", default="BTCUSD") or "BTCUSD"
     )
 
     # --- Availability -------------------------------------------------------

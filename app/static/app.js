@@ -214,7 +214,7 @@ function fillSymbols(symbols) {
   // incomparable price scales and produce meaningless statistics.
   // Show the readable ticker and asset class. The raw symbolId stays the option
   // value (the API needs it) but is kept out of the visible label.
-  // The picker is pinned to XAUUSD (the default symbol): it stays first and
+  // The picker is pinned to BTCUSD (the default symbol): it stays first and
   // selectable while every other instrument is shown greyed-out and disabled,
   // with the broker description alongside the ticker and asset class.
   sel.innerHTML = symbols.map((s) => {
@@ -224,17 +224,17 @@ function fillSymbols(symbols) {
     const desc = (s.description || "").trim();
     const isDefault = window.__defaultSymbol
       ? id === window.__defaultSymbol
-      : (s.name || "").toUpperCase() === "XAUUSD";
+      : (s.name || "").toUpperCase() === "BTCUSD";
     const text = desc ? `${label} \u00b7 ${cls} \u2014 ${desc}` : `${label} \u00b7 ${cls}`;
     return `<option value="${esc(id)}"${isDefault ? "" : " disabled"}>${esc(text)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
-  // Default to XAUUSD (the pinned default from /api/symbols) on first load, so
+  // Default to BTCUSD (the pinned default from /api/symbols) on first load, so
   // the dashboard opens on gold rather than the most-traded instrument.
   const pinned = window.__defaultSymbol
     && symbols.some((s) => (s.symbol ?? "") === window.__defaultSymbol)
     ? window.__defaultSymbol : null;
-  const byName = symbols.find((s) => (s.name || "").toUpperCase() === "XAUUSD");
+  const byName = symbols.find((s) => (s.name || "").toUpperCase() === "BTCUSD");
   const fallback = pinned || (byName && byName.symbol) || (symbols[0].symbol ?? "");
   sel.value = stillThere ? prev : fallback;
 }
