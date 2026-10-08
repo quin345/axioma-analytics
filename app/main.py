@@ -39,7 +39,7 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         try:
             # class_summary now excludes instruments the dimension cannot
             # classify, because the selectors do. Deriving `traded` from it
-            # would under-report the snapshot and quietly report zero
+            # would under-report the metrics and quietly report zero
             # unclassified while the coverage note still lists them, so the
             # totals come from the catalogue itself and stay independent of
             # what the pickers choose to show.
@@ -57,7 +57,7 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "app": s.app_name,
         "connected": st.connected,
         "server_time": st.server_time,
-        "latest_snapshot": st.latest,
+        "latest_tick": st.latest,
         "row_count": st.row_count,
         "dimension_rows": st.dimension_rows,
         "error": st.error,

@@ -49,7 +49,7 @@ def _patch_kql(monkeypatch, *, rows: int = 100, latest: str | None = "2026-10-08
         monkeypatch.setattr(service.kql, "connect", lambda settings=None: _ok_conn())
         monkeypatch.setattr(service.kql, "server_time",
                             lambda client, settings=None: "2026-10-08T01:00:00Z")
-        monkeypatch.setattr(service.kql, "snapshot_stats",
+        monkeypatch.setattr(service.kql, "tick_stats",
                             lambda client, settings=None: (rows, latest))
 
 

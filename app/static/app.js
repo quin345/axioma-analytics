@@ -29,7 +29,7 @@ const fmt = {
     if (Number.isNaN(d.getTime())) return String(iso);
     return d.toISOString().replace("T", " ").slice(5, 19);
   },
-  /** Full timestamp with millis: "10-06 22:09:14.747". Tick snapshots can
+  /** Full timestamp with millis: "10-06 22:09:14.747". Tick metrics can
    * repeat the same quote many times a second, so second precision made every
    * row in Latest ticks look identical even though the instants differed. */
   timems: (iso) => {
@@ -384,7 +384,7 @@ function renderCharts(r) {
   });
   $("ofi-note").textContent =
     `Buy ticks ${fmt.int(ts.buy_ticks)} \u00b7 Sell ticks ${fmt.int(ts.sell_ticks)}`;
-  // Book depth panel: only meaningful for snapshot/level sources.
+  // Book depth panel: only present when the reader supplied resting-size columns.
   const dep = r.depth || { available: false };
   const dcard = $("depthCard");
   if (dcard) dcard.classList.toggle("hidden", !dep.available);
@@ -528,7 +528,7 @@ const sp = r.microstructure.spread || [];
   })());
   setNote("ticks", (() => {
     const n = (r.ticks || []).length;
-    return `${fmt.int(n)} snapshot${n === 1 ? "" : "s"} shown`;
+    return `${fmt.int(n)} tick${n === 1 ? "" : "s"} shown`;
   })());
 }
 
@@ -544,9 +544,9 @@ function renderTicks(rows) {
     t.innerHTML = `<thead></thead><tbody><tr><td class="note">No ticks in range.</td></tr></tbody>`;
     return;
   }
-  // Consecutive snapshots often repeat the same quote while only the instant
+  // Consecutive ticks often repeat the same quote while only the instant
   // moves, which read as "all the same values". Collapse those repeats so the
-  // table shows each distinct quote plus how many snapshots carried it.
+  // table shows each distinct quote plus how many ticks carried it.
   const groups = [];
   for (const r of rows.slice().reverse()) {
     const g = groups[groups.length - 1];
@@ -669,7 +669,8 @@ const DETAILS = {
     if (!d.available) return "";
     const im = d.imbalance_series || [];
     return block("Resting size",
-      "Depth is only present for snapshot or level-based sources. A bid share above " +
+      "Depth comes from the full order-book reconstruction, so it is present whenever the " +
+      "pipeline supplied resting sizes. A bid share above " +
       "50% means more resting size sits on the buy side than on the offer.", [
         ["Avg bid depth", fmt.int(d.avg_bid_depth)],
         ["Avg ask depth", fmt.int(d.avg_ask_depth)],
@@ -840,7 +841,7 @@ const DETAILS = {
   ticks: (r) => {
     const s = r.summary;
     return block("About this table",
-      "The raw state snapshots behind every chart above, newest first. Dir is the sign " +
+      "The raw per-tick metrics behind every chart above, newest first. Dir is the sign " +
       "of the mid change on that tick.", [
         ["Rows shown", fmt.int((r.ticks || []).length)],
         ["Session start", esc(fmt.time(s.start))],
@@ -864,8 +865,8 @@ const DETAILS = {
         ["Unclassified", fmt.int(h.unclassified_count)],
         ["Asset classes", fmt.int(h.asset_class_count)],
         ["Symbol dimension", fmt.int(h.dimension_rows)],
-        ["Snapshot rows", fmt.int(h.row_count)],
-        ["Latest snapshot", esc(fmt.time(h.latest_snapshot))],
+        ["Tick rows", fmt.int(h.row_count)],
+        ["Latest tick", esc(fmt.time(h.latest_tick))],
       ]) + (top.length ? block("Busiest classes", null, top) : "");
   },
 

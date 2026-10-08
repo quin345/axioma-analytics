@@ -155,18 +155,18 @@ def test_server_time_is_blank_when_the_probe_returns_no_rows(settings):
     assert kql.server_time(client, settings) == ""
 
 
-def test_snapshot_stats_returns_count_and_newest_timestamp(settings):
+def test_tick_stats_returns_count_and_newest_timestamp(settings):
     latest = pd.Timestamp("2026-10-08T10:00:00Z")
     client = _FakeClient([[{"n": 12, "latest": latest}]])
-    count, seen = kql.snapshot_stats(client, settings)
+    count, seen = kql.tick_stats(client, settings)
     assert (count, seen) == (12, str(latest))
     assert "agg_dom" in client.calls[0][1]
     assert "summarize" in client.calls[0][1]
 
 
-def test_snapshot_stats_reports_an_empty_table_as_no_latest(settings):
+def test_tick_stats_reports_an_empty_table_as_no_latest(settings):
     client = _FakeClient([[{"n": 0, "latest": None}]])
-    assert kql.snapshot_stats(client, settings) == (0, None)
+    assert kql.tick_stats(client, settings) == (0, None)
 
 
 def test_symbol_tick_counts_keys_on_the_stringified_symbol_id(settings):

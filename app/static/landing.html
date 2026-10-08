@@ -159,7 +159,7 @@ footer strong{color:var(--fg)}
       </div>
       <div class="cell" role="listitem">
         <p class="n">Every 45&nbsp;min</p>
-        <p class="l">Pipeline writes fresh state snapshots on this cadence</p>
+        <p class="l">Pipeline writes fresh tick metrics on this cadence</p>
       </div>
     </div>
   </section>
@@ -274,10 +274,10 @@ footer strong{color:var(--fg)}
       <div class="card">
         <h3><span class="dot" aria-hidden="true"></span>The rows</h3>
         <p>
-          Per-tick aggregate DOM rows from the production eventhouse: one
-          pre-aggregated state snapshot per symbol and timestamp &mdash;
-          top-of-book quotes plus aggregate resting size. These are point-in-time
-          snapshots, not a reconstruction of the full order book.
+          Per-tick order-book metrics from the production eventhouse: one derived
+          row per symbol and tick &mdash; top-of-book quotes, aggregate resting
+          size and the spread/imbalance measures &mdash; computed from a full
+          order-book reconstruction, not sampled as point-in-time snapshots.
         </p>
       </div>
       <div class="card">
@@ -291,7 +291,7 @@ footer strong{color:var(--fg)}
       <div class="card">
         <h3><span class="dot" aria-hidden="true"></span>Freshness</h3>
         <p>
-          The pipeline writes state snapshots on a fixed cadence. Every screen
+          The pipeline writes derived tick metrics on a fixed cadence. Every screen
           states when the newest tick landed and when the next refresh is due, so
           you always know how current the view is.
         </p>

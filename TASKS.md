@@ -8,11 +8,32 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-08 - Terminology: per-tick metrics, not snapshots
+
+### Correction
+- [x] `agg_dom` holds **derived per-tick order-book metrics**, reconstructed from
+      `dom_stream_raw` -> `dom_book_flat`, not point-in-time state snapshots
+- [x] `frames.from_snapshot` -> `frames.from_ticks`
+- [x] `kql.SNAPSHOT_COLUMNS` -> `kql.METRIC_COLUMNS`
+- [x] `kql.snapshot_stats` -> `kql.tick_stats`
+- [x] `/api/health` field `latest_snapshot` -> `latest_tick`
+- [x] README, landing page, dashboard copy, `.env.example` and tests updated
+- [x] `pytest` - all green
+
+**Notes:**
+- The source lineage is now stated wherever the table is described: the raw DOM
+  event feed (`dom_stream_raw`) is reconstructed into a full order book
+  (`dom_book_flat`), and `agg_dom` carries the per-tick metrics derived from
+  that reconstruction. Nothing about the row shape or the transport changed -
+  this is a wording correction, not a schema move.
+
+---
+
 ## 2026-10-08 - Aggregate rows move to Fabric KQL (Eventhouse)
 
 ### Transport
 - [x] `app/kql.py`: Kusto client, `table_ref`, declarative-parameter queries,
-      `server_time`, `snapshot_stats`, `symbol_tick_counts`, `fetch_ticks`
+      `server_time`, `tick_stats`, `symbol_tick_counts`, `fetch_ticks`
 - [x] Anchored `lookback_minutes` window ported from the SQL anchor query
 - [x] Auth mirrors SQL: managed identity -> service principal -> `az login`,
       with `azure-kusto-data` refreshing tokens internally
@@ -71,7 +92,7 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
   (`24596`) while the SQL analytics endpoint's metadata points at parquet files
   that were rewritten. It cleared on its own during this session; the legacy
   `agg_dom_book_snapshot` fails identically, so it is unrelated to the KQL move.
-- The mirroring check in `frames.from_snapshot` is exercised by the live data, not
+- The mirroring check in `frames.from_ticks` is exercised by the live data, not
   just by tests: 100% of the rows in a one-hour XAUUSD window have
   `best_bid > best_ask`, `best_bid` sits near the pipeline's `vwap_ask` and
   `best_ask` near its `vwap_bid`, and the pair is ~19x wider than the pipeline's
@@ -197,7 +218,7 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 - [x] `meta.latest_tick` added to `/api/analytics`, the max `ts` actually returned
 - [x] Freshness strip under the controls: 45-minute cadence, latest tick, next
-      refresh, snapshot row count
+      refresh, tick row count
 - [x] Header gains the last-tick timestamp plus an age badge
 - [x] Age badge goes amber past the 45 minute cadence (`tickage stale`)
 - [x] `REFRESH_MINUTES = 45` in app.js drives the strip and the hint banner

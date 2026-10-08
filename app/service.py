@@ -1,7 +1,7 @@
 """Data access for the production data endpoints.
 
 Owns the connection lifecycle, the cached instrument catalogue (ticker, asset
-class, tick count) and the tick fetch. The aggregate rows come from the KQL
+class, tick count) and the tick fetch. The order-book metrics come from the KQL
 endpoint (`app.kql`); the instrument dimension stays on the SQL analytics
 endpoint (`app.db`). Caching keeps the dashboard responsive: the catalogue
 changes only when a new instrument is listed, and repeated dashboard requests
@@ -19,7 +19,7 @@ from . import kql
 from .assets import CLASS_LABELS, classify_asset_class, family_label, family_of, sort_key
 from .config import Settings, get_settings
 from .db import DataSourceError, connect, qualified, query, symbol_catalogue
-from .frames import from_snapshot
+from .frames import from_ticks
 
 _CACHE_TTL = 300.0
 _MAX_CACHE_ENTRIES = 32
@@ -130,10 +130,10 @@ def status(*, refresh: bool = False) -> Status:
     try:
         with kql.connect(s) as client:
             st.server_time = kql.server_time(client, s)
-            st.row_count, st.latest = kql.snapshot_stats(client, s)
+            st.row_count, st.latest = kql.tick_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
-            st.hints = ["The KQL aggregate table is empty. Run the ingest pipeline."]
+            st.hints = ["The KQL metrics table is empty. Run the ingest pipeline."]
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
         st.hints = ["The KQL endpoint is unavailable. Check the configured identity."]
@@ -158,10 +158,10 @@ def status(*, refresh: bool = False) -> Status:
 
 
 def traded_count() -> int:
-    """Every instrument with snapshots, classified or not.
+    """Every instrument with tick metrics, classified or not.
 
     Unlike `_sorted_instruments` this keeps the unclassifiable ones, so it
-    reports the true size of the snapshot rather than what the selectors show.
+    reports the true size of the feed rather than what the selectors show.
     """
     return sum(1 for i in instruments().values() if i.ticks > 0)
 
@@ -172,7 +172,7 @@ def unclassified_count() -> int:
 
 
 def coverage_note() -> str | None:
-    """Warning when the snapshot holds instruments the dimension cannot name.
+    """Warning when the metrics hold instruments the dimension cannot name.
 
     ``agg_dom`` is shared and accumulates rows from every feed that has ever
     written to it, while ``symbols_icmarkets`` describes only icmarkets. Any
@@ -184,7 +184,7 @@ def coverage_note() -> str | None:
     if not missing:
         return None
     return (
-        f"{missing} instrument(s) in the snapshot have no row in "
+        f"{missing} instrument(s) in the metrics have no row in "
         f"symbols_icmarkets and are not shown in the selectors. They come from "
         f"a feed the icmarkets dimension does not cover."
     )
@@ -366,7 +366,7 @@ def load_ticks(symbol: str | None = None, *, limit: int | None = None,
     with kql.connect(s) as client:
         raw = kql.fetch_ticks(client, symbol=symbol, limit=int(limit or s.max_ticks),
                               lookback_minutes=lookback_minutes, settings=s)
-    frame = from_snapshot(raw)
+    frame = from_ticks(raw)
     if frame.empty:
         raise DataSourceError(
             f"No usable aggregate rows for {symbol or 'any instrument'} "
@@ -397,10 +397,10 @@ def reset() -> None:
     try:
         with kql.connect(s) as client:
             st.server_time = kql.server_time(client, s)
-            st.row_count, st.latest = kql.snapshot_stats(client, s)
+            st.row_count, st.latest = kql.tick_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
-            st.hints = ["The KQL aggregate table is empty. Run the ingest pipeline."]
+            st.hints = ["The KQL metrics table is empty. Run the ingest pipeline."]
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
         st.hints = ["Data source unavailable. Check the configured credentials."]

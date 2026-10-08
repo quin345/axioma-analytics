@@ -1,9 +1,10 @@
-"""KQL access to the production aggregate DOM table (Fabric Eventhouse).
+"""KQL access to the production order-book metrics table (Fabric Eventhouse).
 
-The per-tick aggregate data now lives in a KQL database
-(``ctrader_dom.agg_dom``) instead of the SQL analytics endpoint. The column
-names are unchanged, so `app.frames.from_snapshot` is untouched by the move;
-only the transport (KQL instead of T-SQL) and the endpoint differ.
+``ctrader_dom.agg_dom`` holds derived per-tick order-book metrics
+(``dom_stream_raw -> dom_book_flat -> agg_dom``) and now lives in a KQL database
+instead of the SQL analytics endpoint. The column names are unchanged, so
+`app.frames.from_ticks` is untouched by the move; only the transport (KQL
+instead of T-SQL) and the endpoint differ.
 
 The instrument dimension (``symbols_icmarkets`` and its asset-class chain)
 stays on the SQL analytics endpoint and is read by `app.db`.
@@ -33,8 +34,8 @@ from .db import DataSourceError
 #: A plain Kusto entity name; anything else is bracket-escaped.
 _PLAIN_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: Columns of one raw aggregate row, unchanged from the SQL table.
-SNAPSHOT_COLUMNS = [
+#: Columns of one raw tick-metric row, unchanged from the SQL table.
+METRIC_COLUMNS = [
     "timestamp", "symbolId", "total_bid", "total_ask", "best_bid", "best_ask",
     "imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask", "vwap_spread",
     "rel_spread", "rel_vwap_spread",
@@ -131,8 +132,8 @@ def server_time(client: KustoClient, settings: Settings | None = None) -> str:
     return "" if df.empty else str(df["server_time"].iloc[0])
 
 
-def snapshot_stats(client: KustoClient, settings: Settings | None = None) -> tuple[int, str | None]:
-    """(row count, newest timestamp) for the aggregate table."""
+def tick_stats(client: KustoClient, settings: Settings | None = None) -> tuple[int, str | None]:
+    """(row count, newest timestamp) for the order-book metrics table."""
     s = settings or get_settings()
     df = query(
         client,
@@ -147,7 +148,7 @@ def snapshot_stats(client: KustoClient, settings: Settings | None = None) -> tup
 
 
 def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) -> dict[str, int]:
-    """{symbolId: aggregate rows} for the whole table.
+    """{symbolId: tick metric rows} for the whole table.
 
     ``symbolId`` is a ``long``, so the grouping key is the column itself; the
     string form the rest of the app keys on is applied in Python, which keeps a
@@ -199,7 +200,7 @@ def fetch_ticks(client: KustoClient, *, symbol: str | None = None,
                 start: str | None = None, end: str | None = None,
                 limit: int = 50_000, lookback_minutes: int | None = None,
                 settings: Settings | None = None) -> pd.DataFrame:
-    """Read raw aggregate rows for one symbol, oldest first.
+    """Read raw tick-metric rows for one symbol, oldest first.
 
     With ``lookback_minutes`` and no explicit range, the window is anchored on
     the newest row so the result is the most recent session rather than an
@@ -224,5 +225,5 @@ def fetch_ticks(client: KustoClient, *, symbol: str | None = None,
     if end:
         params["end"] = end
 
-    csl = _FETCH.format(obj=obj, limit=int(limit), columns=", ".join(SNAPSHOT_COLUMNS))
+    csl = _FETCH.format(obj=obj, limit=int(limit), columns=", ".join(METRIC_COLUMNS))
     return query(client, csl, params, settings=s)

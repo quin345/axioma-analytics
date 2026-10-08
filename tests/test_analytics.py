@@ -9,11 +9,11 @@ import pandas as pd
 import pytest
 
 from app import analytics
-from app.frames import from_snapshot
+from app.frames import from_ticks
 
 
-def _snapshots(n: int = 5000, seed: int = 42) -> pd.DataFrame:
-    """Raw gold-shaped snapshots with a random-walk mid price."""
+def _ticks(n: int = 5000, seed: int = 42) -> pd.DataFrame:
+    """Raw tick-metric rows with a random-walk mid price."""
     rng = np.random.default_rng(seed)
     ts = pd.date_range("2026-10-03T10:00:00", periods=n, freq="1s", tz="UTC")
     mid = 1.0850 + np.cumsum(rng.normal(0, 2e-5, n))
@@ -38,7 +38,7 @@ def _snapshots(n: int = 5000, seed: int = 42) -> pd.DataFrame:
 
 @pytest.fixture(scope="module")
 def frame():
-    return analytics.enrich(analytics.prepare(from_snapshot(_snapshots())))
+    return analytics.enrich(analytics.prepare(from_ticks(_ticks())))
 
 
 # ---------- reader / prepare ----------

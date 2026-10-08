@@ -572,7 +572,7 @@ def tick_table(df: pd.DataFrame, *, limit: int = 200) -> list[dict]:
 
 
 def book_depth(df: pd.DataFrame, *, bins: int = 25) -> dict:
-    """Depth-at-price and resting-size profile for state-snapshot sources.
+    """Depth-at-price and resting-size profile for the order-book metrics.
 
     Present only when the reader produced depth columns (silver levels or the
     raw L2 replay).

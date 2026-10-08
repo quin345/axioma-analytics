@@ -111,7 +111,7 @@ def test_unknown_asset_class_is_rejected(client):
 # ----------------------------------------------------------------------
 
 def test_traded_count_includes_unclassifiable_instruments(catalogue):
-    """`traded_count` reports the snapshot, not just what the pickers show."""
+    """`traded_count` reports the whole feed, not just what the pickers show."""
     assert service.traded_count() == 4
     assert service.unclassified_count() == 1
 

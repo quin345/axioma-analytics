@@ -320,19 +320,28 @@ reach nginx.
 
 ## Data source shape
 
-`ctrader_dom.agg_dom` (KQL, Eventhouse) holds one pre-aggregated row per symbol
-and timestamp, with `best_bid`, `best_ask`, `total_bid`, `total_ask`,
-`imbalance`, `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread` and
-`rel_spread`. Each row is a point-in-time state snapshot — top-of-book quotes
-and aggregate resting sizes — rather than a reconstruction of the full order
-book. The column names are unchanged from the old SQL table, so the move is
+`ctrader_dom.agg_dom` (KQL, Eventhouse) holds **derived per-tick order-book
+metrics**, one row per symbol and tick, with `best_bid`, `best_ask`,
+`total_bid`, `total_ask`, `imbalance`, `imbalance_ratio`, `vwap_bid`,
+`vwap_ask`, `vwap_spread` and `rel_spread`. Each row is computed from a full
+order-book reconstruction, downstream of the raw event feed — it is a
+per-tick metric, not a point-in-time snapshot:
+
+```
+dom_stream_raw    ->   dom_book_flat        ->   agg_dom
+(raw DOM events)       (reconstructed            (derived per-tick metrics:
+                        full order book)         top-of-book, resting size,
+                                                 imbalance, spreads)
+```
+
+The column names are unchanged from the old SQL table, so the move is
 transport-only (`app.kql` instead of a T-SQL query in `app.db`). The measured
 schema is `timestamp: datetime`, `symbolId: long`, the price and size columns
 `real`, plus the pipeline's own `eventId`, `eventSeq` and `eventDate`. Because
 `symbolId` is a `long`, the queries cast the `string` parameter
 (`symbolId == tolong(sym)`) instead of the column; a blank or non-numeric
 parameter simply selects no rows.
-`app/frames.py` normalises the rows to the canonical state snapshot frame
+`app/frames.py` normalises the rows to the canonical tick frame
 (`ts | symbol | bid | ask | last | volume`) so every dashboard panel works
 unchanged. The pipeline's own imbalance is used as the directional signal;
 one-sided rows (no best bid or ask) are dropped, as is a crossed book
@@ -346,7 +355,7 @@ Measured on the live table, every row of a one-hour window is crossed, the
 `vwap_spread` (36.6 vs 1.94 on XAUUSD), and the two quotes straddle the vwap mid
 rather than bracketing it. Swapping therefore restores the sign of the spread and
 leaves the mid — the price every panel is drawn from — exactly as the pipeline
-computed it. A lone crossed snapshot inside an otherwise sound window is still
+computed it. A lone crossed tick inside an otherwise sound window is still
 dropped.
 
 Rows are also not one-per-millisecond: the pipeline writes every book event under
@@ -369,9 +378,9 @@ exposed.
 app/
   config.py      .env -> Settings (both endpoints, credentials, object names)
   auth.py        managed identity / service principal / az CLI token minting
-  kql.py         Kusto client, aggregate-row queries and probes (KQL)
+  kql.py         Kusto client, tick-metric queries and probes (KQL)
   db.py          SQL connection, identifier quoting, symbol catalogue
-  frames.py      aggregate rows -> canonical state snapshot frame
+  frames.py      tick-metric rows -> canonical tick frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
   service.py     instrument catalogue, health probing, TTL cache
@@ -386,7 +395,7 @@ tests/
   test_selectors.py / test_unavailable.py   HTTP-level behaviour
 ```
 
-The canonical state snapshot frame is:
+The canonical tick frame is:
 
 ```
 ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
@@ -445,7 +454,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 python -m pytest tests -q
 ```
 
-Covers snapshot reading (one-sided and crossed books, resting-size volume,
+Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), asset classification from both the gold chain and the
 fallback, production-endpoint resolution, bar consistency, OFI bounds, volume
 profile mass conservation, drawdown sign, strict JSON serialisability, and a
