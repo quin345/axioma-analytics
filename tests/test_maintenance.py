@@ -78,6 +78,38 @@ def test_page_is_self_contained():
     assert "<style>" in html
 
 
+def test_page_offers_clickable_service_cards():
+    """The notice doubles as the landing page: cards explain the service.
+
+    Each card is a real link, so a visitor arriving during the build can
+    still reach the explainer, the data provenance and the API docs.
+    """
+    html = PAGE.read_text(encoding="utf-8")
+    assert 'class="cards"' in html
+    assert html.count('class="info"') == 3
+    assert 'href="/welcome#measures"' in html
+    assert 'href="/welcome#h-data"' in html
+    assert 'href="/docs"' in html
+
+
+def test_page_promotes_the_service():
+    """The cards carry the product pitch, not just navigation."""
+    html = PAGE.read_text(encoding="utf-8")
+    assert "Microstructure analytics" in html
+    assert "Production data, kept fresh" in html
+    assert "Open JSON API" in html
+    assert "/api/analytics" in html
+
+
+def test_page_has_no_check_again_option():
+    """The manual re-check was replaced by clickable routes off the page."""
+    html = PAGE.read_text(encoding="utf-8")
+    assert "Check again" not in html
+    assert 'id="retry"' not in html
+    assert 'id="checked"' not in html
+    assert "<script>" not in html
+
+
 # ----------------------------------------------------------------------
 # How it is served
 # ----------------------------------------------------------------------

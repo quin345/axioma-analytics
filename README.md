@@ -374,6 +374,8 @@ the development notice and the dashboard itself lives at `/dashboard`.
 
 `/` currently serves `app/static/unavailable.html` — a self-contained "under
 development" notice with gear artwork — because the app is being rebuilt. The
+notice also acts as a landing page: three clickable cards pitch the service
+(analytics, data freshness, API) and link on to `/welcome` and `/docs`. The
 dashboard is retained at `/dashboard` (and in `index.html`), and the branded
 outage page (`app/static/maintenance.html`) is retained at `/unavailable` for
 future maintenance windows; `MAINTENANCE_MODE=1` still serves *that* page from
