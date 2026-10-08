@@ -1,7 +1,7 @@
-"""Tests for the gold asset-class classification (no data source required).
+"""Tests for the asset-class classification (no data source required).
 
-Cases mirror the real production `gold.asset_classes_icmarkets` names and the
-instruments actually present in `gold.symbols_icmarkets`.
+Cases mirror the broker's own class names and the instruments actually present
+in the `symbols_icmarkets` dimension.
 """
 from __future__ import annotations
 
@@ -85,11 +85,11 @@ def test_emerging_leg_pairs_are_exotics(pair):
 
 
 # ----------------------------------------------------------------------
-# Fallback (no chain row)
+# Fallback (dimension row carries no usable category)
 # ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("name,category,expected", [
-    ("EURUSD", 7, "fx"),        # symbolCategoryId -> assetClassId mapping
+    ("EURUSD", 7, "fx"),        # symbolCategoryId -> class mapping
     ("XAUUSD", 8, "metal"),
     ("US500", 9, "index"),
     ("XTIUSD", 10, "energy"),

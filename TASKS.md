@@ -8,6 +8,49 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-08 - One source (KQL) + Redis cache, fixed 4-hour window
+
+### Backend
+- [x] `app/cache.py`: Redis client on the Entra identity (no access key),
+      catalogue + per-symbol Parquet blobs, TTL from `REDIS_TTL_SECONDS`
+- [x] `app/errors.py`: `DataSourceError` moved out of `db` so the API layer keeps
+      one error type after the SQL path is gone
+- [x] `app/config.py`: KQL-only settings; Redis host/port/SSL/timeout,
+      `REDIS_TTL_SECONDS`, `CACHE_LOOKBACK_HOURS` (`cache_lookback_minutes`)
+- [x] `app/service.py`: reads KQL, serves from Redis, `clamp_lookback` narrows the
+      fixed window, cache outage falls through to KQL (`connected` follows KQL only)
+- [x] `app/main.py`: `/api/health` publishes `lookback_minutes`,
+      `cache_connected`, `cache_error`
+- [x] `app/db.py` and `app/auth.py` deleted; `requirements.txt` drops `pyodbc`
+      and adds `redis` + `pyarrow`
+- [x] `run.py` prints the KQL source and the cache state, not the SQL endpoints
+
+### UI
+- [x] "Lookback (minutes)" number input replaced by a "Duration" `<select>`
+- [x] Options are built from `health.lookback_minutes`, so no choice can widen
+      the cached window or force a second KQL read
+- [x] `analyse()` sends the selected `lookback_minutes`; copy says duration, not
+      lookback; the health badge tooltip names the window and cache state
+
+### Verification
+- [x] `pytest` - 222 passed
+- [x] `tests/test_service.py`: cold read -> one KQL call, warm reads cached,
+      per-symbol keys, cache-outage fallthrough, empty window raises, `reset()`
+- [x] `tests/test_status.py`: the KQL probe gates health, the cache is reported
+      but never gating
+- [x] `tests/test_config.py`: KQL-only defaults, Redis/Entra/MSI assertions
+- [x] Docs: `.env.example`, `README.md`, `scripts/grant_workspace_access.py`
+      describe the KQL + Redis path (and the Redis data-access grant)
+
+**Notes:**
+- The cache is an optimisation, never a dependency: a Redis outage degrades to
+  one KQL query per request, and only a KQL failure sets `connected=false`.
+- The window is fixed server-side on purpose. The UI derives its options from
+  the published window, and `/api/analytics` clamps rather than rejects, so a
+  stale tab or bookmarked URL keeps working instead of returning a 422.
+
+---
+
 ## 2026-10-08 - Terminology: per-tick metrics, not snapshots
 
 ### Correction

@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from . import analytics, service
 from .assets import CLASS_LABELS
 from .config import get_settings
-from .db import DataSourceError
+from .errors import DataSourceError
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -25,10 +25,12 @@ app = FastAPI(
 
 @app.get("/api/health")
 def health(refresh: bool = Query(False, description="Re-probe the data endpoints")) -> dict:
-    """Connection status, instrument coverage and hints.
+    """Connection status, cache state, instrument coverage and hints.
 
     Storage internals (endpoint host, database, table) are deliberately not
-    exposed: the client only needs to know whether data is available.
+    exposed: the client only needs to know whether data is available. The cache
+    is reported alongside because it decides whether a request costs a KQL
+    query, but a cache outage is not an outage - reads fall through to KQL.
     """
     s = get_settings()
     st = service.status(refresh=refresh)
@@ -62,6 +64,12 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "dimension_rows": st.dimension_rows,
         "error": st.error,
         "hints": hints,
+        "cache_connected": st.cache_connected,
+        "cache_error": st.cache_error,
+        # The fixed window the cache holds. The UI may narrow it, never widen
+        # it, so it is published as the ceiling for the duration control.
+        "lookback_minutes": st.lookback_minutes or s.cache_lookback_minutes,
+        "cache_ttl_seconds": s.cache_ttl_seconds,
         "has_data": bool(traded),
         "symbol_count": traded,
         "classified_count": classified,
@@ -120,13 +128,25 @@ def analytics_report(
     window: int = Query(50, ge=2, le=5000),
     bins: int = Query(60, ge=10, le=300),
     limit: int = Query(50_000, ge=100, le=500_000),
-    lookback_minutes: int = Query(5, ge=1, le=129_600),
+    lookback_minutes: int | None = Query(
+        None, ge=1,
+        description="How much of the cached window to analyse; clamped to it.",
+    ),
 ) -> dict:
-    """Full analytics bundle for one symbol."""
+    """Full analytics bundle for one symbol, from the cached window.
+
+    The duration is clamped rather than rejected: the cache holds a fixed
+    window, so asking for more returns everything there is. That keeps a
+    bookmarked URL or a stale tab working instead of returning a 422.
+    """
+    requested = service.clamp_lookback(lookback_minutes)
     try:
-        frame = service.load_ticks_cached(symbol, limit, lookback_minutes)
+        frame = service.load_ticks_cached(symbol, limit, requested)
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    if timeframe not in analytics.TIMEFRAMES:
+        raise HTTPException(status_code=400, detail=f"Unknown timeframe '{timeframe}'.")
 
     report = analytics.build_report(frame, timeframe=timeframe, window=window, bins=bins)
 
@@ -142,6 +162,7 @@ def analytics_report(
         "asset_class_label": CLASS_LABELS.get(inst.asset_class, "Unclassified") if inst else None,
         "family": inst.family if inst else None,
         "rows_analysed": int(len(frame)),
+        "lookback_minutes": requested,
         "latest_tick": latest_tick,
         "generated_at": pd.Timestamp.utcnow().isoformat(),
     }

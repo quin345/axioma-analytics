@@ -1,18 +1,15 @@
 """KQL access to the production order-book metrics table (Fabric Eventhouse).
 
-``ctrader_dom.agg_dom`` holds derived per-tick order-book metrics
-(``dom_stream_raw -> dom_book_flat -> agg_dom``) and now lives in a KQL database
-instead of the SQL analytics endpoint. The column names are unchanged, so
-`app.frames.from_ticks` is untouched by the move; only the transport (KQL
-instead of T-SQL) and the endpoint differ.
+``ctrader_dom`` holds the whole pipeline - ``dom_stream_raw -> dom_book_flat ->
+agg_dom`` - plus the ``symbols_icmarkets`` instrument dimension, and it is the
+dashboard's only source of data. The metric column names are unchanged from the
+old SQL table, so `app.frames.from_ticks` is untouched by the move; only the
+transport (KQL instead of T-SQL) and the endpoint differ.
 
-The instrument dimension (``symbols_icmarkets`` and its asset-class chain)
-stays on the SQL analytics endpoint and is read by `app.db`.
-
-Authentication mirrors the SQL side: the VM's managed identity authenticates
-the client directly, with a service principal, then an ``az login`` session, as
-fallbacks. `azure-kusto-data` mints and refreshes the token itself, so no
-secret is handed around here.
+Authentication is Entra ID: the VM's managed identity authenticates the client
+directly, with a service principal, then an ``az login`` session, as fallbacks.
+`azure-kusto-data` mints and refreshes the token itself, so no secret is handed
+around here.
 """
 from __future__ import annotations
 
@@ -29,7 +26,7 @@ from azure.kusto.data import (ClientRequestProperties, KustoClient,
 from azure.kusto.data.exceptions import KustoError
 
 from .config import Settings, get_settings
-from .db import DataSourceError
+from .errors import DataSourceError
 
 #: A plain Kusto entity name; anything else is bracket-escaped.
 _PLAIN_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -40,6 +37,10 @@ METRIC_COLUMNS = [
     "imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask", "vwap_spread",
     "rel_spread", "rel_vwap_spread",
 ]
+
+#: Columns of one ``symbols_icmarkets`` row, as the metadata notebook ingests it
+#: (``symbolId`` is written as a BIGINT, so it is projected back to a long here).
+SYMBOL_COLUMNS = ["symbolId", "symbolName", "symbolCategoryId", "description"]
 
 
 def table_ref(name: str) -> str:
@@ -164,6 +165,38 @@ def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) ->
         settings=s,
     )
     return {str(r.symbolId).strip(): int(r.ticks) for r in df.itertuples()}
+
+
+def symbol_count(client: KustoClient, settings: Settings | None = None) -> int:
+    """Rows in the ``symbols_icmarkets`` dimension, for the health payload."""
+    s = settings or get_settings()
+    df = query(client, f"{table_ref(s.symbol_table)}\n| count", settings=s)
+    return int(df["Count"].iloc[0]) if not df.empty else 0
+
+
+def symbol_catalogue(client: KustoClient, settings: Settings | None = None) -> pd.DataFrame:
+    """One row per instrument: id, ticker, category id and description.
+
+    Replaces the SQL ``gold.symbols_icmarkets`` read. The table is a snapshot of
+    the cTrader symbol list, so ``take_any`` picks the single row per id; ids the
+    engine cannot cast to a long are dropped, matching the dimension's own type.
+    """
+    s = settings or get_settings()
+    return query(
+        client,
+        f"""
+        {table_ref(s.symbol_table)}
+        | where isnotnull(symbolId)
+        | extend symbolId = tolong(symbolId)
+        | where isnotnull(symbolId)
+        | summarize symbolName = take_any(tostring(symbolName)),
+                    symbolCategoryId = take_any(tolong(symbolCategoryId)),
+                    description = take_any(tostring(description))
+                    by symbolId
+        | project {", ".join(SYMBOL_COLUMNS)}
+        """,
+        settings=s,
+    )
 
 
 # --------------------------------------------------------------------------

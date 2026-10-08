@@ -1,22 +1,20 @@
-"""Asset-class taxonomy for the gold database instruments.
+"""Asset-class taxonomy for the instrument dimension.
 
-The gold layer publishes its own authoritative chain:
+The pipeline publishes the class on each symbol row:
 
-    gold.symbols_icmarkets        (symbolId, symbolName, symbolCategoryId, ...)
-        -> gold.symbols_category_icmarkets  (symbolCategoryId -> assetClassId)
-        -> gold.asset_classes_icmarkets     (assetClassId -> name)
+    symbols_icmarkets   (symbolId, symbolName, symbolCategoryId, description)
 
-`classify_asset_class` consumes that chain first, so the dashboard groups
+`classify_asset_class` reads that category first, so the dashboard groups
 instruments exactly the way the pipeline does. The broker names nine classes
 (Forex, Metals, Indices, Oil, Cryptocurrencies, Commodities, Futures, Bonds,
 Futures Commodities); :data:`ASSET_CLASSES` maps them to stable client keys and
 adds a *sub-class* for FX, which the pipeline lumps together but which is worth
 splitting on a dashboard (majors, crosses, exotics).
 
-For a symbol whose category is missing from the chain - an archive row, a new
-listing, a broker table that has not been reloaded - :func:`classify_by_name`
-falls back to the same signals cTrader exposes (`symbolCategoryId`, the ticker
-and the description), so no instrument is ever left uncategorised.
+For a symbol whose category is missing - an archive row, a new listing, a
+dimension table that has not been reloaded - :func:`classify_by_name` falls
+back to the same signals cTrader exposes (`symbolCategoryId`, the ticker and
+the description), so no instrument is ever left uncategorised.
 """
 from __future__ import annotations
 
@@ -26,7 +24,7 @@ import re
 # Taxonomy
 # --------------------------------------------------------------------------
 
-#: Broker asset-class name (gold.asset_classes_*) -> stable client key.
+#: Broker asset-class name -> stable client key.
 BROKER_CLASSES: dict[str, str] = {
     "forex": "fx",
     "metals": "metal",
@@ -111,8 +109,8 @@ def _fx_subclass(symbol_name: object) -> str:
 # Fallback signals
 # --------------------------------------------------------------------------
 
-#: cTrader symbolCategoryId -> asset class, used only where the gold chain has
-#: no row for a symbol. These ids match `gold.symbols_category_icmarkets`.
+#: cTrader symbolCategoryId -> asset class, used when the dimension row has no
+#: usable category. These ids are the broker's own ``symbolCategoryId`` values.
 _FALLBACK_CATEGORY: dict[int, str] = {
     7: "fx", 8: "metal", 9: "index", 10: "energy", 11: "commodity",
     12: "crypto", 13: "future", 14: "bond", 15: "future",
@@ -165,10 +163,10 @@ def classify_by_name(symbol_name: object, category_id: object = None,
                      description: object = None) -> str:
     """Fallback classification from the raw cTrader columns.
 
-    Used only where the gold ``symbolCategoryId -> assetClassId`` chain has no
-    row for a symbol. The same signals are available there (``symbolCategoryId``,
-    the ticker and the description), so an uncategorised instrument is still
-    placed sensibly rather than disappearing from the selector.
+    Used where the dimension row carries no usable category. The same signals
+    are on the row (``symbolCategoryId``, the ticker and the description), so an
+    uncategorised instrument is still placed sensibly rather than disappearing
+    from the selector.
     """
     name = str(symbol_name or "").strip().upper()
     desc = str(description or "").strip().upper()
@@ -203,9 +201,9 @@ def classify_asset_class(symbol_name: object, asset_class_name: object = None,
                          category_id: object = None, description: object = None) -> str:
     """Resolve one instrument to a client asset-class key.
 
-    Prefers the broker name from ``gold.asset_classes_*``; falls back to the raw
-    cTrader columns. FX is sub-divided into majors/crosses/exotics, which the
-    pipeline does not do but a dashboard benefits from. Never raises - an
+    Prefers a broker class name when one is supplied; otherwise falls back to
+    the raw cTrader columns. FX is sub-divided into majors/crosses/exotics, which
+    the pipeline does not do but a dashboard benefits from. Never raises - an
     unrecognised instrument yields ``""`` and the caller groups it separately.
     """
     base = BROKER_CLASSES.get(str(asset_class_name or "").strip().lower(), "")

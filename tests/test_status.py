@@ -1,24 +1,20 @@
-"""Tests for the two-source status probe (no data source required).
+"""Tests for the health probe (no data source required).
 
-Rows come from KQL and their names from SQL, so health is only green when both
-answer. These tests pin that contract: a dashboard reporting `connected` while
-the selectors still fail is worse than reporting which side is down.
+Rows *and* names come from the one KQL database now, so there is a single
+source whose failure makes the dashboard unhealthy. Redis is reported next to
+it but never gates it: the cache is what keeps a request from re-scanning
+``agg_dom``, so losing it costs a query rather than an outage. These tests pin
+both halves of that contract.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 
-import pandas as pd
 import pytest
 
 from app import service
 from app.config import Settings
-from app.db import DataSourceError
-
-
-@contextmanager
-def _ok_conn():
-    yield object()
+from app.errors import DataSourceError
 
 
 @contextmanager
@@ -29,8 +25,9 @@ def _failing_conn(message: str):
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(host="sql.example.invalid", kql_host="https://kql.example.invalid",
-                    kql_database="ctrader_dom", kql_table="agg_dom")
+    return Settings(kql_host="https://kql.example.invalid", kql_database="ctrader_dom",
+                    kql_table="agg_dom", symbol_table="symbols_icmarkets",
+                    redis_host="cache.example.invalid", cache_lookback_hours=4)
 
 
 @pytest.fixture(autouse=True)
@@ -41,37 +38,42 @@ def _fresh_status(monkeypatch, settings):
     yield
 
 
-def _patch_kql(monkeypatch, *, rows: int = 100, latest: str | None = "2026-10-08T01:00:00Z",
-               error: str | None = None) -> None:
+def _patch_kql(monkeypatch, *, rows: int = 100,
+               latest: str | None = "2026-10-08T01:00:00Z", symbols: int = 348,
+               error: str | None = None) -> list[str]:
+    """Patch the KQL probe; return the list the connection lifecycle is logged in.
+
+    `rows=0` / `symbols=0` replay an empty-but-readable table, which is the
+    ingest-pipeline case rather than the endpoint-down case.
+    """
+    seen: list[str] = []
+
+    @contextmanager
+    def _connect(settings=None):
+        seen.append("connect")
+        yield object()
+
     if error:
-        monkeypatch.setattr(service.kql, "connect", lambda settings=None: _failing_conn(error))
+        monkeypatch.setattr(service.kql, "connect",
+                            lambda settings=None: _failing_conn(error))
     else:
-        monkeypatch.setattr(service.kql, "connect", lambda settings=None: _ok_conn())
+        monkeypatch.setattr(service.kql, "connect", _connect)
         monkeypatch.setattr(service.kql, "server_time",
                             lambda client, settings=None: "2026-10-08T01:00:00Z")
         monkeypatch.setattr(service.kql, "tick_stats",
                             lambda client, settings=None: (rows, latest))
-
-
-def _patch_sql(monkeypatch, *, rows: int = 348, error: str | None = None) -> list[str]:
-    """Patch the dimension read; return the list the probe's SQL is recorded in."""
-    seen: list[str] = []
-    if error:
-        monkeypatch.setattr(service, "connect", lambda settings=None: _failing_conn(error))
-    else:
-        monkeypatch.setattr(service, "connect", lambda settings=None: _ok_conn())
-
-        def _query(conn, sql, params=None):
-            seen.append(sql)
-            return pd.DataFrame({"n": [rows]})
-
-        monkeypatch.setattr(service, "query", _query)
+        monkeypatch.setattr(service.kql, "symbol_count",
+                            lambda client, settings=None: symbols)
     return seen
 
 
-def test_both_sources_answering_reports_connected(monkeypatch):
-    _patch_kql(monkeypatch)
-    seen = _patch_sql(monkeypatch)
+def _patch_cache(monkeypatch, *, answering: bool = True) -> None:
+    monkeypatch.setattr(service.cache, "ping", lambda settings=None: answering)
+
+
+def test_a_healthy_probe_reports_connected(monkeypatch):
+    seen = _patch_kql(monkeypatch)
+    _patch_cache(monkeypatch)
 
     st = service.status(refresh=True)
 
@@ -80,55 +82,55 @@ def test_both_sources_answering_reports_connected(monkeypatch):
     assert st.hints == []
     assert st.row_count == 100
     assert st.dimension_rows == 348
-    # The probe must read the configured dimension, not a hard-coded table.
-    assert "symbols_icmarkets" in seen[0]
+    assert st.server_time is not None
+    assert seen == ["connect"]
+
+
+def test_the_probe_reads_the_configured_dimension(monkeypatch):
+    """The dimension count comes from the configured table, not a hard-coded one."""
+    seen: list[str] = []
+    settings = Settings(symbol_table="symbols_icmarkets", kql_host="https://kql.example.invalid")
+
+    @contextmanager
+    def _connect(s=None):
+        yield object()
+
+    monkeypatch.setattr(service, "get_settings", lambda: settings)
+    monkeypatch.setattr(service.kql, "connect", _connect)
+    monkeypatch.setattr(service.kql, "server_time", lambda c, s=None: "now")
+    monkeypatch.setattr(service.kql, "tick_stats", lambda c, s=None: (1, None))
+    monkeypatch.setattr(service.kql, "symbol_count",
+                        lambda c, s=None: seen.append(s.symbol_table) or 5)
+    _patch_cache(monkeypatch)
+
+    assert service.status(refresh=True).dimension_rows == 5
+    assert seen == ["symbols_icmarkets"]
+
+
+def test_the_fixed_window_is_echoed_on_the_probe(monkeypatch):
+    """The UI bounds its duration control to this, so it must be reported."""
+    _patch_kql(monkeypatch)
+    _patch_cache(monkeypatch)
+
+    assert service.status(refresh=True).lookback_minutes == 240
 
 
 def test_a_failing_kql_endpoint_disconnects_the_dashboard(monkeypatch):
     _patch_kql(monkeypatch, error="KQL query failed: Forbidden (403-Forbidden)")
-    _patch_sql(monkeypatch)
+    _patch_cache(monkeypatch)
 
     st = service.status(refresh=True)
 
     assert st.connected is False
     assert "KQL" in st.hints[0]
     assert "403" in st.error
-    # The dimension still answered, so its count is reported rather than lost.
-    assert st.dimension_rows == 348
     assert st.row_count is None
-
-
-def test_a_failing_dimension_disconnects_the_dashboard(monkeypatch):
-    _patch_kql(monkeypatch)
-    _patch_sql(monkeypatch, error="Query failed: underlying location does not exist")
-
-    st = service.status(refresh=True)
-
-    assert st.connected is False
     assert st.dimension_rows is None
-    assert len(st.hints) == 1
-    assert "dimension" in st.hints[0]
-    # Rows were readable, so the row evidence survives the dimension failure.
-    assert st.row_count == 100
-    assert "underlying location" in st.error
 
 
-def test_both_failures_are_reported_side_by_side(monkeypatch):
-    _patch_kql(monkeypatch, error="KQL query failed: Forbidden (403-Forbidden)")
-    _patch_sql(monkeypatch, error="Query failed: underlying location does not exist")
-
-    st = service.status(refresh=True)
-
-    assert st.connected is False
-    assert len(st.hints) == 2
-    assert "KQL" in st.hints[0] and "dimension" in st.hints[1]
-    # The first failure is the one kept as the headline error.
-    assert "KQL query failed" in st.error
-
-
-def test_an_empty_kql_table_hints_at_the_ingest_pipeline(monkeypatch):
+def test_an_empty_metrics_table_hints_at_the_ingest_pipeline(monkeypatch):
     _patch_kql(monkeypatch, rows=0, latest=None)
-    _patch_sql(monkeypatch)
+    _patch_cache(monkeypatch)
 
     st = service.status(refresh=True)
 
@@ -137,9 +139,58 @@ def test_an_empty_kql_table_hints_at_the_ingest_pipeline(monkeypatch):
     assert "empty" in st.hints[0]
 
 
-def test_the_probe_is_cached_until_refreshed(monkeypatch):
+def test_an_empty_dimension_hints_at_the_metadata_notebook(monkeypatch):
+    _patch_kql(monkeypatch, symbols=0)
+    _patch_cache(monkeypatch)
+
+    st = service.status(refresh=True)
+
+    assert st.connected is True
+    assert st.dimension_rows == 0
+    assert "dimension" in st.hints[0]
+
+
+# --- The cache is reported but never gates health -----------------------
+
+def test_a_reachable_cache_is_reported_and_silent(monkeypatch):
     _patch_kql(monkeypatch)
-    seen = _patch_sql(monkeypatch)
+    _patch_cache(monkeypatch, answering=True)
+
+    st = service.status(refresh=True)
+
+    assert st.cache_connected is True
+    assert st.cache_error is None
+
+
+def test_a_cache_outage_is_a_warning_not_an_outage(monkeypatch):
+    """Reads fall through to KQL, so the dashboard stays connected."""
+    _patch_kql(monkeypatch)
+    _patch_cache(monkeypatch, answering=False)
+
+    st = service.status(refresh=True)
+
+    assert st.connected is True
+    assert st.cache_connected is False
+    assert "Redis" in st.cache_error
+    assert st.hints == [st.cache_error]
+
+
+def test_a_cache_outage_never_masks_a_kql_failure(monkeypatch):
+    _patch_kql(monkeypatch, error="KQL query failed: Forbidden (403-Forbidden)")
+    _patch_cache(monkeypatch, answering=False)
+
+    st = service.status(refresh=True)
+
+    assert st.connected is False
+    assert st.cache_connected is False
+    assert len(st.hints) == 2
+    assert "KQL" in st.hints[0]
+    assert st.hints[1] == st.cache_error
+
+
+def test_the_probe_is_cached_until_refreshed(monkeypatch):
+    seen = _patch_kql(monkeypatch)
+    _patch_cache(monkeypatch)
 
     service.status(refresh=True)
     service.status()      # cached

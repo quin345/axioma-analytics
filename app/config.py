@@ -1,15 +1,21 @@
 """Application configuration for the production data endpoints.
 
-The app reads two sources:
+The app reads **one** source: the production Fabric **KQL** database
+(`KQL_ENDPOINT_PROD`). Every table it uses lives there -
 
-* the per-tick aggregate DOM data, now in the production Fabric **KQL**
-  database (`KQL_ENDPOINT_PROD`), and
-* the instrument dimension, which stays on the production Fabric **SQL**
-  analytics endpoint (`SQL_ENDPOINT_PROD`).
+* ``dom_stream_raw`` / ``dom_book_flat`` - the raw and flattened DOM feed
+  (ingested, not queried directly by the dashboard),
+* ``agg_dom`` - the per-tick aggregate order-book metrics the analytics read,
+* ``symbols_icmarkets`` - the icmarkets instrument dimension.
+
+Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
+the dashboard reads KQL once per window rather than on every request. The cache
+window is fixed at `CACHE_LOOKBACK_HOURS` (4 by default); the UI may narrow it
+but never widen it.
 
 There is no environment selector, no catalog discovery and no synthetic
-fallback - the configuration is just the two endpoints, the Entra ID identity
-and the object names.
+fallback - the configuration is just the endpoints, the Entra ID identity and
+the object names.
 """
 from __future__ import annotations
 
@@ -21,6 +27,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+#: Affirmative spellings accepted for boolean flags.
+_TRUTHY = ("1", "true", "yes", "on")
+
 
 def _env(*names: str, default: str | None = None) -> str | None:
     """First non-blank environment variable from `names`, unquoted."""
@@ -31,55 +40,77 @@ def _env(*names: str, default: str | None = None) -> str | None:
     return default
 
 
+def _env_int(*names: str, default: int) -> int:
+    """First parseable integer from `names`, else `default`."""
+    raw = _env(*names)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(*names: str, default: bool) -> bool:
+    """First affirmative boolean from `names`, else `default`."""
+    raw = _env(*names)
+    if raw is None:
+        return default
+    return raw.lower() in _TRUTHY
+
+
 @dataclass(frozen=True)
 class Settings:
-    # --- Production SQL analytics endpoint (TDS) ---
-    host: str = field(
-        default_factory=lambda: _env("SQL_ENDPOINT_PROD", "SQL_ANALYTICS_ENDPOINT", default="") or ""
-    )
     tenant_id: str | None = field(default_factory=lambda: _env("FABRIC_TENANT_ID", "AZURE_TENANT_ID"))
     client_id: str | None = field(default_factory=lambda: _env("FABRIC_CLIENT_ID", "AZURE_CLIENT_ID"))
     client_secret: str | None = field(default_factory=lambda: _env("FABRIC_CLIENT_SECRET", "AZURE_CLIENT_SECRET"))
-    odbc_driver: str = field(
-        default_factory=lambda: _env("FABRIC_ODBC_DRIVER", default="ODBC Driver 18 for SQL Server") or ""
-    )
-    connect_timeout: int = field(default_factory=lambda: int(_env("FABRIC_CONNECT_TIMEOUT", default="15") or 15))
     #: Azure managed identity: system-assigned when blank, user-assigned when a
     #: client id is given. Preferred over `az login` because it needs no
-    #: interactive session and, unlike the CLI-token path, does not hand a JWT
-    #: to the driver through SQL_COPT_SS_ACCESS_TOKEN.
+    #: interactive session and is the identity the Redis cache trusts.
     managed_identity: bool = field(
-        default_factory=lambda: str(_env("FABRIC_MANAGED_IDENTITY", default="") or "").lower()
-        in ("1", "true", "yes", "on")
+        default_factory=lambda: _env_bool("FABRIC_MANAGED_IDENTITY", default=False)
     )
     managed_identity_client_id: str | None = field(
         default_factory=lambda: _env("FABRIC_MANAGED_IDENTITY_CLIENT_ID")
     )
 
-    # --- Production KQL (Eventhouse) endpoint ---
-    # The per-tick aggregate DOM table lives here and is queried with KQL.
+    # --- Production KQL (Eventhouse) endpoint: the only data source ---------
     kql_host: str = field(
         default_factory=lambda: _env("KQL_ENDPOINT_PROD", "KQL_ENDPOINT", default="") or ""
     )
     kql_database: str = field(
         default_factory=lambda: _env("KQL_DATABASE", default="ctrader_dom") or "ctrader_dom"
     )
+    #: The per-tick aggregate DOM metrics the analytics read.
     kql_table: str = field(default_factory=lambda: _env("KQL_TABLE", default="agg_dom") or "agg_dom")
-
-    # --- Gold objects (SQL analytics endpoint) ---
-    # Physical names are resolved here and never sent to the browser. Only the
-    # instrument dimension stays on SQL; the aggregate rows come from KQL.
-    gold_database: str = field(
-        default_factory=lambda: _env("GOLD_DATABASE", default="ctrader_lakehouse") or "ctrader_lakehouse"
-    )
-    gold_schema: str = field(default_factory=lambda: _env("GOLD_SCHEMA", default="gold") or "gold")
-    #: The icmarkets instrument dimension in the gold schema.
+    #: The icmarkets instrument dimension, in the same KQL database.
     symbol_table: str = field(
         default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
     )
+    #: Buffer applied to the KQL time filter so a tick written just before the
+    #: window opens is still returned.
+    kql_lag_minutes: int = field(default_factory=lambda: _env_int("KQL_LAG_MINUTES", default=2))
+
+    # --- Redis cache --------------------------------------------------------
+    #: Redis Enterprise (Entra-auth only - no key). The dashboard's KQL results
+    #: live here between requests.
+    redis_host: str = field(
+        default_factory=lambda: _env("REDIS_HOST", default="axiomacache.australiacentral.redis.azure.net")
+        or "axiomacache.australiacentral.redis.azure.net"
+    )
+    redis_port: int = field(default_factory=lambda: _env_int("REDIS_PORT", default=10000))
+    redis_ssl: bool = field(default_factory=lambda: _env_bool("REDIS_SSL", default=True))
+    redis_db: int = field(default_factory=lambda: _env_int("REDIS_DB", default=0))
+    redis_timeout: int = field(default_factory=lambda: _env_int("REDIS_TIMEOUT", default=15))
+    cache_key_prefix: str = field(
+        default_factory=lambda: _env("REDIS_KEY_PREFIX", default="axioma") or "axioma"
+    )
+    #: Lifetime of a cached KQL result. 45 minutes covers one ingestion
+    #: interval, so the cache never outlives the data it mirrors.
+    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=2700))
+    #: The fixed window the cache holds and the UI may only narrow.
+    cache_lookback_hours: int = field(default_factory=lambda: _env_int("CACHE_LOOKBACK_HOURS", default=4))
 
     app_name: str = "Axioma Analytics"
-    max_ticks: int = field(default_factory=lambda: int(_env("MAX_TICKS", default="200000") or 200000))
+    max_ticks: int = field(default_factory=lambda: _env_int("MAX_TICKS", default=200000))
     #: Ticker pinned as the dashboard default (matched by symbolName, then id).
     default_symbol: str = field(
         default_factory=lambda: _env("DEFAULT_SYMBOL", default="XAUUSD") or "XAUUSD"
@@ -91,18 +122,8 @@ class Settings:
     #: MAINTENANCE_MODE=1, restart, unset it afterwards. The API stays up so
     #: the page's own static assets and health checks keep working.
     maintenance: bool = field(
-        default_factory=lambda: str(_env("MAINTENANCE_MODE", default="") or "").lower()
-        in ("1", "true", "yes", "on")
+        default_factory=lambda: _env_bool("MAINTENANCE_MODE", default=False)
     )
-
-    @property
-    def server(self) -> str:
-        return self.host.split(",")[0].strip()
-
-    @property
-    def port(self) -> int:
-        parts = [p.strip() for p in self.host.split(",")]
-        return int(parts[1]) if len(parts) > 1 else 1433
 
     @property
     def has_credentials(self) -> bool:
@@ -112,9 +133,9 @@ class Settings:
     def use_managed_identity(self) -> bool:
         """Managed identity wins over any credential in the environment.
 
-        It is the only mode that works unattended: the driver mints and
-        refreshes its own tokens, so the service needs neither a stored secret
-        nor an `az login` session.
+        It is the only mode that works unattended: one identity authenticates
+        both the KQL endpoint and the Redis cache, so the service needs neither
+        a stored secret nor an `az login` session.
         """
         return self.managed_identity
 
@@ -123,9 +144,18 @@ class Settings:
         return bool(self.kql_host)
 
     @property
+    def redis_configured(self) -> bool:
+        return bool(self.redis_host and self.redis_port > 0)
+
+    @property
     def is_configured(self) -> bool:
-        """Both endpoints are needed: KQL for the rows, SQL for the dimension."""
-        return bool(self.host and self.kql_host)
+        """The KQL endpoint is the only data source; without it there is nothing."""
+        return bool(self.kql_host)
+
+    @property
+    def cache_lookback_minutes(self) -> int:
+        """The fixed cache window, in minutes - the widest the UI may ask for."""
+        return max(1, self.cache_lookback_hours * 60)
 
 
 @lru_cache(maxsize=1)

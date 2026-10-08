@@ -13,7 +13,7 @@ from azure.kusto.data.exceptions import KustoError
 
 from app import config, kql
 from app.config import Settings
-from app.db import DataSourceError
+from app.errors import DataSourceError
 
 
 # --------------------------------------------------------------------------

@@ -136,8 +136,15 @@ async function loadHealth() {
     $("connText").textContent = "Offline";
   }
   // Hints are useful even when connected (empty table, or instruments the
-  // symbol dimension does not cover), so surface them in both states.
+  // symbol dimension does not cover), so surface them in both states. A cache
+  // outage arrives as one of those hints: reads still work, they just cost a
+  // KQL query, which is a warning rather than a failure.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
+  // The duration picker's ceiling, and the cache state, on the badge tooltip -
+  // both are context for the numbers rather than headline problems.
+  $("connDot").title = h.cache_connected === false
+    ? (h.cache_error || "The Redis cache is unreachable.")
+    : `Window ${Math.round((h.lookback_minutes || 0) / 60 * 10) / 10} h, cached in Redis`;
   renderCoverage(h);
   return h;
 }
@@ -246,6 +253,37 @@ async function fillTimeframes(h) {
   sel.innerHTML = health.timeframes
     .map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
   sel.value = "1m";
+}
+
+/**
+ * Duration choices, in minutes, offered inside the cached window.
+ *
+ * The cache holds a fixed window (4 hours by default) and the API serves only
+ * what is in it, so the picker is built from the window the API publishes
+ * rather than from a fixed list. Every option is a subset of that window, which
+ * is what makes switching duration free: no option can force a second KQL read.
+ */
+const DURATION_CHOICES = [15, 30, 60, 120, 180, 240, 480, 720];
+
+/** "45 min" / "2 h" - a duration in minutes, readable. */
+function durationLabel(m) {
+  if (m < 60) return `${m} min`;
+  const hr = m / 60;
+  return `${Number.isInteger(hr) ? hr : hr.toFixed(1)} h`;
+}
+
+/** Populate the duration picker from the window the API reports. */
+function fillDurations(h) {
+  const sel = $("duration");
+  if (!sel) return;
+  const max = Math.max(1, (h && h.lookback_minutes) || 240);
+  const chosen = DURATION_CHOICES.filter((m) => m < max);
+  chosen.push(max);
+  sel.innerHTML = chosen
+    .map((m) => `<option value="${m}">${esc(durationLabel(m))}</option>`).join("");
+  // Open on an hour where the window allows it, otherwise on the whole window:
+  // enough ticks for the rolling metrics to mean something.
+  sel.value = String(chosen.includes(60) ? 60 : max);
 }
 
 /* ---------------- KPI tiles ---------------- */
@@ -638,8 +676,9 @@ const DETAILS = {
        ["Total volume", fmt.int(s.total_volume)],
        ["Avg tick size", fmt.num(s.avg_tick_size)]]) +
       block("Coverage",
-        "How much history the lookback actually returned. Fewer ticks than expected " +
-        "usually means a quiet instrument rather than a missing feed.",
+        "How much history the selected duration actually returned, within the " +
+        "cached window. Fewer ticks than expected usually means a quiet " +
+        "instrument rather than a missing feed.",
         [["Rows analysed", fmt.int(r.meta && r.meta.rows_analysed)],
          ["Duration", `${fmt.n(s.duration_seconds / 3600, 2)} h`],
          ["Ticks / minute", fmt.n(s.ticks_per_minute, 1)],
@@ -1031,7 +1070,7 @@ function renderCalendar(r) {
       : "no data";
   }
   if (!cal.days.length) {
-    box.innerHTML = `<p class="note">No calendar days in the selected window. Widen the lookback.</p>`;
+    box.innerHTML = `<p class="note">No calendar days in the selected window. Widen the duration.</p>`;
     const label = $("calLabel");
     if (label) label.textContent = "\u2013";
     return;
@@ -1082,7 +1121,9 @@ async function analyse() {
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
-      lookback_minutes: val("lookback", 5) || 5,
+      // Minutes inside the cached window; the API clamps it anyway, so a stale
+      // page or a hand-edited URL still returns the window rather than a 422.
+      lookback_minutes: val("duration", 60) || 60,
     });
     const r = await api(`/api/analytics?${p}`);
     renderKpis(r.summary, r.microstructure);
@@ -1117,9 +1158,11 @@ function renderPriceTag(meta) {
 
 async function init() {
   try {
-    // One health call, reused for the connection badge and the timeframes.
+    // One health call, reused for the connection badge, the timeframes and the
+    // duration picker's bounds.
     const health = await loadHealth();
     await fillTimeframes(health);
+    fillDurations(health);
     await loadClassSummary();
     await loadSymbols();
     renderCoverage(health);
@@ -1141,7 +1184,13 @@ on("assetClass", "change", async () => {
 });
 on("refresh", "click", async () => {
   setLoading(true);
-  try { await loadHealth(); await loadClassSummary(); await loadSymbols(); await analyse(); }
+  try {
+    const health = await loadHealth();
+    fillDurations(health);
+    await loadClassSummary();
+    await loadSymbols();
+    await analyse();
+  }
   catch (err) { bannerErr(err.message); }
   finally { setLoading(false); }
 });

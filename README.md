@@ -6,13 +6,15 @@ classification, and the dashboard renders OHLCV bars, order-flow imbalance,
 spread evolution, volume-at-price, return distribution, drawdown,
 autocorrelation and large-trade market impact.
 
-The app talks to exactly two sources on the production Fabric estate: the
-per-tick aggregate DOM rows in the **KQL** (Eventhouse) database
-(`ctrader_dom.agg_dom`), and the instrument dimension in
-`[ctrader_lakehouse].[gold]` on the **SQL analytics endpoint**. There is no
-environment switcher, no catalog discovery and no synthetic/demo fallback.
-Storage internals (endpoint host, database, table) are never sent to the
-browser.
+The app talks to exactly one source on the production Fabric estate: the **KQL**
+(Eventhouse) database `ctrader_dom`. Every table it reads lives there — the
+per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
+(`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
+(Entra ID, no access key) so a dashboard request never re-scans the table.
+
+There is no environment switcher, no catalog discovery and no synthetic/demo
+fallback. Storage internals (endpoint host, database, table) are never sent to
+the browser.
 
 ---
 
@@ -28,20 +30,20 @@ python run.py             # dashboard on http://127.0.0.1:8000
 ## Configuration (`.env`)
 
 ```ini
-# The production endpoints: rows on KQL, dimension on SQL.
+# The production data source: one KQL database for everything.
 KQL_ENDPOINT_PROD="https://<eventhouse>.z<region>.kusto.fabric.microsoft.com"
 KQL_DATABASE="ctrader_dom"
 KQL_TABLE="agg_dom"
+SYMBOL_TABLE="symbols_icmarkets"
 
-SQL_ENDPOINT_PROD="<prod-host>"
+# Redis cache (Entra ID; there is no access key).
+REDIS_HOST="<name>.<region>.redis.azure.net"
+REDIS_PORT="10000"
+REDIS_TTL_SECONDS="2700"
+CACHE_LOOKBACK_HOURS="4"
 
 # Authentication - see the table below.
 FABRIC_MANAGED_IDENTITY="true"
-
-# Instrument dimension (SQL).
-GOLD_DATABASE="ctrader_lakehouse"
-GOLD_SCHEMA="gold"
-SYMBOL_TABLE="symbols_icmarkets"
 
 MAX_TICKS="200000"
 
@@ -49,18 +51,31 @@ MAX_TICKS="200000"
 DEFAULT_SYMBOL="XAUUSD"
 ```
 
-`.env` is already git-ignored (see `.env.example` for the template). Never commit
-the secret.
+`.env` is already git-ignored (see `.env.example` for the full template with
+every Redis knob and the alternative credential modes). Never commit the secret.
+
+### Cache and the fixed window
+
+KQL is expensive to re-scan, so query results are cached in Redis: the
+instrument catalogue under one key and each symbol's ticks as a Parquet blob
+under its own. A cache miss (or a Redis outage) reads KQL and repopulates;
+a KQL failure is what sets `connected: false`, never a cache failure.
+
+The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 4 by default).
+`/api/health` publishes it as `lookback_minutes`, the dashboard's *Duration*
+control is built from it, and `/api/analytics` clamps every request to it —
+asking for more returns the whole window instead of a `422`, so a bookmarked
+URL or a stale tab keeps working. A client can therefore narrow the window,
+never widen it, and never trigger a second KQL read.
 
 ### Asset classification
 
-The gold layer publishes its own chain, which the app consumes directly rather
-than guessing:
+The pipeline publishes the class on each symbol row, which the app consumes
+directly rather than guessing:
 
 ```
-gold.symbols_icmarkets          symbolId, symbolName, symbolCategoryId, description
-  -> gold.symbols_category_icmarkets    symbolCategoryId -> assetClassId
-  -> gold.asset_classes_icmarkets       assetClassId    -> name
+symbols_icmarkets          symbolId, symbolName, symbolCategoryId, description
+  -> app/assets.py         symbolCategoryId -> broker class -> client key
 ```
 
 icmarkets names nine classes; `app/assets.py` maps them to stable client keys
@@ -97,9 +112,9 @@ Three modes, tried in order:
 
 | Mode | When | Notes |
 |---|---|---|
-| **Managed identity** | `FABRIC_MANAGED_IDENTITY="true"` | Headless, recommended on Azure. The ODBC driver and the Kusto client mint and refresh their own tokens from the instance metadata endpoint, so there is no secret on the box and no `az login` session for a background service to lose. Needs the **Contributor** workspace role and read access to the KQL database (see below). |
-| **Service principal** | `FABRIC_*` credentials present | Headless. Needs **Contributor**. Ignored while managed identity is on, so a leftover secret cannot silently change the auth path. |
-| **`az login` token** | Neither of the above | Mints a token via the Azure CLI and passes it as `SQL_COPT_SS_ACCESS_TOKEN`. Convenient for local debugging; not suitable for a service. |
+| **Managed identity** | `FABRIC_MANAGED_IDENTITY="true"` | Headless, recommended on Azure. The Kusto client and the Redis client mint and refresh their own tokens from the instance metadata endpoint, so there is no secret on the box and no `az login` session for a background service to lose. Needs the **Contributor** workspace role, read access to the KQL database, and **Redis Data Contributor** on the cache (see below). |
+| **Service principal** | `FABRIC_*` credentials present | Headless. Needs **Contributor** and access to the cache. Ignored while managed identity is on, so a leftover secret cannot silently change the auth path. |
+| **`az login` token** | Neither of the above | Mints a token via the Azure CLI. Convenient for local debugging; not suitable for a service. |
 
 Give the identity a role with `scripts/grant_workspace_access.py`, or set it by
 hand in the Fabric portal (*workspace → Manage access*). The principal id to
@@ -130,8 +145,13 @@ Invoke-RestMethod "https://api.fabric.microsoft.com/v1/workspaces/<workspace-id>
 ```
 
 `Contributor` grants `CONNECT` + `ReadData` on every Lakehouse/Warehouse in the
-workspace — the rights this read-only app needs (and it avoids the OneLake
-security filtering that can hide whole tables from `Viewer`).
+workspace, and read on the Eventhouse KQL database this app needs (it also
+avoids the OneLake security filtering that can hide whole tables from `Viewer`).
+
+The Redis cache is granted separately: assign the same identity **Redis Data
+Contributor** on the Azure Cache for Redis / Redis Enterprise resource (or a
+data-access policy scoped to the `axioma*` key prefix). Redis Enterprise for
+Azure authenticates through Entra ID, so there is no access key to store.
 
 The service principal needs the role on the workspace it reads from (`prod_axioma`).
 Run the helper while signed in with `az login` as a workspace **Admin**:
@@ -156,7 +176,8 @@ the only public entry point; the app itself binds to loopback, so it is
 unreachable except through the proxy.
 
 ```
-internet ──TLS──> nginx (443) ──HTTP──> uvicorn (127.0.0.1:8000) ──TDS──> Fabric
+internet ──TLS──> nginx (443) ──HTTP──> uvicorn (127.0.0.1:8000) ──HTTPS──> Fabric KQL
+                                                              └─────HTTPS──> Redis
 ```
 
 ### systemd unit
@@ -194,7 +215,7 @@ It redirects HTTP to HTTPS (with the ACME challenge path carved out so
 
 | Location | Why it differs |
 |---|---|
-| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off. Analytics queries scan the gold table and return large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, and buffering would hold big payloads in nginx memory. |
+| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off. A cold analytics request may still be scanning KQL and returns large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, and buffering would hold big payloads in nginx memory. |
 | `/static/` | Short `expires`, so unversioned filenames still revalidate. |
 | `/` | Dashboard and everything else. |
 
@@ -213,10 +234,11 @@ curl -sk https://app.axiomanalytics.info/api/health            # through nginx
 curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page
 ```
 
-`connected: true` with a non-zero `row_count` **and** a non-zero `dimension_rows`
-means the full path works: the rows came back from KQL and the instrument names
-from SQL. Health reports both, because a single green flag hid a dimension
-failure that then broke every selector.
+`connected: true` with a non-zero `row_count` means the full path works: rows
+came back from KQL and the instrument names came from the same KQL database.
+`cache_connected` reports the Redis cache separately — it decides whether a
+request costs a KQL query, but a cache failure is never an outage, because
+reads fall through to KQL.
 
 ### Deploying an update
 
@@ -334,11 +356,11 @@ dom_stream_raw    ->   dom_book_flat        ->   agg_dom
                                                  imbalance, spreads)
 ```
 
-The column names are unchanged from the old SQL table, so the move is
-transport-only (`app.kql` instead of a T-SQL query in `app.db`). The measured
-schema is `timestamp: datetime`, `symbolId: long`, the price and size columns
-`real`, plus the pipeline's own `eventId`, `eventSeq` and `eventDate`. Because
-`symbolId` is a `long`, the queries cast the `string` parameter
+The column names are unchanged from the old SQL table, so the move was
+transport-only (`app.kql` instead of a T-SQL query in the retired `app.db`). The
+measured schema is `timestamp: datetime`, `symbolId: long`, the price and size
+columns `real`, plus the pipeline's own `eventId`, `eventSeq` and `eventDate`.
+Because `symbolId` is a `long`, the queries cast the `string` parameter
 (`symbolId == tolong(sym)`) instead of the column; a blank or non-numeric
 parameter simply selects no rows.
 `app/frames.py` normalises the rows to the canonical tick frame
@@ -366,9 +388,9 @@ the dashboard.
 
 ### Symbol names
 
-`gold.symbols_icmarkets` (SQL) supplies `symbolId -> symbolName`, so the UI shows
-`XAUUSD`, `EURUSD`, `BTCUSD` instead of raw numeric ids. Table names are never
-exposed.
+`symbols_icmarkets` (KQL, same database) supplies `symbolId -> symbolName`, so
+the UI shows `XAUUSD`, `EURUSD`, `BTCUSD` instead of raw numeric ids. Table names
+are never exposed.
 
 ---
 
@@ -376,14 +398,14 @@ exposed.
 
 ```
 app/
-  config.py      .env -> Settings (both endpoints, credentials, object names)
-  auth.py        managed identity / service principal / az CLI token minting
+  config.py      .env -> Settings (KQL endpoint, Redis, credentials, object names)
+  cache.py       Redis client (Entra ID), catalogue + per-symbol Parquet caching
+  errors.py      DataSourceError, shared by the transport and the API layer
   kql.py         Kusto client, tick-metric queries and probes (KQL)
-  db.py          SQL connection, identifier quoting, symbol catalogue
   frames.py      tick-metric rows -> canonical tick frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
-  service.py     instrument catalogue, health probing, TTL cache
+  service.py     instrument catalogue, health probing, fixed cache window
   main.py        FastAPI app + static dashboard
   static/        dashboard (Chart.js), holding page, front-facing explainer
 scripts/
@@ -391,7 +413,8 @@ scripts/
 tests/
   test_analytics.py / test_frames.py / test_assets.py / test_config.py
   test_kql.py         KQL query text, parameters and credential selection
-  test_status.py      the two-source health probe
+  test_service.py     cache-backed reads, window clamping, cache-outage fallthrough
+  test_status.py      the health probe (KQL gates it, cache is reported)
   test_selectors.py / test_unavailable.py   HTTP-level behaviour
 ```
 
@@ -407,7 +430,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status for both sources (`row_count` from KQL, `dimension_rows` from SQL), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
@@ -417,7 +440,9 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 `summary`; omitting `asset_class` returns everything.
 
 `/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
-`lookback_minutes`. Its `meta` block echoes the symbol's `asset_class`.
+`lookback_minutes`. `lookback_minutes` is clamped to the cache's fixed window
+(`lookback_minutes` in `/api/health`), never rejected. Its `meta` block echoes
+the request's window and the symbol's `asset_class`.
 
 ---
 
@@ -455,10 +480,15 @@ python -m pytest tests -q
 ```
 
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
-pipeline imbalance), asset classification from both the gold chain and the
-fallback, production-endpoint resolution, bar consistency, OFI bounds, volume
-profile mass conservation, drawdown sign, strict JSON serialisability, and a
-degenerate flat-price series (guards against divide-by-zero).
+pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
+served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
+asset classification from both the pipeline category and the fallback,
+production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
+conservation, drawdown sign, strict JSON serialisability, and a degenerate
+flat-price series (guards against divide-by-zero).
+
+Redis is not required to run the tests: the KQL layer and the Redis client are
+both stubbed.
 
 ---
 
@@ -467,14 +497,11 @@ degenerate flat-price series (guards against divide-by-zero).
 | Symptom | Cause / fix |
 |---|---|
 | `Could not login because the authentication failed (18456)` | The identity has no workspace role. Grant **Contributor**. |
-| `Invalid value specified for connection string attribute 'Authentication'` | Wrong keyword spelling. The driver wants `ActiveDirectoryMSI`, not `ActiveDirectoryManagedIdentity`; `connection_string()` emits the accepted form. |
-| App exits immediately with a segmentation fault | The `az login` token path (`SQL_COPT_SS_ACCESS_TOKEN`) crashes pyodbc 5.3 against this driver. Switch to managed identity or a service principal. |
-| `Invalid value specified for connection string attribute 'PWD'` | Secret missing/blank in `.env`. |
-| `SQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `SQL_ANALYTICS_ENDPOINT`). |
+| Health shows `cache_connected: false` | The Redis cache is unreachable or the identity has no data-access role on it. The dashboard still works (the read falls through to KQL); check the Redis resource's data-access policy / **Redis Data Contributor** assignment. |
+| Cached ticks look stale after a pipeline backfill | Delete the keys (`axioma:ticks:*`, `axioma:catalogue`). The TTL (`REDIS_TTL_SECONDS`) bounds this anyway. |
 | `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |
 | `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |
 | `The KQL aggregate table is empty` | The ingest pipeline has not written rows yet. |
-| `Failed to complete the command because the underlying location does not exist` / `24596` | The SQL analytics endpoint still points at Delta parquet files that are gone (the gold table was rewritten or vacuumed and the endpoint has not resynced). The old `agg_dom_book_snapshot` fails the same way, so it is not caused by the KQL move. Re-run the pipeline that writes the gold tables, or wait for the endpoint to resync. Health reports it as `dimension_rows: null` with its own hint. |
 | Instruments show as ids with no ticker | They come from a feed other than icmarkets; see the `/api/health` hint. |
 | `external policy action ... was denied` | **Viewer** role: OneLake security filters Viewers and hides whole tables. Grant **Contributor**. |
