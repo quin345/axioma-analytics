@@ -372,10 +372,10 @@ the development notice and the dashboard itself lives at `/dashboard`.
 
 ### The main page while under development
 
-`/` currently serves `app/static/maintenance.html` — a self-contained "under
+`/` currently serves `app/static/unavailable.html` — a self-contained "under
 development" notice with gear artwork — because the app is being rebuilt. The
 dashboard is retained at `/dashboard` (and in `index.html`), and the branded
-outage page (`app/static/unavailable.html`) is retained at `/unavailable` for
+outage page (`app/static/maintenance.html`) is retained at `/unavailable` for
 future maintenance windows; `MAINTENANCE_MODE=1` still serves *that* page from
 `/` with a 503. When the build is finished, deleting the maintenance route in
 `app/main.py` restores the dashboard to `/`.
@@ -523,7 +523,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
-| `GET /` | The development notice (`maintenance.html`) while the app is under development |
+| `GET /` | The development notice (`unavailable.html`) while the app is under development |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |

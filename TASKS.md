@@ -31,13 +31,13 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
       describe the clock-slot sliding cycle
 
 ### Pages
-- [x] `app/static/maintenance.html`: new self-contained "under development"
+- [x] `app/static/unavailable.html`: new self-contained "under development"
       notice - brand header/footer, animated gear artwork (two counter-rotating
       gradient gears), amber status pill, manual "Check again"
 - [x] `app/main.py`: `/` serves the development notice (200);
-      `MAINTENANCE_MODE=1` still serves `unavailable.html` from `/` with 503;
+      `MAINTENANCE_MODE=1` still serves `maintenance.html` from `/` with 503;
       `/unavailable` retained; dashboard retained at `/dashboard`
-- [x] `app/static/unavailable.html` untouched - kept for future outage windows
+- [x] `app/static/maintenance.html` untouched - kept for future outage windows
 
 ### Verification
 - [x] `pytest` - 285 passed
