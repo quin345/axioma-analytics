@@ -18,8 +18,12 @@ PAGE = STATIC / "unavailable.html"
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
+def client(monkeypatch):
+    """Test client with maintenance mode forced off (the real .env may set it)."""
+    monkeypatch.setenv("MAINTENANCE_MODE", "false")
+    config.get_settings.cache_clear()
+    yield TestClient(app)
+    config.get_settings.cache_clear()
 
 
 @pytest.fixture

@@ -1,11 +1,10 @@
-"""Tests for the gold snapshot reader (no data source required)."""
+"""Tests for the aggregate row reader (no data source required)."""
 from __future__ import annotations
 
 import pandas as pd
 import pytest
 
-from app.db import TICK_COLUMNS
-from app.frames import from_snapshot
+from app.frames import TICK_COLUMNS, from_snapshot
 
 
 def _rows():

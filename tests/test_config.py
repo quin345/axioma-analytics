@@ -1,4 +1,4 @@
-"""Tests for the production gold configuration (no data source required)."""
+"""Tests for the production configuration (no data source required)."""
 from __future__ import annotations
 
 import pytest
@@ -12,7 +12,8 @@ from app.db import connection_string
 def _isolated(monkeypatch):
     """Build Settings from a known-empty environment, then restore."""
     for key in ("SQL_ENDPOINT_PROD", "SQL_ANALYTICS_ENDPOINT", "GOLD_DATABASE",
-                "GOLD_SCHEMA", "SNAPSHOT_TABLE", "SYMBOL_TABLE",
+                "GOLD_SCHEMA", "SYMBOL_TABLE", "DEFAULT_SYMBOL",
+                "KQL_ENDPOINT_PROD", "KQL_ENDPOINT", "KQL_DATABASE", "KQL_TABLE",
                 "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
                 "MAINTENANCE_MODE"):
         monkeypatch.delenv(key, raising=False)
@@ -25,17 +26,42 @@ def test_defaults_point_at_the_gold_schema():
     s = Settings()
     assert s.gold_database == "ctrader_lakehouse"
     assert s.gold_schema == "gold"
-    assert s.snapshot_table == "agg_dom_book_snapshot"
     assert s.symbol_table == "symbols_icmarkets"
+
+
+def test_defaults_point_at_the_kql_database():
+    """The aggregate rows moved off SQL onto the KQL endpoint."""
+    s = Settings()
+    assert s.kql_database == "ctrader_dom"
+    assert s.kql_table == "agg_dom"
+
+
+def test_default_symbol_is_gold():
+    assert Settings().default_symbol == "XAUUSD"
 
 
 def test_prod_endpoint_is_read(monkeypatch):
     monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
+    monkeypatch.setenv("KQL_ENDPOINT_PROD", "https://kusto.host")
     s = Settings()
     assert s.host == "prod.host"
     assert s.server == "prod.host"
     assert s.port == 1433
+    assert s.kql_host == "https://kusto.host"
     assert s.is_configured
+
+
+def test_kql_endpoint_falls_back_to_the_legacy_name(monkeypatch):
+    monkeypatch.setenv("KQL_ENDPOINT", "https://legacy-kusto.host")
+    assert Settings().kql_host == "https://legacy-kusto.host"
+
+
+def test_both_endpoints_are_required(monkeypatch):
+    """Rows come from KQL and the dimension from SQL; neither alone is enough."""
+    monkeypatch.setenv("SQL_ENDPOINT_PROD", "prod.host")
+    assert not Settings().is_configured
+    monkeypatch.setenv("KQL_ENDPOINT_PROD", "https://kusto.host")
+    assert Settings().is_configured
 
 
 def test_dev_and_test_endpoints_are_ignored(monkeypatch):
@@ -72,9 +98,15 @@ def test_host_may_carry_an_explicit_port(monkeypatch):
 def test_gold_object_names_are_overridable(monkeypatch):
     monkeypatch.setenv("GOLD_DATABASE", "other_db")
     monkeypatch.setenv("GOLD_SCHEMA", "silver")
-    monkeypatch.setenv("SNAPSHOT_TABLE", "book")
     s = Settings()
-    assert (s.gold_database, s.gold_schema, s.snapshot_table) == ("other_db", "silver", "book")
+    assert (s.gold_database, s.gold_schema) == ("other_db", "silver")
+
+
+def test_kql_object_names_are_overridable(monkeypatch):
+    monkeypatch.setenv("KQL_DATABASE", "other_kql")
+    monkeypatch.setenv("KQL_TABLE", "agg_other")
+    s = Settings()
+    assert (s.kql_database, s.kql_table) == ("other_kql", "agg_other")
 
 
 def test_symbol_table_is_overridable(monkeypatch):

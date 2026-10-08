@@ -1,9 +1,11 @@
-"""Data access for the production gold database.
+"""Data access for the production data endpoints.
 
 Owns the connection lifecycle, the cached instrument catalogue (ticker, asset
-class, tick count) and the tick fetch. Caching keeps the dashboard responsive:
-the catalogue changes only when a new instrument is listed, and repeated
-dashboard requests should not re-scan the gold tables.
+class, tick count) and the tick fetch. The aggregate rows come from the KQL
+endpoint (`app.kql`); the instrument dimension stays on the SQL analytics
+endpoint (`app.db`). Caching keeps the dashboard responsive: the catalogue
+changes only when a new instrument is listed, and repeated dashboard requests
+should not re-scan the tables.
 """
 from __future__ import annotations
 
@@ -13,10 +15,10 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from . import kql
 from .assets import CLASS_LABELS, classify_asset_class, family_label, family_of, sort_key
 from .config import Settings, get_settings
-from .db import (DataSourceError, connect, fetch_ticks, ident, query,
-                 snapshot_object, symbol_catalogue, symbol_tick_counts)
+from .db import DataSourceError, connect, qualified, query, symbol_catalogue
 from .frames import from_snapshot
 
 _CACHE_TTL = 300.0
@@ -62,6 +64,8 @@ class Status:
     server_time: str | None = None
     row_count: int | None = None
     latest: str | None = None
+    #: Rows in the SQL instrument dimension, or ``None`` when it is unreadable.
+    dimension_rows: int | None = None
 
 
 class _TTLCache:
@@ -101,7 +105,8 @@ _instruments: dict[str, Instrument] | None = None
 
 
 def _endpoint_key(s: Settings) -> str:
-    return f"{s.host}|{s.gold_database}.{s.gold_schema}.{s.snapshot_table}"
+    return (f"{s.kql_host}|{s.kql_database}.{s.kql_table}"
+            f"|{s.host}|{s.gold_database}.{s.gold_schema}.{s.symbol_table}")
 
 
 # --------------------------------------------------------------------------
@@ -109,7 +114,13 @@ def _endpoint_key(s: Settings) -> str:
 # --------------------------------------------------------------------------
 
 def status(*, refresh: bool = False) -> Status:
-    """Probe the gold endpoint. Cached briefly so the UI stays responsive."""
+    """Probe both sources. Cached briefly so the UI stays responsive.
+
+    The rows are read from KQL and the names for them from SQL, so a dashboard
+    is only usable when *both* answer. Probing just one of them reported
+    ``connected`` while the selectors still failed, which is worse than saying
+    plainly which side is down.
+    """
     global _status
     if not refresh and _status.server_time:
         return _status
@@ -117,20 +128,31 @@ def status(*, refresh: bool = False) -> Status:
     s = get_settings()
     st = Status()
     try:
-        with connect(s) as conn:
-            st.server_time = str(query(conn, "SELECT CURRENT_TIMESTAMP AS t")["t"].iloc[0])
-            probe = query(conn, f"""
-                SELECT COUNT_BIG(*) AS n, MAX({ident('timestamp')}) AS latest
-                FROM {snapshot_object(s)}""")
-            st.row_count = int(probe["n"].iloc[0]) if not probe.empty else 0
-            latest = probe["latest"].iloc[0] if not probe.empty else None
-            st.latest = None if latest is None or pd.isna(latest) else str(latest)
+        with kql.connect(s) as client:
+            st.server_time = kql.server_time(client, s)
+            st.row_count, st.latest = kql.snapshot_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
-            st.hints = ["The gold snapshot table is empty. Run the ingest pipeline."]
+            st.hints = ["The KQL aggregate table is empty. Run the ingest pipeline."]
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
-        st.hints = ["Data source unavailable. Check the configured credentials."]
+        st.hints = ["The KQL endpoint is unavailable. Check the configured identity."]
+
+    try:
+        with connect(s) as conn:
+            probe = query(
+                conn,
+                f"SELECT COUNT_BIG(*) AS n FROM "
+                f"{qualified(s.gold_database, s.gold_schema, s.symbol_table)}",
+            )
+            st.dimension_rows = int(probe["n"].iloc[0]) if not probe.empty else 0
+    except DataSourceError as exc:
+        st.connected, st.error = False, st.error or str(exc)
+        st.hints.append(
+            "The instrument dimension is unavailable. Check that the SQL "
+            "analytics endpoint can still read the gold tables."
+        )
+
     _status = st
     return _status
 
@@ -152,11 +174,11 @@ def unclassified_count() -> int:
 def coverage_note() -> str | None:
     """Warning when the snapshot holds instruments the dimension cannot name.
 
-    ``agg_dom_book_snapshot`` is shared and accumulates rows from every feed
-    that has ever written to it, while ``symbols_icmarkets`` describes only
-    icmarkets. Any other feed's instruments therefore cannot be named or
-    classified. They are left out of the selectors, so say so rather than
-    leaving the count to be discovered by its absence.
+    ``agg_dom`` is shared and accumulates rows from every feed that has ever
+    written to it, while ``symbols_icmarkets`` describes only icmarkets. Any
+    other feed's instruments therefore cannot be named or classified. They are
+    left out of the selectors, so say so rather than leaving the count to be
+    discovered by its absence.
     """
     missing = unclassified_count()
     if not missing:
@@ -172,10 +194,12 @@ def coverage_note() -> str | None:
 # Instrument catalogue
 # --------------------------------------------------------------------------
 
-def _build_catalogue(conn) -> dict[str, Instrument]:
-    """Merge the gold instrument dimension with observed tick counts."""
-    dim = symbol_catalogue(conn)
-    counts = symbol_tick_counts(conn)
+def _build_catalogue() -> dict[str, Instrument]:
+    """Merge the SQL instrument dimension with the KQL tick counts."""
+    with connect() as conn:
+        dim = symbol_catalogue(conn)
+    with kql.connect() as client:
+        counts = kql.symbol_tick_counts(client)
     out: dict[str, Instrument] = {}
     for row in dim.itertuples():
         symbol_id = str(row.symbolId).strip()
@@ -192,7 +216,7 @@ def _build_catalogue(conn) -> dict[str, Instrument]:
                                              row.symbolCategoryId, description),
             ticks=int(counts.get(symbol_id, 0)),
         )
-    # A symbol present in the snapshots but missing from the dimension still
+    # A symbol present in the rows but missing from the dimension still
     # belongs in the selector; classify it from its id alone.
     for symbol_id, ticks in counts.items():
         if symbol_id not in out:
@@ -215,12 +239,11 @@ def _text(value: object) -> str:
 
 
 def instruments(*, refresh: bool = False) -> dict[str, Instrument]:
-    """{symbolId: Instrument} for every instrument in the gold dimension."""
+    """{symbolId: Instrument} for every instrument in the dimension."""
     global _instruments
     if _instruments is not None and not refresh:
         return _instruments
-    with connect() as conn:
-        _instruments = _build_catalogue(conn)
+    _instruments = _build_catalogue()
     return _instruments
 
 
@@ -229,7 +252,7 @@ def _default_key() -> str:
     try:
         return (get_settings().default_symbol or "").strip().upper()
     except Exception:
-        return "BTCUSD"
+        return "XAUUSD"
 
 
 def default_symbol_id(only_traded: bool = True) -> str | None:
@@ -340,13 +363,13 @@ def load_ticks(symbol: str | None = None, *, limit: int | None = None,
                lookback_minutes: int = 5) -> pd.DataFrame:
     """Canonical ticks for one symbol. Raises DataSourceError when empty."""
     s = get_settings()
-    with connect(s) as conn:
-        raw = fetch_ticks(conn, symbol=symbol, limit=int(limit or s.max_ticks),
-                          lookback_minutes=lookback_minutes)
+    with kql.connect(s) as client:
+        raw = kql.fetch_ticks(client, symbol=symbol, limit=int(limit or s.max_ticks),
+                              lookback_minutes=lookback_minutes, settings=s)
     frame = from_snapshot(raw)
     if frame.empty:
         raise DataSourceError(
-            f"No usable snapshots for {symbol or 'any instrument'} "
+            f"No usable aggregate rows for {symbol or 'any instrument'} "
             f"in the last {lookback_minutes} minute(s)."
         )
     return frame
@@ -372,17 +395,12 @@ def reset() -> None:
     s = get_settings()
     st = Status()
     try:
-        with connect(s) as conn:
-            st.server_time = str(query(conn, "SELECT CURRENT_TIMESTAMP AS t")["t"].iloc[0])
-            probe = query(conn, f"""
-                SELECT COUNT_BIG(*) AS n, MAX({ident('timestamp')}) AS latest
-                FROM {snapshot_object(s)}""")
-            st.row_count = int(probe["n"].iloc[0]) if not probe.empty else 0
-            latest = probe["latest"].iloc[0] if not probe.empty else None
-            st.latest = None if latest is None or pd.isna(latest) else str(latest)
+        with kql.connect(s) as client:
+            st.server_time = kql.server_time(client, s)
+            st.row_count, st.latest = kql.snapshot_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
-            st.hints = ["The gold snapshot table is empty. Run the ingest pipeline."]
+            st.hints = ["The KQL aggregate table is empty. Run the ingest pipeline."]
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
         st.hints = ["Data source unavailable. Check the configured credentials."]

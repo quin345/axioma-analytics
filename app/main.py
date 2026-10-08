@@ -18,13 +18,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Axioma Analytics",
-    description="Microstructure analytics over the production gold state snapshots.",
+    description="Microstructure analytics over the production KQL aggregate DOM rows.",
     version="2.0.0",
 )
 
 
 @app.get("/api/health")
-def health(refresh: bool = Query(False, description="Re-probe the gold endpoint")) -> dict:
+def health(refresh: bool = Query(False, description="Re-probe the data endpoints")) -> dict:
     """Connection status, instrument coverage and hints.
 
     Storage internals (endpoint host, database, table) are deliberately not
@@ -59,6 +59,7 @@ def health(refresh: bool = Query(False, description="Re-probe the gold endpoint"
         "server_time": st.server_time,
         "latest_snapshot": st.latest,
         "row_count": st.row_count,
+        "dimension_rows": st.dimension_rows,
         "error": st.error,
         "hints": hints,
         "has_data": bool(traded),
@@ -83,7 +84,7 @@ def asset_classes() -> dict:
 def symbols(
     asset_class: str | None = Query(None, description="Filter to one asset class"),
     family: str | None = Query(None, description="Filter to one broad family"),
-    include_idle: bool = Query(False, description="Include instruments with no snapshots"),
+    include_idle: bool = Query(False, description="Include instruments with no aggregate rows"),
 ) -> dict:
     """Instruments with their asset class, grouped for the selector."""
     only_traded = not include_idle

@@ -1,18 +1,18 @@
-"""Gold database access: connection, snapshot fetch, symbol catalogue.
+"""SQL access to the production instrument dimension.
 
-Every query in the app targets `[ctrader_lakehouse].[gold]` on the production
-endpoint. Two kinds of object are read:
+The per-tick aggregate rows moved to the KQL endpoint (see `app.kql`). What
+stays on the Fabric SQL analytics endpoint - `[ctrader_lakehouse].[gold]` - is
+the instrument metadata:
 
-* `gold.agg_dom_book_snapshot` - one pre-aggregated row per symbol and
-  timestamp, already carrying best bid/ask and resting sizes.
-* `gold.symbols_icmarkets`        - the icmarkets instrument dimension,
-  supplying the human ticker, the description and the category id that
-  `app.assets` turns into an asset class.
+* `gold.symbols_icmarkets` - the icmarkets instrument dimension, supplying the
+  human ticker, the description and the category id that `app.assets` turns
+  into an asset class, joined to `symbols_category_icmarkets` and
+  `asset_classes_icmarkets`.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, Iterator
+from typing import Iterator
 
 import pandas as pd
 import pyodbc
@@ -33,12 +33,6 @@ def ident(name: str) -> str:
 def qualified(database: str, schema: str, table: str) -> str:
     """Fully qualified, cross-database safe object name."""
     return f"{ident(database)}.{ident(schema)}.{ident(table)}"
-
-
-def snapshot_object(settings: Settings | None = None) -> str:
-    """Qualified name of the aggregate state-snapshot table."""
-    s = settings or get_settings()
-    return qualified(s.gold_database, s.gold_schema, s.snapshot_table)
 
 
 # --------------------------------------------------------------------------
@@ -177,78 +171,4 @@ def symbol_catalogue(conn: pyodbc.Connection, settings: Settings | None = None) 
         out[col] = out[col].astype("string").str.strip()
     return out[_DIM_COLUMNS].reset_index(drop=True)
 
-
-def symbol_tick_counts(conn: pyodbc.Connection, settings: Settings | None = None) -> dict[str, int]:
-    """{symbolId: snapshot rows} from the gold state-snapshot table."""
-    obj = snapshot_object(settings)
-    df = query(conn, f"""
-        SELECT {ident('symbolId')} AS symbolId, COUNT_BIG(*) AS ticks
-        FROM {obj}
-        WHERE {ident('symbolId')} IS NOT NULL
-        GROUP BY {ident('symbolId')}""")
-    return {str(r.symbolId).strip(): int(r.ticks) for r in df.itertuples() if r.symbolId is not None}
-
-
-# --------------------------------------------------------------------------
-# Ticks
-# --------------------------------------------------------------------------
-
-#: Columns of the canonical state snapshot frame produced by
-#: ``frames.ticks_from_snapshot``.
-TICK_COLUMNS = [
-    "ts", "symbol", "bid", "ask", "last", "volume",
-    "bid_depth", "ask_depth", "signed_volume",
-    "imbalance", "imbalance_ratio",
-    "vwap_bid", "vwap_ask", "vwap_spread", "rel_spread", "rel_vwap_spread",
-]
-
-_SNAPSHOT_COLUMNS = [
-    "timestamp", "symbolId", "total_bid", "total_ask", "best_bid", "best_ask",
-    "imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask", "vwap_spread",
-    "rel_spread", "rel_vwap_spread",
-]
-
-
-def fetch_ticks(conn: pyodbc.Connection, *, symbol: str | None = None,
-                start: str | None = None, end: str | None = None,
-                limit: int = 50_000, lookback_minutes: int | None = None) -> pd.DataFrame:
-    """Read raw state snapshots for one symbol.
-
-    With ``lookback_minutes`` and no explicit range, the window is anchored on the
-    newest snapshot so the result is the most recent session rather than an
-    arbitrary slice of history.
-    """
-    obj = snapshot_object()
-    cols = ", ".join(ident(c) for c in _SNAPSHOT_COLUMNS)
-    clauses: list[str] = []
-    params: list[Any] = []
-
-    if symbol:
-        clauses.append(f"{ident('symbolId')} = ?")
-        params.append(str(symbol).strip())
-
-    if lookback_minutes and not start and not end:
-        anchor_where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        try:
-            anchor = query(conn, f"SELECT MAX({ident('timestamp')}) AS mx FROM {obj}{anchor_where}",
-                           tuple(params) if params else None)
-            mx = None if anchor.empty else anchor["mx"].iloc[0]
-        except DataSourceError:
-            mx = None
-        if mx is not None and not pd.isna(mx):
-            cutoff = pd.Timestamp(mx) - pd.Timedelta(minutes=int(lookback_minutes))
-            clauses.append(f"{ident('timestamp')} >= ?")
-            params.append(cutoff.tz_localize(None) if cutoff.tzinfo else cutoff)
-
-    if start:
-        clauses.append(f"{ident('timestamp')} >= ?")
-        params.append(start)
-    if end:
-        clauses.append(f"{ident('timestamp')} <= ?")
-        params.append(end)
-
-    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    sql = (f"SELECT TOP ({int(limit)}) {cols} FROM {obj}{where} "
-           f"ORDER BY {ident('timestamp')} ASC")
-    return query(conn, sql, tuple(params) if params else None)
 

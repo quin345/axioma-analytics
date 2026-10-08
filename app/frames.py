@@ -1,9 +1,9 @@
-"""Reader for the gold aggregate state snapshots.
+"""Reader for the aggregate DOM rows.
 
-`gold.agg_dom_book_snapshot` holds one row per symbol and timestamp with best
-bid/ask, resting sizes and the pipeline's own imbalance and spread measures.
-`from_snapshot` projects it onto the canonical state snapshot frame the
-analytics engine consumes:
+`ctrader_dom.agg_dom` (KQL) holds one pre-aggregated row per symbol and
+timestamp with best bid/ask, resting sizes and the pipeline's own imbalance and
+spread measures. `from_snapshot` projects it onto the canonical state snapshot
+frame the analytics engine consumes:
 
     ts | symbol | bid | ask | last | volume | mid
 """
@@ -12,14 +12,23 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .db import TICK_COLUMNS
+#: Columns of the canonical state snapshot frame produced by `from_snapshot`.
+TICK_COLUMNS = [
+    "ts", "symbol", "bid", "ask", "last", "volume",
+    "bid_depth", "ask_depth", "signed_volume",
+    "imbalance", "imbalance_ratio",
+    "vwap_bid", "vwap_ask", "vwap_spread", "rel_spread", "rel_vwap_spread",
+]
 
 # Resting sizes arrive in units of 100 lots; canonical volume is in lots.
 VOLUME_SCALE = 100.0
 
 
 def from_snapshot(raw: pd.DataFrame) -> pd.DataFrame:
-    """Normalise raw gold snapshots into the canonical state snapshot frame.
+    """Normalise raw aggregate rows into the canonical state snapshot frame.
+
+    The KQL column names are identical to the old SQL table's, so only the
+    transport changed; this projection is shape-only.
 
     Rows missing a best bid or ask are one-sided books: they have no mid price,
     so they are dropped rather than faked. A crossed book (bid >= ask) is

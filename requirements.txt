@@ -5,3 +5,5 @@ pandas>=2.2
 numpy>=2.0
 python-dotenv>=1.0
 pydantic>=2.9
+azure-identity>=1.17
+azure-kusto-data>=5.0

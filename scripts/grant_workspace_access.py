@@ -9,11 +9,16 @@ Fabric REST API::
     { "principal": { "id": <sp-object-id>, "type": "ServicePrincipal" },
       "role": "Contributor" }
 
-The app's read path (SQL analytics endpoint -> CONNECT + ReadData) needs the
-service principal to hold a role on **every** workspace it reads from, so each
-of dev_axioma / test_axioma / prod_axioma must carry the assignment. This script
-is idempotent: it skips a workspace that already holds the role, updates the role
-when it differs, and only creates the assignment when missing.
+The app's read path needs the service principal to hold a role on **every**
+workspace it reads from, so each of dev_axioma / test_axioma / prod_axioma must
+carry the assignment. The same role covers both sources the app reads: the SQL
+analytics endpoint (CONNECT + ReadData) and the Eventhouse KQL database
+(`ctrader_dom`). If KQL reads return ``UnauthorizedDatabaseAccessException``
+(403) while SQL works, the database carries a stricter database-level permission
+- add the identity under the Eventhouse database's *Manage permissions*. This
+script only manages workspace roles; it cannot grant those. It is idempotent: it
+skips a workspace that already holds the role, updates the role when it differs,
+and only creates the assignment when missing.
 
 The caller must be signed in with ``az login`` and hold Member or higher on the
 target workspaces (Admin is required to grant, in practice).

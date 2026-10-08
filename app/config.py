@@ -1,9 +1,15 @@
-"""Application configuration for the production gold endpoint.
+"""Application configuration for the production data endpoints.
 
-The app reads exactly one source: the production Fabric SQL analytics endpoint,
-`[ctrader_lakehouse].[gold]`. There is no environment selector, no catalog
-discovery and no synthetic fallback - the configuration is just the endpoint,
-the Entra ID service principal and the gold object names.
+The app reads two sources:
+
+* the per-tick aggregate DOM data, now in the production Fabric **KQL**
+  database (`KQL_ENDPOINT_PROD`), and
+* the instrument dimension, which stays on the production Fabric **SQL**
+  analytics endpoint (`SQL_ENDPOINT_PROD`).
+
+There is no environment selector, no catalog discovery and no synthetic
+fallback - the configuration is just the two endpoints, the Entra ID identity
+and the object names.
 """
 from __future__ import annotations
 
@@ -50,15 +56,23 @@ class Settings:
         default_factory=lambda: _env("FABRIC_MANAGED_IDENTITY_CLIENT_ID")
     )
 
-    # --- Gold objects ---
-    # Physical names are resolved here and never sent to the browser.
+    # --- Production KQL (Eventhouse) endpoint ---
+    # The per-tick aggregate DOM table lives here and is queried with KQL.
+    kql_host: str = field(
+        default_factory=lambda: _env("KQL_ENDPOINT_PROD", "KQL_ENDPOINT", default="") or ""
+    )
+    kql_database: str = field(
+        default_factory=lambda: _env("KQL_DATABASE", default="ctrader_dom") or "ctrader_dom"
+    )
+    kql_table: str = field(default_factory=lambda: _env("KQL_TABLE", default="agg_dom") or "agg_dom")
+
+    # --- Gold objects (SQL analytics endpoint) ---
+    # Physical names are resolved here and never sent to the browser. Only the
+    # instrument dimension stays on SQL; the aggregate rows come from KQL.
     gold_database: str = field(
         default_factory=lambda: _env("GOLD_DATABASE", default="ctrader_lakehouse") or "ctrader_lakehouse"
     )
     gold_schema: str = field(default_factory=lambda: _env("GOLD_SCHEMA", default="gold") or "gold")
-    snapshot_table: str = field(
-        default_factory=lambda: _env("SNAPSHOT_TABLE", default="agg_dom_book_snapshot") or "agg_dom_book_snapshot"
-    )
     #: The icmarkets instrument dimension in the gold schema.
     symbol_table: str = field(
         default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
@@ -68,7 +82,7 @@ class Settings:
     max_ticks: int = field(default_factory=lambda: int(_env("MAX_TICKS", default="200000") or 200000))
     #: Ticker pinned as the dashboard default (matched by symbolName, then id).
     default_symbol: str = field(
-        default_factory=lambda: _env("DEFAULT_SYMBOL", default="BTCUSD") or "BTCUSD"
+        default_factory=lambda: _env("DEFAULT_SYMBOL", default="XAUUSD") or "XAUUSD"
     )
 
     # --- Availability -------------------------------------------------------
@@ -105,8 +119,13 @@ class Settings:
         return self.managed_identity
 
     @property
+    def kql_configured(self) -> bool:
+        return bool(self.kql_host)
+
+    @property
     def is_configured(self) -> bool:
-        return bool(self.host)
+        """Both endpoints are needed: KQL for the rows, SQL for the dimension."""
+        return bool(self.host and self.kql_host)
 
 
 @lru_cache(maxsize=1)

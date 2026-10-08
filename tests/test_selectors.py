@@ -31,6 +31,11 @@ def catalogue(monkeypatch):
         "4": _inst("4", "GBPUSD", "fx_major", 0),
     }
     monkeypatch.setattr(service, "_instruments", rows, raising=False)
+    # This module is data-source-free by design, so pin the health probe:
+    # without it /api/health would borrow the coverage counters from a live
+    # endpoint and the reconciliation assertions would depend on connectivity.
+    monkeypatch.setattr(service, "status",
+                        lambda **_: service.Status(connected=True), raising=False)
     return rows
 
 

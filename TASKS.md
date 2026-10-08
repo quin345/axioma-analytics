@@ -8,6 +8,83 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-08 - Aggregate rows move to Fabric KQL (Eventhouse)
+
+### Transport
+- [x] `app/kql.py`: Kusto client, `table_ref`, declarative-parameter queries,
+      `server_time`, `snapshot_stats`, `symbol_tick_counts`, `fetch_ticks`
+- [x] Anchored `lookback_minutes` window ported from the SQL anchor query
+- [x] Auth mirrors SQL: managed identity -> service principal -> `az login`,
+      with `azure-kusto-data` refreshing tokens internally
+- [x] `app/db.py` trimmed to the SQL instrument dimension only
+- [x] `app/frames.py` owns `TICK_COLUMNS` (no longer imported from `db`)
+- [x] `app/service.py`: ticks/counts/probe via `app.kql`, catalogue via SQL
+
+### Configuration
+- [x] `kql_host` / `kql_database` / `kql_table` (`KQL_ENDPOINT_PROD`, defaults
+      `ctrader_dom` / `agg_dom`); `SNAPSHOT_TABLE` removed
+- [x] `is_configured` now requires **both** endpoints; `kql_configured` added
+- [x] `DEFAULT_SYMBOL` default and the pinned UI ticker both switched to `XAUUSD`
+- [x] `requirements.txt`: `azure-identity`, `azure-kusto-data`
+- [x] `.env.example` / `README.md` document the KQL/SQL split
+
+### Verification
+- [x] `pytest` - 191 passed
+- [x] `tests/test_config.py`: KQL defaults, legacy `KQL_ENDPOINT` fallback, both
+      endpoints required
+- [x] `tests/test_kql.py`: query text, declarative parameters, row capping,
+      lookback anchoring, credential selection
+- [x] `tests/test_status.py`: the two-source health probe
+- [x] `tests/test_selectors.py` pins the health probe so the endpoint tests stay
+      data-source-free (they previously borrowed live connectivity)
+- [x] Live probe after the workspace grant: `server_time`, `count()/max(timestamp)`,
+      `getschema`, `symbol_tick_counts` and `fetch_ticks` all return 200s
+- [x] Schema read from the live table: `symbolId` is a `long`, so the queries now
+      cast the parameter (`symbolId == tolong(sym)`) instead of the column
+- [x] End-to-end: `/api/symbols` defaults to `XAUUSD` (id 41) and
+      `/api/analytics` returns a full bundle over live rows (16.8k ticks/hour,
+      1m OHLCV, microstructure)
+
+**Notes:**
+- Access is now granted: the identity reads `ctrader_dom` and the live probes
+  return 200s. A **403** here means the workspace role was lost; add the identity
+  back as Contributor on the workspace or as a Database viewer on the Eventhouse
+  database.
+- `symbolId` is a `long` (read from the live `getschema`), so the queries cast the
+  parameter rather than the column. A blank or non-numeric symbol therefore
+  selects no rows instead of failing, which keeps the unfiltered call working.
+- `fetch_ticks` uses `top {limit} by timestamp asc` rather than
+  `sort ... | take`, so the row cap is applied to the *oldest* rows of the
+  window deterministically.
+- The instrument catalogue merges the SQL dimension with the **KQL** counts, so
+  the dashboard needs both endpoints: a working KQL read with an unreadable
+  dimension gives ids with no tickers, and an unreadable KQL endpoint leaves the
+  selectors empty. `/api/health` reports each side separately (`row_count` for
+  KQL, `dimension_rows` for SQL) and stays 200 with `connected=false` plus a
+  per-source hint, so the dashboard shows the unavailable state instead of
+  failing on the first request.
+- `status()` originally probed KQL only, which reported `connected=true` while
+  every selector failed. It now probes the dimension too - that is what the
+  `SELECT COUNT_BIG(*)` against `symbols_icmarkets` in `/api/health` is for.
+- The gold Delta tables can briefly answer
+  `Failed to complete the command because the underlying location does not exist`
+  (`24596`) while the SQL analytics endpoint's metadata points at parquet files
+  that were rewritten. It cleared on its own during this session; the legacy
+  `agg_dom_book_snapshot` fails identically, so it is unrelated to the KQL move.
+- The mirroring check in `frames.from_snapshot` is exercised by the live data, not
+  just by tests: 100% of the rows in a one-hour XAUUSD window have
+  `best_bid > best_ask`, `best_bid` sits near the pipeline's `vwap_ask` and
+  `best_ask` near its `vwap_bid`, and the pair is ~19x wider than the pipeline's
+  own `vwap_spread` (36.6 vs 1.94). The swap is verified against the raw rows
+  column by column (frame `bid` = raw `best_ask`, frame `ask` = raw `best_bid`,
+  identical mid). Raising the pipeline's `best_*` orientation with its owner is
+  still open - nothing in the app can fix the source columns.
+- Several rows share one millisecond `timestamp` (15.5% of the window, up to 12
+  rows), separated only by `eventSeq`/`eventId`; they are distinct events and are
+  kept, which is why tick counts are ~19% higher than distinct timestamps.
+
+---
+
 ## 2026-10-05 - Dashboard cards, calendar, symbolId
 
 ### Expandable cards

@@ -1,15 +1,18 @@
 # Axioma Analytics
 
-Microstructure analytics over the **production gold database**. Every instrument
-is categorised by asset class using the pipeline's own classification, and the
-dashboard renders OHLCV bars, order-flow imbalance, spread evolution,
-volume-at-price, return distribution, drawdown, autocorrelation and large-trade
-market impact.
+Microstructure analytics over the **production aggregate DOM feed**. Every
+instrument is categorised by asset class using the pipeline's own
+classification, and the dashboard renders OHLCV bars, order-flow imbalance,
+spread evolution, volume-at-price, return distribution, drawdown,
+autocorrelation and large-trade market impact.
 
-The app talks to exactly one source: `[ctrader_lakehouse].[gold]` on the
-production Fabric SQL analytics endpoint. There is no environment switcher, no
-catalog discovery and no synthetic/demo fallback. Storage internals (endpoint
-host, database, table) are never sent to the browser.
+The app talks to exactly two sources on the production Fabric estate: the
+per-tick aggregate DOM rows in the **KQL** (Eventhouse) database
+(`ctrader_dom.agg_dom`), and the instrument dimension in
+`[ctrader_lakehouse].[gold]` on the **SQL analytics endpoint**. There is no
+environment switcher, no catalog discovery and no synthetic/demo fallback.
+Storage internals (endpoint host, database, table) are never sent to the
+browser.
 
 ---
 
@@ -25,19 +28,25 @@ python run.py             # dashboard on http://127.0.0.1:8000
 ## Configuration (`.env`)
 
 ```ini
-# The production endpoint.
+# The production endpoints: rows on KQL, dimension on SQL.
+KQL_ENDPOINT_PROD="https://<eventhouse>.z<region>.kusto.fabric.microsoft.com"
+KQL_DATABASE="ctrader_dom"
+KQL_TABLE="agg_dom"
+
 SQL_ENDPOINT_PROD="<prod-host>"
 
 # Authentication - see the table below.
 FABRIC_MANAGED_IDENTITY="true"
 
-# Gold objects.
+# Instrument dimension (SQL).
 GOLD_DATABASE="ctrader_lakehouse"
 GOLD_SCHEMA="gold"
-SNAPSHOT_TABLE="agg_dom_book_snapshot"
 SYMBOL_TABLE="symbols_icmarkets"
 
 MAX_TICKS="200000"
+
+# Ticker pinned as the dashboard default.
+DEFAULT_SYMBOL="XAUUSD"
 ```
 
 `.env` is already git-ignored (see `.env.example` for the template). Never commit
@@ -75,10 +84,10 @@ falls back to the same cTrader signals present in the symbol rows
 disappears from the selector. Anything still unresolved is reported as
 `Unclassified`, and `/api/health` says how many instruments are affected.
 
-Note that `agg_dom_book_snapshot` is shared and accumulates rows from every feed
-that writes to it, while `symbols_icmarkets` describes only icmarkets. Any
-other feed's instruments therefore appear as bare ids with no ticker — the
-health hint names that explicitly rather than leaving it to be guessed at.
+Note that `agg_dom` is shared and accumulates rows from every feed that writes to
+it, while `symbols_icmarkets` describes only icmarkets. Any other feed's
+instruments therefore appear as bare ids with no ticker — the health hint names
+that explicitly rather than leaving it to be guessed at.
 
 ---
 
@@ -88,7 +97,7 @@ Three modes, tried in order:
 
 | Mode | When | Notes |
 |---|---|---|
-| **Managed identity** | `FABRIC_MANAGED_IDENTITY="true"` | Headless, recommended on Azure. The ODBC driver mints and refreshes its own tokens from the instance metadata endpoint, so there is no secret on the box and no `az login` session for a background service to lose. Needs the **Contributor** workspace role (see below). |
+| **Managed identity** | `FABRIC_MANAGED_IDENTITY="true"` | Headless, recommended on Azure. The ODBC driver and the Kusto client mint and refresh their own tokens from the instance metadata endpoint, so there is no secret on the box and no `az login` session for a background service to lose. Needs the **Contributor** workspace role and read access to the KQL database (see below). |
 | **Service principal** | `FABRIC_*` credentials present | Headless. Needs **Contributor**. Ignored while managed identity is on, so a leftover secret cannot silently change the auth path. |
 | **`az login` token** | Neither of the above | Mints a token via the Azure CLI and passes it as `SQL_COPT_SS_ACCESS_TOKEN`. Convenient for local debugging; not suitable for a service. |
 
@@ -203,7 +212,10 @@ curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
 curl -sk https://app.axiomanalytics.info/api/health            # through nginx
 ```
 
-`connected: true` with a non-zero `row_count` means the full path works.
+`connected: true` with a non-zero `row_count` **and** a non-zero `dimension_rows`
+means the full path works: the rows came back from KQL and the instrument names
+from SQL. Health reports both, because a single green flag hid a dimension
+failure that then broke every selector.
 
 ### Deploying an update
 
@@ -246,22 +258,45 @@ sticky and un-dismissable.
 
 ## Data source shape
 
-`gold.agg_dom_book_snapshot` holds one pre-aggregated row per symbol and
-timestamp, with `best_bid`, `best_ask`, `total_bid`, `total_ask`, `imbalance`,
-`imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread` and `rel_spread`.
-Each row is a point-in-time state snapshot — top-of-book quotes and
-aggregate resting sizes — rather than a reconstruction of the full order
-book.
-`app/frames.py` normalises it to the canonical state snapshot frame
+`ctrader_dom.agg_dom` (KQL, Eventhouse) holds one pre-aggregated row per symbol
+and timestamp, with `best_bid`, `best_ask`, `total_bid`, `total_ask`,
+`imbalance`, `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread` and
+`rel_spread`. Each row is a point-in-time state snapshot — top-of-book quotes
+and aggregate resting sizes — rather than a reconstruction of the full order
+book. The column names are unchanged from the old SQL table, so the move is
+transport-only (`app.kql` instead of a T-SQL query in `app.db`). The measured
+schema is `timestamp: datetime`, `symbolId: long`, the price and size columns
+`real`, plus the pipeline's own `eventId`, `eventSeq` and `eventDate`. Because
+`symbolId` is a `long`, the queries cast the `string` parameter
+(`symbolId == tolong(sym)`) instead of the column; a blank or non-numeric
+parameter simply selects no rows.
+`app/frames.py` normalises the rows to the canonical state snapshot frame
 (`ts | symbol | bid | ask | last | volume`) so every dashboard panel works
 unchanged. The pipeline's own imbalance is used as the directional signal;
-one-sided rows (no best bid or ask) and crossed rows (`bid >= ask`) are dropped
-because they cannot produce a valid mid.
+one-sided rows (no best bid or ask) are dropped, as is a crossed book
+(`bid >= ask`), because neither can produce a valid mid.
+
+A *majority*-crossed frame is treated differently: it means the pipeline emitted
+`best_bid`/`best_ask` the wrong way round rather than the rows being out of sync,
+so the quotes are swapped back and the pipeline's relative spread with them.
+Measured on the live table, every row of a one-hour window is crossed, the
+`best_bid`/`best_ask` pair sits about 19x wider than the pipeline's own
+`vwap_spread` (36.6 vs 1.94 on XAUUSD), and the two quotes straddle the vwap mid
+rather than bracketing it. Swapping therefore restores the sign of the spread and
+leaves the mid — the price every panel is drawn from — exactly as the pipeline
+computed it. A lone crossed snapshot inside an otherwise sound window is still
+dropped.
+
+Rows are also not one-per-millisecond: the pipeline writes every book event under
+the same millisecond `timestamp` (12 rows on the busiest millisecond observed),
+distinguishable only by `eventSeq`/`eventId`. They are kept as separate ticks,
+since they are separate events; the projection simply does not carry `eventId` to
+the dashboard.
 
 ### Symbol names
 
-`gold.symbols_icmarkets` supplies `symbolId -> symbolName`, so the UI shows
-`BTCUSD`, `ETHUSD`, `EURUSD` instead of raw numeric ids. Table names are never
+`gold.symbols_icmarkets` (SQL) supplies `symbolId -> symbolName`, so the UI shows
+`XAUUSD`, `EURUSD`, `BTCUSD` instead of raw numeric ids. Table names are never
 exposed.
 
 ---
@@ -270,10 +305,11 @@ exposed.
 
 ```
 app/
-  config.py      .env -> Settings (endpoint, credentials, gold object names)
+  config.py      .env -> Settings (both endpoints, credentials, object names)
   auth.py        managed identity / service principal / az CLI token minting
-  db.py          connection, gold queries, snapshot fetch, symbol catalogue
-  frames.py      gold snapshot reader -> canonical state snapshot frame
+  kql.py         Kusto client, aggregate-row queries and probes (KQL)
+  db.py          SQL connection, identifier quoting, symbol catalogue
+  frames.py      aggregate rows -> canonical state snapshot frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
   service.py     instrument catalogue, health probing, TTL cache
@@ -283,6 +319,9 @@ scripts/
   grant_workspace_access.py   grant the SP a role on the workspace
 tests/
   test_analytics.py / test_frames.py / test_assets.py / test_config.py
+  test_kql.py         KQL query text, parameters and credential selection
+  test_status.py      the two-source health probe
+  test_selectors.py / test_unavailable.py   HTTP-level behaviour
 ```
 
 The canonical state snapshot frame is:
@@ -297,7 +336,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status, coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status for both sources (`row_count` from KQL, `dimension_rows` from SQL), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
@@ -360,7 +399,10 @@ degenerate flat-price series (guards against divide-by-zero).
 | App exits immediately with a segmentation fault | The `az login` token path (`SQL_COPT_SS_ACCESS_TOKEN`) crashes pyodbc 5.3 against this driver. Switch to managed identity or a service principal. |
 | `Invalid value specified for connection string attribute 'PWD'` | Secret missing/blank in `.env`. |
 | `SQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `SQL_ANALYTICS_ENDPOINT`). |
+| `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |
+| `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |
-| `The gold snapshot table is empty` | The ingest pipeline has not written rows yet. |
+| `The KQL aggregate table is empty` | The ingest pipeline has not written rows yet. |
+| `Failed to complete the command because the underlying location does not exist` / `24596` | The SQL analytics endpoint still points at Delta parquet files that are gone (the gold table was rewritten or vacuumed and the endpoint has not resynced). The old `agg_dom_book_snapshot` fails the same way, so it is not caused by the KQL move. Re-run the pipeline that writes the gold tables, or wait for the endpoint to resync. Health reports it as `dimension_rows: null` with its own hint. |
 | Instruments show as ids with no ticker | They come from a feed other than icmarkets; see the `/api/health` hint. |
 | `external policy action ... was denied` | **Viewer** role: OneLake security filters Viewers and hides whole tables. Grant **Contributor**. |
