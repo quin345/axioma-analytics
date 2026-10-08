@@ -1,9 +1,9 @@
 """Tests for the "under development" page that replaces the main page.
 
 While the app is being built, `/` serves a self-contained development notice
-(maintenance.html, gear artwork) instead of the dashboard. The dashboard
+(unavailable.html, gear artwork) instead of the dashboard. The dashboard
 itself is retained at `/dashboard`, and the branded outage page
-(unavailable.html) is retained for future maintenance windows - a planned
+(maintenance.html) is retained for future maintenance windows - a planned
 build and a real outage are different messages. No data source required:
 these routes serve files and never touch the warehouse.
 """
@@ -18,7 +18,7 @@ from app import config
 from app.main import app
 
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
-PAGE = STATIC / "maintenance.html"
+PAGE = STATIC / "unavailable.html"
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def client(monkeypatch):
 def test_page_exists_next_to_the_retained_pages():
     assert PAGE.is_file()
     assert (STATIC / "index.html").is_file()          # the dashboard, retained
-    assert (STATIC / "unavailable.html").is_file()    # the outage page, retained
+    assert (STATIC / "maintenance.html").is_file()    # the outage page, retained
 
 
 def test_page_carries_the_brand():

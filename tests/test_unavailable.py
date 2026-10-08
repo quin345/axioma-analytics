@@ -14,7 +14,7 @@ from app import config
 from app.main import app
 
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
-PAGE = STATIC / "unavailable.html"
+PAGE = STATIC / "maintenance.html"
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Under development &middot; AXIOMA</title>
+<title>Temporarily unavailable &middot; AXIOMA</title>
 <!-- The branding set is shared with the dashboard: same mark, same favicons. -->
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
 <!-- Raster fallbacks: older browsers, bookmark bars, and iOS home screens. -->
@@ -14,10 +14,9 @@
 <link rel="mask-icon" href="/static/favicon.svg" color="#4c9aff" />
 <meta name="theme-color" content="#0b0f17" />
 <!--
-  Self-contained on purpose: this page *is* the main page while the app is
-  under development, so it must not depend on styles.css or app.js (the
-  dashboard they belong to is what we are working on). The tokens below
-  mirror :root in styles.css - keep them in step.
+  Self-contained on purpose: this page has to render when the app itself is
+  unhealthy, so it must not depend on styles.css or app.js being loadable.
+  The tokens below mirror :root in styles.css - keep them in step.
 -->
 <style>
 :root{
@@ -38,8 +37,8 @@ body{margin:0;background:var(--bg);color:var(--fg);
 h1{font-size:19px;margin:0}
 .sub{margin:2px 0 0;color:var(--muted);font-size:12px}
 .conn{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--warn);
-  box-shadow:0 0 8px var(--warn);animation:blink 1.8s ease-in-out infinite}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--down);
+  box-shadow:0 0 8px var(--down);animation:blink 1.8s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.35}}
 
 /* Centre column: the notice is the only thing on the page. */
@@ -47,21 +46,16 @@ h1{font-size:19px;margin:0}
 .card{width:100%;max-width:520px;text-align:center;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
   padding:44px 36px 36px}
-
-/* Two meshed gears: the work in progress. Both spin slowly, in opposite
-   directions, on the brand gradient. */
-.gears{width:118px;height:118px;margin:0 auto 22px;display:block;
-  filter:drop-shadow(0 6px 22px rgba(76,154,255,.22))}
-.gear{transform-box:view-box;animation:spin 16s linear infinite}
-.gear-a{transform-origin:52px 54px}
-.gear-b{transform-origin:104px 104px;animation-duration:11s;animation-direction:reverse}
-@keyframes spin{to{transform:rotate(360deg)}}
+.mark{width:76px;height:76px;margin:0 auto 22px;display:block;
+  filter:drop-shadow(0 6px 22px rgba(76,154,255,.22));
+  animation:breathe 3.2s ease-in-out infinite}
+@keyframes breathe{0%,100%{transform:scale(1);opacity:.92}50%{transform:scale(1.045);opacity:1}}
 
 .pill{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
-  padding:4px 12px;border-radius:20px;background:rgba(245,158,11,.14);color:var(--warn);
-  border:1px solid rgba(245,158,11,.32)}
+  padding:4px 12px;border-radius:20px;background:rgba(239,68,68,.14);color:var(--down);
+  border:1px solid rgba(239,68,68,.32)}
 .headline{margin:16px 0 8px;font-size:24px;font-weight:650;letter-spacing:-.01em}
-.body{margin:0 auto;max-width:44ch;color:var(--muted);font-size:14px}
+.body{margin:0 auto;max-width:40ch;color:var(--muted);font-size:14px}
 .note{margin:18px 0 0;font-size:12.5px;color:var(--muted);
   font-variant-numeric:tabular-nums}
 
@@ -72,14 +66,22 @@ button{padding:9px 18px;border-radius:9px;font-size:13px;font-weight:600;cursor:
 button.primary{background:var(--accent);color:#04101f}
 button.primary:hover{filter:brightness(1.1)}
 button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.retry-hint{font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
 
-footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:center;
-  padding:14px 24px;border-top:1px solid var(--line);background:var(--panel);
-  color:var(--muted);font-size:12px}
-.sep{width:3px;height:3px;border-radius:50%;background:var(--line);display:inline-block}
+footer{padding:18px 24px;border-top:1px solid var(--line);background:var(--panel);
+  color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:6px 14px;
+  align-items:center;justify-content:center;text-align:center}
+footer .sep{width:1px;height:12px;background:var(--line)}
 
+@media (max-width:700px){
+  .topbar{padding:14px 16px}
+  .conn .conn-label{display:none}
+  .card{padding:34px 20px 28px}
+  .headline{font-size:21px}
+  footer .sep{display:none}
+}
 @media (prefers-reduced-motion:reduce){
-  .dot,.gear{animation:none}
+  .dot,.mark{animation:none}
 }
 </style>
 </head>
@@ -109,61 +111,31 @@ footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:c
   </div>
   <div class="conn">
     <span class="dot" aria-hidden="true"></span>
-    <span class="conn-label">Under development</span>
+    <span class="conn-label">Offline</span>
   </div>
 </header>
 
 <main class="wrap">
-  <section class="card" role="status" aria-live="polite">
-    <!-- Two gears turning: the app is being worked on. Stroke-only, on the
-         brand gradient, so it reads as part of the same mark set. -->
-    <svg class="gears" viewBox="0 0 140 140" role="img" aria-label="Gears turning">
-      <title>Under development</title>
-      <defs>
-        <linearGradient id="gd-g" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stop-color="#4f9dff" />
-          <stop offset="100%" stop-color="#22d3a7" />
-        </linearGradient>
-      </defs>
-      <!-- Large gear: body r30 at (52,54), eight teeth reaching r42. -->
-      <g class="gear gear-a" stroke="url(#gd-g)" fill="none"
-         stroke-width="4" stroke-linejoin="round">
-        <circle cx="52" cy="54" r="30" />
-        <circle cx="52" cy="54" r="12" />
-        <rect x="46" y="12" width="12" height="16" rx="3" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(45 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(90 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(135 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(180 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(225 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(270 52 54)" />
-        <rect x="46" y="12" width="12" height="16" rx="3" transform="rotate(315 52 54)" />
-      </g>
-      <!-- Small gear: body r20 at (104,104), six teeth reaching r29. -->
-      <g class="gear gear-b" stroke="url(#gd-g)" fill="none"
-         stroke-width="3.5" stroke-linejoin="round">
-        <circle cx="104" cy="104" r="20" />
-        <circle cx="104" cy="104" r="8" />
-        <rect x="99" y="75" width="10" height="14" rx="3" />
-        <rect x="99" y="75" width="10" height="14" rx="3" transform="rotate(60 104 104)" />
-        <rect x="99" y="75" width="10" height="14" rx="3" transform="rotate(120 104 104)" />
-        <rect x="99" y="75" width="10" height="14" rx="3" transform="rotate(180 104 104)" />
-        <rect x="99" y="75" width="10" height="14" rx="3" transform="rotate(240 104 104)" />
-        <rect x="99" y="75" width="10" height="14" rx="3" transform="rotate(300 104 104)" />
-      </g>
+  <section class="card" role="alert" aria-live="polite">
+    <svg class="mark" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
     </svg>
 
-    <span class="pill">Under development</span>
-    <h1 class="headline">We&rsquo;re building something new</h1>
+    <span class="pill">Temporarily unavailable</span>
+    <h1 class="headline">We&rsquo;ll be back shortly</h1>
     <p class="body">
-      AXIOMA Analytics is under development. The dashboard is temporarily
-      hidden while we work on it &mdash; charts, tick history and the API will
-      return when the work is finished. Thanks for your patience.
+      AXIOMA Analytics is offline while we carry out maintenance on the data
+      pipeline. Charts, tick history and the API are paused; no data has been
+      lost.
     </p>
 
     <div class="actions">
-      <button type="button" class="primary" id="retry">Check again</button>
-      <span class="retry-hint">Reload this page for the latest status</span>
+      <button type="button" class="primary" id="retry">Try again now</button>
+      <span class="retry-hint">Auto-refresh in <strong id="cd">30</strong>s</span>
     </div>
 
     <p class="note" id="checked">&nbsp;</p>
@@ -175,20 +147,38 @@ footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:c
   <span class="sep" aria-hidden="true"></span>
   <span>Tick microstructure &middot; market data analytics</span>
   <span class="sep" aria-hidden="true"></span>
-  <span>Development in progress &mdash; check back soon.</span>
+  <span>If this persists, contact the data platform team.</span>
 </footer>
 
 <script>
 (function () {
   "use strict";
+  var PERIOD = 30;               // seconds between automatic reloads
+  var left = PERIOD;
+  var cd = document.getElementById("cd");
+  var checked = document.getElementById("checked");
+
   // Show when the page was served, so a stale tab is obvious.
-  document.getElementById("checked").textContent = "Last checked " +
+  checked.textContent = "Last checked " +
     new Date().toISOString().slice(11, 19) + " UTC";
 
   document.getElementById("retry").addEventListener("click", function () {
     location.reload();
   });
+
+  // A tab left in the background should check the moment it comes back,
+  // not wait out a countdown nobody has been watching.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) location.reload();
+  });
+
+  setInterval(function () {
+    left -= 1;
+    if (left <= 0) { location.reload(); return; }
+    cd.textContent = String(left);
+  }, 1000);
 })();
 </script>
 </body>
 </html>
+

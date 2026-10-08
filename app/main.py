@@ -210,7 +210,7 @@ def unavailable() -> Any:
     messages, and this is the one for outages.
     """
     return FileResponse(
-        STATIC_DIR / "unavailable.html",
+        STATIC_DIR / "maintenance.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
@@ -250,21 +250,21 @@ def welcome() -> Any:
 def index() -> Any:
     """The development notice, or the outage page while maintenance mode is on.
 
-    The main page is replaced by `maintenance.html` - "under development",
+    The main page is replaced by `unavailable.html` - "under development",
     with the gear artwork - while the app is being built, so `/` no longer
     serves the dashboard (it is still reachable at `/dashboard`). MAINTENANCE_MODE
-    keeps its original meaning: a real outage serves `unavailable.html` with a
+    keeps its original meaning: a real outage serves `maintenance.html` with a
     503 rather than 200, so proxies and uptime checks do not cache the outage
     as healthy.
     """
     if get_settings().maintenance:
         return FileResponse(
-            STATIC_DIR / "unavailable.html",
+            STATIC_DIR / "maintenance.html",
             status_code=503,
             headers={"Cache-Control": "no-cache, must-revalidate"},
         )
     return FileResponse(
-        STATIC_DIR / "maintenance.html",
+        STATIC_DIR / "unavailable.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
