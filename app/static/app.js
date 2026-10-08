@@ -222,19 +222,15 @@ function fillSymbols(symbols) {
   // incomparable price scales and produce meaningless statistics.
   // Show the readable ticker and asset class. The raw symbolId stays the option
   // value (the API needs it) but is kept out of the visible label.
-  // The picker is pinned to XAUUSD (the default symbol): it stays first and
-  // selectable while every other instrument is shown greyed-out and disabled,
-  // with the broker description alongside the ticker and asset class.
+  // Every instrument is selectable; the default (XAUUSD) is simply sorted first
+  // and the broker description sits alongside the ticker and asset class.
   sel.innerHTML = symbols.map((s) => {
     const id = s.symbol ?? "";
     const label = s.name || id;
     const cls = s.asset_class_label || "Unclassified";
     const desc = (s.description || "").trim();
-    const isDefault = window.__defaultSymbol
-      ? id === window.__defaultSymbol
-      : (s.name || "").toUpperCase() === "XAUUSD";
     const text = desc ? `${label} \u00b7 ${cls} \u2014 ${desc}` : `${label} \u00b7 ${cls}`;
-    return `<option value="${esc(id)}"${isDefault ? "" : " disabled"}>${esc(text)}</option>`;
+    return `<option value="${esc(id)}">${esc(text)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
   // Default to XAUUSD (the pinned default from /api/symbols) on first load, so
