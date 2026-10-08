@@ -14,6 +14,9 @@ Typical cron entry (every 30 minutes, log to the journal):
     */30 * * * * /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
         >> /var/log/axioma-refresh.log 2>&1
 
+`*/30` fires on the same wall-clock marks as the in-process cycle (:00 and
+:30), so the two schedules line up rather than drift against each other.
+
 Or a systemd timer on the `axioma.service` host (see README, *Deployment*).
 Only run it that way with `CACHE_REFRESH_MINUTES=0` in `.env`, otherwise both the
 app and the timer will refresh the same window.

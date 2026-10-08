@@ -201,13 +201,31 @@ def analytics_report(
 
 @app.get("/unavailable")
 def unavailable() -> Any:
-    """The branded holding page, always reachable.
+    """The branded "temporarily unavailable" holding page, always reachable.
 
     Served at its own path so it can be previewed (and linked to) while the
     dashboard is still up; `/` only swaps to it when MAINTENANCE_MODE is on.
+    It is kept for future outage windows even though the main page now shows
+    the development notice - a real outage and a planned build are different
+    messages, and this is the one for outages.
     """
     return FileResponse(
         STATIC_DIR / "unavailable.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.get("/dashboard")
+def dashboard() -> Any:
+    """The dashboard itself, kept reachable while `/` shows the build notice.
+
+    The main page is the development notice for now; the dashboard still lives
+    at this path (and in `index.html`) so it can be previewed during the work
+    and restored to `/` by deleting the maintenance route when the build is
+    finished.
+    """
+    return FileResponse(
+        STATIC_DIR / "index.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
@@ -230,10 +248,14 @@ def welcome() -> Any:
 
 @app.get("/")
 def index() -> Any:
-    """The dashboard, or the holding page while maintenance mode is on.
+    """The development notice, or the outage page while maintenance mode is on.
 
-    503 rather than 200 while unavailable: it is a temporary condition, and a
-    non-2xx keeps proxies and uptime checks from caching the outage as healthy.
+    The main page is replaced by `maintenance.html` - "under development",
+    with the gear artwork - while the app is being built, so `/` no longer
+    serves the dashboard (it is still reachable at `/dashboard`). MAINTENANCE_MODE
+    keeps its original meaning: a real outage serves `unavailable.html` with a
+    503 rather than 200, so proxies and uptime checks do not cache the outage
+    as healthy.
     """
     if get_settings().maintenance:
         return FileResponse(
@@ -242,7 +264,7 @@ def index() -> Any:
             headers={"Cache-Control": "no-cache, must-revalidate"},
         )
     return FileResponse(
-        STATIC_DIR / "index.html",
+        STATIC_DIR / "maintenance.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 

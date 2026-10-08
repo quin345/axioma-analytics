@@ -389,8 +389,40 @@ def cached_symbols(settings: Settings | None = None) -> list[str]:
     )
 
 
+def _slide_window(cached: pd.DataFrame, added: pd.DataFrame,
+                  window_minutes: int, limit: int) -> pd.DataFrame:
+    """Append the new slice to the cached window and purge what fell out.
+
+    The cache may only ever hold `window_minutes` (four hours) of a symbol, so
+    each cycle
+
+    * concatenates the freshly read rows with the cached ones, keeping the
+      newer copy where the two overlap (the slice is read from the cached
+      newest timestamp, which is inclusive), and
+    * purges every row older than `window_minutes` before the newest row -
+      on a 30-minute cycle that is exactly the earliest half hour - then caps
+      the result at `limit`, keeping the newest rows.
+
+    The purge is anchored on the newest row rather than the wall clock, so a
+    stalled feed keeps its data instead of being eaten away while no ticks
+    arrive; the window only ever *holds* four hours either way.
+    """
+    if added is not None and not added.empty and "timestamp" in added.columns:
+        cached = pd.concat([cached, added], ignore_index=True)
+    if cached.empty:
+        return cached
+
+    ts = pd.to_datetime(cached["timestamp"], errors="coerce", utc=True)
+    merged = cached.assign(timestamp=ts)
+    merged = merged.loc[~ts.isna()]
+    merged = merged.drop_duplicates(subset="timestamp", keep="last")
+    merged = merged.sort_values("timestamp", kind="stable")
+    cutoff = merged["timestamp"].max() - pd.Timedelta(minutes=int(window_minutes))
+    return merged.loc[merged["timestamp"] >= cutoff].tail(int(limit)).reset_index(drop=True)
+
+
 def refresh_cache(settings: Settings | None = None) -> dict:
-    """Re-read the fixed window from KQL and replace the cached entries.
+    """Slide the fixed window forward one interval and replace the cached entries.
 
     This is what keeps the fixed window *current*: the dashboard always serves
     data from within `CACHE_REFRESH_MINUTES` of the feed, while any duration
@@ -398,13 +430,17 @@ def refresh_cache(settings: Settings | None = None) -> dict:
 
     * the instrument catalogue, so the selectors and the health counts see new
       instruments and fresh tick counts, and
-    * the whole window for every symbol already in the cache, plus the
-      configured default ticker, so the first paint after a restart is warm.
+    * the window for every symbol already in the cache, plus the configured
+      default ticker, so the first paint after a restart is warm.
 
-    A symbol whose read fails keeps its previous entry rather than being
-    evicted: the cycle is an optimisation, and a partial failure must not throw
-    away data that is merely older. Returns a JSON-able summary, which
-    ``/api/health`` publishes.
+    A symbol already cached is refreshed **incrementally**: only the rows newer
+    than its newest cached row are read from KQL, the earliest rows that have
+    aged out of the four-hour window are purged, and the merged window is
+    written back (`_slide_window`). A symbol with no entry (cold start, TTL
+    expiry) is read over the whole window instead. A symbol whose read fails
+    keeps its previous entry rather than being evicted: the cycle is an
+    optimisation, and a partial failure must not throw away data that is
+    merely older. Returns a JSON-able summary, which ``/api/health`` publishes.
     """
     global _last_refresh
     s = settings or get_settings()
@@ -427,16 +463,39 @@ def refresh_cache(settings: Settings | None = None) -> dict:
     if default_id:
         targets.add(default_id)
 
-    refreshed = rows = 0
+    refreshed = rows = purged = 0
     for name in sorted(targets):
         symbol = None if name == "all" else name
+        ck = cache.key(s, "ticks", name)
+        cached = cache.get_frame(ck, s)
+
+        # A readable cached entry means an incremental slide; anything else
+        # (absent, empty, unparseable timestamps) falls back to the full read.
+        start = None
+        cached_ts = None
+        if cached is not None and not cached.empty and "timestamp" in cached.columns:
+            cached_ts = pd.to_datetime(cached["timestamp"], errors="coerce", utc=True)
+            if not cached_ts.isna().all():
+                start = cached_ts.max().isoformat()
+
         try:
-            raw = load_raw(symbol, limit=s.max_ticks,
-                           lookback_minutes=s.cache_lookback_minutes)
+            if start is not None:
+                added = load_raw(symbol, limit=s.max_ticks, start=start)
+                raw = _slide_window(cached, added, s.cache_lookback_minutes, s.max_ticks)
+                if not raw.empty:
+                    # Rows the cache held and the purge has now dropped: the
+                    # earliest slice ageing out of the fixed window.
+                    cutoff = raw["timestamp"].max() - pd.Timedelta(
+                        minutes=s.cache_lookback_minutes)
+                    purged += int((cached_ts < cutoff).sum())
+            else:
+                raw = load_raw(symbol, limit=s.max_ticks,
+                               lookback_minutes=s.cache_lookback_minutes)
+                raw = _slide_window(raw, None, s.cache_lookback_minutes, s.max_ticks)
         except DataSourceError as exc:
             errors.append(f"{name}: {exc}")
             continue
-        if cache.set_frame(cache.key(s, "ticks", name), raw, s.cache_ttl_seconds, s):
+        if cache.set_frame(ck, raw, s.cache_ttl_seconds, s):
             refreshed += 1
             rows += int(len(raw))
 
@@ -447,6 +506,7 @@ def refresh_cache(settings: Settings | None = None) -> dict:
         "seconds": round((finished - started).total_seconds(), 2),
         "symbols": refreshed,
         "rows": rows,
+        "purged": purged,
         "window_minutes": s.cache_lookback_minutes,
         "interval_minutes": s.cache_refresh_minutes,
         "errors": errors,
@@ -460,19 +520,26 @@ def refresh_cache(settings: Settings | None = None) -> dict:
 # --------------------------------------------------------------------------
 
 def load_raw(symbol: str | None = None, *, limit: int | None = None,
-             lookback_minutes: int | None = None) -> pd.DataFrame:
+             lookback_minutes: int | None = None,
+             start: str | None = None, end: str | None = None) -> pd.DataFrame:
     """Raw aggregate rows from KQL: the cache's window, unfiltered.
 
     This is the one place a dashboard read touches the engine. Every caller
     goes through :func:`load_ticks_cached`, which stores what this returns so
     the next request is served from Redis.
+
+    With neither `start` nor `end` the read is the whole fixed window. With an
+    explicit `start` it is only the slice after that timestamp - which is how
+    the refresh cycle appends the newest half hour without re-reading the four
+    hours it already holds.
     """
     s = get_settings()
+    if start is None and end is None and lookback_minutes is None:
+        lookback_minutes = s.cache_lookback_minutes
     with kql.connect(s) as client:
         return kql.fetch_ticks(
             client, symbol=symbol, limit=int(limit or s.max_ticks),
-            lookback_minutes=(s.cache_lookback_minutes if lookback_minutes is None
-                              else lookback_minutes),
+            lookback_minutes=lookback_minutes, start=start, end=end,
             settings=s,
         )
 

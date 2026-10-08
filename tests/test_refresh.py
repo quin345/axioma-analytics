@@ -9,6 +9,7 @@ not end the loop, and a cycle that is switched off starts nothing.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -147,3 +148,70 @@ def test_shutdown_cancels_a_running_cycle():
         return task
 
     assert _run(main()).cancelled()
+
+
+# ----------------------------------------------------------------------
+# Scheduling: cycles land on the clock marks, not on the start time
+# ----------------------------------------------------------------------
+
+def _at(hour: int, minute: int, second: int = 0) -> float:
+    """A POSIX timestamp for that local wall-clock time today."""
+    today = time.localtime()
+    return time.mktime((today.tm_year, today.tm_mon, today.tm_mday,
+                        hour, minute, second, 0, 0, -1))
+
+
+def _on_a_mark(now: float, delay: float, hour: int, minute: int) -> bool:
+    """Does `now + delay` land on that local wall-clock time?"""
+    target = time.localtime(now + delay)
+    return (target.tm_hour, target.tm_min) == (hour, minute)
+
+
+def test_a_thirty_minute_cycle_waits_for_the_next_half_hour():
+    """1:29 waits a minute for 1:30 - the runs sit on :00 and :30 marks."""
+    now = _at(1, 29, 0)
+    delay = refresh.seconds_until_next_slot(1800, now)
+
+    assert delay == 60.0
+    assert _on_a_mark(now, delay, 1, 30)
+
+
+def test_a_cycle_past_the_mark_waits_for_the_next_one():
+    """1:30:30 waits until 2:00 - it does not re-fire inside the slot."""
+    now = _at(1, 30, 30)
+    delay = refresh.seconds_until_next_slot(1800, now)
+
+    assert delay == 29.5 * 60
+    assert _on_a_mark(now, delay, 2, 0)
+
+
+def test_landing_exactly_on_a_boundary_waits_a_full_interval():
+    """On the mark already, the next run is the *next* mark, not a double-fire."""
+    assert refresh.seconds_until_next_slot(1800, _at(2, 0, 0)) == 1800.0
+
+
+def test_the_delay_always_falls_within_one_interval():
+    for minute in (0, 7, 15, 29, 30, 45, 59):
+        delay = refresh.seconds_until_next_slot(1800, _at(3, minute, 15))
+        assert 0 < delay <= 1800
+
+
+def test_an_interval_of_zero_never_schedules_a_slot():
+    assert refresh.seconds_until_next_slot(0) == 0.0
+
+
+def test_the_loop_waits_for_the_clock_not_the_interval(monkeypatch):
+    """`run` asks for the next slot after each cycle, not a fixed sleep."""
+    delays: list[float] = []
+    stop = asyncio.Event()
+
+    def fake_slot(interval: float, now: float | None = None) -> float:
+        delays.append(interval)
+        stop.set()
+        return 42.0
+
+    monkeypatch.setattr(refresh, "seconds_until_next_slot", fake_slot)
+
+    _run(refresh.run(1800, lambda: None, stop=stop))
+
+    assert delays == [1800.0]              # the wait came from the scheduler

@@ -152,18 +152,28 @@ def redis(monkeypatch) -> dict:
 def kql_rows(monkeypatch) -> dict:
     """A stand-in for the one KQL read, counting how often it is made.
 
-    `fail_on` lists symbols whose read raises, so the refresh cycle can be shown
-    leaving a good entry in place when one fetch goes wrong.
+    It behaves like the real read on the time filter: a `start` slices the
+    frame from that timestamp onwards, so the refresh cycle's incremental
+    fetch returns only the new rows. `fail_on` lists symbols whose read
+    raises, so the refresh cycle can be shown leaving a good entry in place
+    when one fetch goes wrong.
     """
-    calls: dict = {"load_raw": 0, "fail_on": set()}
+    calls: dict = {"load_raw": 0, "fail_on": set(), "starts": [], "lookbacks": []}
 
-    def load_raw(symbol=None, *, limit=None, lookback_minutes=None):
+    def load_raw(symbol=None, *, limit=None, lookback_minutes=None,
+                 start=None, end=None):
         calls["load_raw"] += 1
         calls["symbol"] = symbol
         calls["lookback_minutes"] = lookback_minutes
+        calls["starts"].append(start)
+        calls["lookbacks"].append(lookback_minutes)
         if symbol in calls["fail_on"]:
             raise DataSourceError(f"No usable aggregate rows for {symbol}.")
-        return calls["frame"]
+        frame = calls["frame"]
+        if start is not None:
+            ts = pd.to_datetime(frame["timestamp"], utc=True)
+            return frame.loc[ts >= pd.Timestamp(start)].reset_index(drop=True)
+        return frame
 
     calls["frame"] = _window(240)
     monkeypatch.setattr(service, "load_raw", load_raw)
@@ -265,7 +275,7 @@ def test_reset_also_forgets_the_refresh_stamp(monkeypatch, redis):
 
 
 # ----------------------------------------------------------------------
-# The refresh cycle: the fixed window is re-read every 30 minutes
+# The refresh cycle: the fixed window is slid forward every 30 minutes
 # ----------------------------------------------------------------------
 
 @pytest.fixture
@@ -294,7 +304,7 @@ def test_cached_symbols_are_listed_from_redis(redis, kql_rows):
     assert service.cached_symbols() == ["1", "2"]
 
 
-def test_the_cycle_replaces_every_cached_symbol(redis, kql_rows, catalogue):
+def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
     service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
     service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
     redis["written"].clear()
@@ -302,14 +312,83 @@ def test_the_cycle_replaces_every_cached_symbol(redis, kql_rows, catalogue):
 
     service.refresh_cache()
 
-    # Both cached symbols were re-read and re-written in full, under the TTL.
+    # Both cached symbols were re-read and re-written, under the TTL.
     assert redis["written"] == [
         ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
         ("axioma:ctrader_dom:agg_dom:ticks:2", 2700),
     ]
     assert kql_rows["load_raw"] == before + 2
+    # A warm symbol is fetched only from its newest cached row - never over
+    # the whole window, and with no lookback re-anchoring.
+    assert kql_rows["starts"][-2:] == [
+        "2026-10-08T03:59:00+00:00", "2026-10-08T03:59:00+00:00",
+    ]
+    assert kql_rows["lookbacks"][-2:] == [None, None]
+    # The slide re-writes the same window: nothing had aged out of it yet.
     assert len(redis["frames"]["axioma:ctrader_dom:agg_dom:ticks:1"]) == 240
-    assert kql_rows["lookback_minutes"] == 240      # the whole window, not a slice
+
+
+def test_the_cycle_purges_the_earliest_30_minutes(redis, kql_rows, catalogue):
+    """The window only ever holds four hours: the oldest slice is dropped."""
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+    # The feed advances half an hour: 30 new minutes arrive on top of the 4 h.
+    kql_rows["frame"] = _window(270)
+
+    summary = service.refresh_cache()
+
+    key = "axioma:ctrader_dom:agg_dom:ticks:1"
+    stored = redis["frames"][key]
+    ts = pd.to_datetime(stored["timestamp"], utc=True)
+    # 00:00-04:29 in, 00:00-00:28 out: four hours to the minute, newest last.
+    assert len(stored) == 241
+    assert ts.min() == pd.Timestamp("2026-10-08T00:29:00", tz="UTC")
+    assert ts.max() == pd.Timestamp("2026-10-08T04:29:00", tz="UTC")
+    assert ts.max() - ts.min() <= pd.Timedelta(minutes=240)
+    # Only the new slice was read, and the purge is reported in the summary.
+    assert kql_rows["starts"][-1] == "2026-10-08T03:59:00+00:00"
+    assert summary["purged"] == 29
+
+
+def test_the_slide_keeps_the_newer_copy_of_an_overlapping_row(redis, kql_rows, catalogue):
+    """The slice starts at the cached newest row, so it arrives twice."""
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    kql_rows["frame"] = _window(270)
+
+    service.refresh_cache()
+
+    key = "axioma:ctrader_dom:agg_dom:ticks:1"
+    ts = pd.to_datetime(redis["frames"][key]["timestamp"], utc=True)
+    assert ts.duplicated().sum() == 0
+    assert ts.is_monotonic_increasing
+
+
+def test_a_cold_symbol_in_the_cycle_reads_the_whole_window(redis, kql_rows, catalogue):
+    """No cached entry to slide from - a restart still reads all four hours."""
+    catalogue(ticks=24)
+    assert service.cached_symbols() == []
+
+    service.refresh_cache()
+
+    assert kql_rows["starts"] == [None]
+    assert kql_rows["lookbacks"] == [240]
+    assert len(redis["frames"]["axioma:ctrader_dom:agg_dom:ticks:41"]) == 240
+
+
+def test_the_slide_never_exceeds_the_row_cap():
+    """Even a runaway feed is capped, keeping the newest rows."""
+    raw = service._slide_window(_window(3600, freq="1s"), None, 240, 100)
+
+    assert len(raw) == 100
+    assert raw["timestamp"].max() == pd.Timestamp("2026-10-08T00:59:59", tz="UTC")
+
+
+def test_the_slide_purges_anchored_on_the_newest_row():
+    """A stalled feed keeps its rows: the purge moves only when data does."""
+    cached = _window(240)                       # 00:00-03:59, no new rows
+    slid = service._slide_window(cached, _window(0), 240, 10000)
+
+    assert len(slid) == 240
 
 
 def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
@@ -320,6 +399,7 @@ def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
 
     assert summary["symbols"] == 1
     assert summary["rows"] == 240
+    assert summary["purged"] == 0            # nothing had aged out yet
     assert summary["window_minutes"] == 240
     assert summary["interval_minutes"] == 30
     assert summary["errors"] == []

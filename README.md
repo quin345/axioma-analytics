@@ -11,7 +11,8 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
 (`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
 (Entra ID, no access key) so a dashboard request never re-scans the table, and
-that four-hour window is re-read from KQL every 30 minutes.
+that four-hour window is slid forward every 30 minutes on the clock (:00 and
+:30) — the earliest half hour is purged, the newest half hour is read.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -72,26 +73,42 @@ never widen it, and never trigger a second KQL read.
 
 ### Keeping the window current
 
-A cache is only useful if it is fresh, so the app re-reads the fixed window on a
-timer: **every `CACHE_REFRESH_MINUTES` (30 by default)** a background task
-re-reads KQL and replaces the cached entries. What the dashboard serves is
+A cache is only useful if it is fresh, so the app slides the fixed window on a
+schedule: **every `CACHE_REFRESH_MINUTES` (30 by default), on the clock marks
+(:00 and :30 — 1:30, 2:00, 2:30, …)** a background task advances each cached
+symbol's window. The cycle is scheduled against the wall clock rather than the
+process start time, so restarts do not shift it and it lines up with a
+`*/30` cron entry running the one-shot script. What the dashboard serves is
 therefore at most half an hour behind the feed, and anything inside the window
 still costs no query at all.
 
+Each cycle slides rather than re-reads:
+
+* **the new slice** — only rows newer than the symbol's newest cached row are
+  fetched from KQL (roughly the last 30 minutes), and
+* **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
+  are dropped, which on a 30-minute cycle is exactly the earliest half hour.
+
+A cache entry therefore never holds more than four hours of a symbol, and the
+KQL read per cycle covers only the interval, not the whole window. The purge is
+anchored on the newest row rather than the wall clock, so a stalled feed keeps
+its data while no ticks arrive.
+
 | Piece | Value | Why |
 |---|---|---|
-| Window | `CACHE_LOOKBACK_HOURS="4"` | One KQL read per symbol covers four hours; the UI may narrow it. |
-| Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows. Set `0` to switch the cycle off and cache lazily, on demand. |
+| Window | `CACHE_LOOKBACK_HOURS="4"` | Each symbol's cache entry holds at most four hours; the UI may narrow it. |
+| Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
 | TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 
-Each cycle refreshes the instrument catalogue and re-reads the whole window for
-**every symbol already in the cache**, plus the configured `DEFAULT_SYMBOL` — so
-a restart warms the default view instead of leaving the next visitor to pay for
-the scan (the cycle runs immediately on start, then sleeps). A symbol nobody has
-asked for in a while drops out on its own when its TTL expires, so the set stays
-bounded by real use rather than by the size of the instrument dimension. A
-symbol whose read fails keeps its previous entry: a partial failure must not
-evict data that is merely older.
+The first cycle runs immediately, so a restart warms the cache instead of
+leaving the next visitor to pay for it: a symbol with **no** cached entry (cold
+start, TTL expiry after the cycle was down) is read over the whole window, then
+slid incrementally on later cycles. The cycle also refreshes the instrument
+catalogue and includes the configured `DEFAULT_SYMBOL` — so the default view is
+warm too. A symbol nobody has asked for in a while drops out on its own when
+its TTL expires, so the set stays bounded by real use rather than by the size
+of the instrument dimension. A symbol whose read fails keeps its previous
+entry: a partial failure must not evict data that is merely older.
 
 `/api/health` reports the cycle: `cache_refresh_minutes`, `cache_refreshed_at`
 and `cached_symbols`. If `cache_refreshed_at` stops advancing, the cycle is
@@ -350,7 +367,18 @@ links into the dashboard on `app.axiomanalytics.info`.
 Like the holding page it is **self-contained** — inline styles, no dependency on
 `styles.css`, `app.js` or the analytics API — so it renders even while the
 dashboard is in maintenance mode. It is served at its own path rather than `/`,
-so `/` stays the dashboard and the page can be previewed directly.
+so it can be previewed directly. While the app is under development, `/` serves
+the development notice and the dashboard itself lives at `/dashboard`.
+
+### The main page while under development
+
+`/` currently serves `app/static/maintenance.html` — a self-contained "under
+development" notice with gear artwork — because the app is being rebuilt. The
+dashboard is retained at `/dashboard` (and in `index.html`), and the branded
+outage page (`app/static/unavailable.html`) is retained at `/unavailable` for
+future maintenance windows; `MAINTENANCE_MODE=1` still serves *that* page from
+`/` with a 503. When the build is finished, deleting the maintenance route in
+`app/main.py` restores the dashboard to `/`.
 
 ### Pointing `www` at the server (GoDaddy)
 
@@ -457,15 +485,15 @@ are never exposed.
 app/
   config.py      .env -> Settings (KQL endpoint, Redis, credentials, object names)
   cache.py       Redis client (Entra ID), catalogue + per-symbol Parquet caching
-  refresh.py     the background cycle that re-reads the fixed window
+  refresh.py     the background cycle that slides the fixed window on the clock
   errors.py      DataSourceError, shared by the transport and the API layer
   kql.py         Kusto client, tick-metric queries and probes (KQL)
   frames.py      tick-metric rows -> canonical tick frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
   service.py     instrument catalogue, health probing, fixed cache window
-  main.py        FastAPI app + static dashboard
-  static/        dashboard (Chart.js), holding page, front-facing explainer
+  main.py        FastAPI app + static pages
+  static/        dashboard (Chart.js), development notice, holding page, explainer
 scripts/
   grant_workspace_access.py   grant the SP a role on the workspace
   refresh_cache.py            one cycle from cron/systemd instead of the app
@@ -473,10 +501,10 @@ tests/
   test_analytics.py / test_frames.py / test_assets.py / test_config.py
   test_kql.py         KQL query text, parameters and credential selection
   test_service.py     cache-backed reads, window clamping, cache-outage fallthrough
-  test_refresh.py     the refresh cycle (first pass, repeat, failure, shutdown)
+  test_refresh.py     the refresh cycle (clock slots, first pass, repeat, shutdown)
   test_refresh_script.py    the one-shot script's summary and exit codes
   test_status.py      the health probe (KQL gates it, cache is reported)
-  test_selectors.py / test_unavailable.py   HTTP-level behaviour
+  test_selectors.py / test_unavailable.py / test_maintenance.py   HTTP-level behaviour
 ```
 
 The canonical tick frame is:
@@ -495,6 +523,9 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
+| `GET /` | The development notice (`maintenance.html`) while the app is under development |
+| `GET /dashboard` | The dashboard itself, retained at its own path |
+| `GET /unavailable` | The branded outage page, retained for future maintenance windows |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
 
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
@@ -543,9 +574,12 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
-the refresh cycle (immediate first pass, repeat, a failing cycle that keeps the
-loop alive, the default symbol warmed, a failing symbol keeping its previous
-entry, cancellation on shutdown, the one-shot script's exit codes),
+the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
+failing cycle that keeps the loop alive, the sliding window's purge of the
+earliest half hour, the default symbol warmed, a failing symbol keeping its
+previous entry, cancellation on shutdown, the one-shot script's exit codes),
+the development notice and the retained pages at `/`, `/dashboard` and
+`/unavailable`,
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, drawdown sign, strict JSON serialisability, and a degenerate
@@ -562,7 +596,7 @@ both stubbed, and the cycle is driven with a stub instead of the network.
 |---|---|
 | `Could not login because the authentication failed (18456)` | The identity has no workspace role. Grant **Contributor**. |
 | Health shows `cache_connected: false` | The Redis cache is unreachable or the identity has no data-access role on it. The dashboard still works (the read falls through to KQL); check the Redis resource's data-access policy / **Redis Data Contributor** assignment. |
-| Cached ticks look stale after a pipeline backfill | Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`), or wait for the next cycle: the window is re-read every `CACHE_REFRESH_MINUTES`. The TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |
+| Cached ticks look stale after a pipeline backfill | The cycle slides each entry incrementally, so rows older than the cached newest row are only picked up by a full read. Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`) and the next cycle re-reads the whole window; the TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |
 | Health's `cache_refreshed_at` is not advancing | The cycle is failing or switched off (`CACHE_REFRESH_MINUTES=0`). Check `journalctl -u axioma.service` for `Cache refresh cycle failed`; the dashboard still works, every request just falls through to KQL. |
 | Every request is slow again | The cache is empty or unreachable, so each read costs a KQL scan. Check `cache_connected` and whether the symbols are cached (`cached_symbols`). |
 | `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |

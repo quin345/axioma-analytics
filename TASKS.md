@@ -8,6 +8,64 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-08 - Clock-slot refresh, sliding 4-hour window, development page (dev)
+
+### Backend
+- [x] `app/refresh.py`: `seconds_until_next_slot()` - the cycle now sleeps until the
+      next **wall-clock mark** (:00/:30 for 30 min - 1:30, 2:00, ...) instead of a
+      fixed interval after the last run, so restarts do not shift the schedule and
+      a `*/30` cron lines up with it; exact-boundary landings wait a full interval
+      (no double-fire)
+- [x] `app/service.py`: `refresh_cache()` slides the window per symbol - read only
+      rows newer than the cached newest row (`load_raw(start=...)`), merge +
+      dedupe on timestamp, purge everything older than `CACHE_LOOKBACK_HOURS`
+      before the newest row (the earliest 30 minutes on a 30-min cycle), write
+      back; cold/absent entries still read the whole window; summary gains
+      `purged`
+- [x] `app/service.py`: `_slide_window()` helper - append, dedupe (newer copy
+      wins), purge anchored on the newest row (a stalled feed keeps its data),
+      cap at `max_ticks` keeping the newest rows
+- [x] `app/service.py`: `load_raw()` takes `start`/`end`; the full-window
+      lookback is applied only when no explicit range is given
+- [x] `app/config.py` / `scripts/refresh_cache.py` / `run.py`: docs and banner
+      describe the clock-slot sliding cycle
+
+### Pages
+- [x] `app/static/maintenance.html`: new self-contained "under development"
+      notice - brand header/footer, animated gear artwork (two counter-rotating
+      gradient gears), amber status pill, manual "Check again"
+- [x] `app/main.py`: `/` serves the development notice (200);
+      `MAINTENANCE_MODE=1` still serves `unavailable.html` from `/` with 503;
+      `/unavailable` retained; dashboard retained at `/dashboard`
+- [x] `app/static/unavailable.html` untouched - kept for future outage windows
+
+### Verification
+- [x] `pytest` - 285 passed
+- [x] `tests/test_refresh.py`: slot maths (1:29 -> 1:30, 1:30:30 -> 2:00, exact
+      boundary waits a full interval, delay always within one interval) and the
+      loop waiting on the scheduler, not the interval
+- [x] `tests/test_service.py`: warm symbols fetched only from their newest row,
+      the earliest 30 min purged (241 rows = exactly 4 h after the slide),
+      overlap deduped, cold cycle reads the whole window, row cap, stalled-feed
+      anchoring, `purged` in the summary
+- [x] `tests/test_maintenance.py` (new): page exists/self-contained/gears,
+      root serves it, `/dashboard` and `/unavailable` retained
+- [x] `tests/test_unavailable.py` / `tests/test_landing.py`: root-page
+      expectations updated to the development notice
+- [x] Docs: `README.md` (refresh section, front page, API table, architecture,
+      testing, troubleshooting), `.env.example`
+
+**Notes:**
+- The purge is anchored on the newest row, not wall-clock time: the invariant is
+  "an entry never holds more than 4 h", not "rows older than now-4h are gone"
+  (a silent feed is not eaten away while no ticks arrive).
+- Sliding is incremental, so a backfill *older* than the cached newest row only
+  lands on a full read: delete the tick keys (or let the TTL expire with the
+  cycle down) to force one.
+- Work lives on `dev`; `main` stays the stable dashboard until the build ends.
+
+---
+
 ## 2026-10-08 - Keep the 4-hour window fresh: refresh every 30 minutes
 
 ### Backend
