@@ -33,9 +33,9 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 ### Pages
 - [x] `app/static/unavailable.html`: new self-contained "under development"
       notice - brand header/footer, animated gear artwork (two counter-rotating
-      gradient gears), amber status pill; three clickable service cards
-      (analytics, data freshness, API) linking to `/welcome` and `/docs`;
-      "Check again" removed
+      gradient gears), amber status pill; on `main` two clickable service cards
+      (analytics, data freshness) link only to `/welcome` - the API-docs and
+      dashboard links live on `dev`; "Check again" removed
 - [x] `app/main.py`: `/` serves the development notice (200);
       `MAINTENANCE_MODE=1` still serves `maintenance.html` from `/` with 503;
       `/unavailable` retained; dashboard retained at `/dashboard`

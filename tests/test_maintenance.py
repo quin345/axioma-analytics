@@ -81,15 +81,15 @@ def test_page_is_self_contained():
 def test_page_offers_clickable_service_cards():
     """The notice doubles as the landing page: cards explain the service.
 
-    Each card is a real link, so a visitor arriving during the build can
-    still reach the explainer, the data provenance and the API docs.
+    Each card is a real link into the explainer, so a visitor arriving
+    during the build still gets the information about the analytics
+    service without needing the dashboard or the API docs.
     """
     html = PAGE.read_text(encoding="utf-8")
     assert 'class="cards"' in html
-    assert html.count('class="info"') == 3
+    assert html.count('class="info"') == 2
     assert 'href="/welcome#measures"' in html
     assert 'href="/welcome#h-data"' in html
-    assert 'href="/docs"' in html
 
 
 def test_page_promotes_the_service():
@@ -97,8 +97,17 @@ def test_page_promotes_the_service():
     html = PAGE.read_text(encoding="utf-8")
     assert "Microstructure analytics" in html
     assert "Production data, kept fresh" in html
-    assert "Open JSON API" in html
-    assert "/api/analytics" in html
+
+
+def test_page_hides_the_docs_and_the_dashboard():
+    """On main the page offers only service information - no links to the
+    API docs or the dashboard (those stay on the dev branch)."""
+    html = PAGE.read_text(encoding="utf-8")
+    assert 'href="/docs"' not in html
+    assert 'href="/dashboard"' not in html
+    assert "API documentation" not in html
+    assert "Open the dashboard" not in html
+    assert "Open JSON API" not in html
 
 
 def test_page_has_no_check_again_option():

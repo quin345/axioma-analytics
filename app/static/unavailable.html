@@ -70,14 +70,11 @@ h1{font-size:19px;margin:0}
   border:1px solid transparent;text-decoration:none;text-align:center}
 .actions a.primary{background:var(--accent);color:#04101f}
 .actions a.primary:hover{filter:brightness(1.1)}
-.actions a.ghost{background:var(--panel2);color:var(--fg);border-color:var(--line)}
-.actions a.ghost:hover{border-color:var(--accent);color:var(--accent)}
 .actions a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* Informative service cards: what the product is, each one a click target. */
-.cards{width:100%;max-width:860px;display:grid;gap:14px;
-  grid-template-columns:repeat(3,1fr)}
-@media (max-width:820px){.cards{grid-template-columns:repeat(2,1fr)}}
+.cards{width:100%;max-width:640px;display:grid;gap:14px;
+  grid-template-columns:repeat(2,1fr)}
 @media (max-width:560px){.cards{grid-template-columns:1fr}}
 a.info{display:block;background:var(--panel);border:1px solid var(--line);
   border-radius:var(--radius);padding:18px;color:inherit;text-decoration:none;
@@ -91,9 +88,6 @@ a.info:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   background:linear-gradient(135deg,#4f9dff,#22d3a7);
   box-shadow:0 0 8px rgba(76,154,255,.35)}
 .info p{margin:0;font-size:12.5px;line-height:1.55;color:var(--muted)}
-.info code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
-  background:var(--panel2);border:1px solid var(--line);border-radius:5px;
-  padding:1px 5px;color:var(--fg)}
 .info .go{display:inline-block;margin-top:10px;font-size:12px;font-weight:600;
   color:var(--accent)}
 
@@ -187,13 +181,12 @@ footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:c
 
     <div class="actions">
       <a class="primary" href="/welcome">Learn about the service</a>
-      <a class="ghost" href="/docs">API documentation</a>
-      <a class="ghost" href="/dashboard">Open the dashboard</a>
     </div>
   </section>
 
-  <!-- What the service is: three clickable cards, so the development notice
-       still introduces the product instead of being a dead end. -->
+  <!-- What the service is: two clickable cards into the explainer, so the
+       development notice introduces the product without advertising the
+       docs or the dashboard - those options stay on dev. -->
   <section class="cards" aria-label="About AXIOMA Analytics">
     <a class="info" href="/welcome#measures">
       <h3><span class="ico" aria-hidden="true"></span>Microstructure analytics</h3>
@@ -209,14 +202,6 @@ footer{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:c
          four-hour window that slides forward every 30 minutes &mdash; a page
          load never re-scans the warehouse.</p>
       <span class="go">Where the numbers come from &rarr;</span>
-    </a>
-    <a class="info" href="/docs">
-      <h3><span class="ico" aria-hidden="true"></span>Open JSON API</h3>
-      <p>Every panel is backed by plain REST endpoints &mdash;
-         <code>/api/analytics</code>, <code>/api/symbols</code>,
-         <code>/api/health</code> &mdash; with interactive docs you can call
-         straight from the browser.</p>
-      <span class="go">Explore the API &rarr;</span>
     </a>
   </section>
 </main>
