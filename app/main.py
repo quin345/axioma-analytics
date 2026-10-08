@@ -1,6 +1,7 @@
 """FastAPI application: static dashboard + JSON analytics API."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -9,17 +10,36 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, service
+from . import analytics, refresh, service
 from .assets import CLASS_LABELS
 from .config import get_settings
 from .errors import DataSourceError
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Run the cache refresh cycle for the life of the server.
+
+    The fixed window is only as useful as the cycle that re-reads it: without
+    one, the cache holds whatever the first request of the day happened to
+    find. It starts with the app and is cancelled on shutdown; `run()` refreshes
+    immediately, so a restart warms the window instead of leaving the next
+    visitor to pay for it.
+    """
+    task = refresh.start()
+    try:
+        yield
+    finally:
+        await refresh.shutdown(task)
+
+
 app = FastAPI(
     title="Axioma Analytics",
     description="Microstructure analytics over the production KQL aggregate DOM rows.",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -34,6 +54,10 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
     """
     s = get_settings()
     st = service.status(refresh=refresh)
+    # Read the refresh state live rather than off the probe: the probe is cached
+    # between `refresh=true` calls, so a snapshot of it would show the cycle's
+    # stamp frozen at whenever the probe last ran.
+    last = service.last_refresh() or {}
 
     traded = classified = unclassified = 0
     classes = 0
@@ -70,6 +94,11 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         # it, so it is published as the ceiling for the duration control.
         "lookback_minutes": st.lookback_minutes or s.cache_lookback_minutes,
         "cache_ttl_seconds": s.cache_ttl_seconds,
+        # The cycle that keeps that window current: how often it runs, when it
+        # last finished and how many symbols it replaced.
+        "cache_refresh_minutes": s.cache_refresh_minutes,
+        "cache_refreshed_at": last.get("finished_at"),
+        "cached_symbols": last.get("symbols"),
         "has_data": bool(traded),
         "symbol_count": traded,
         "classified_count": classified,

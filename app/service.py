@@ -14,6 +14,7 @@ query at all, and the UI cannot ask for more history than the cache holds.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 
 import pandas as pd
@@ -23,6 +24,8 @@ from .assets import CLASS_LABELS, classify_asset_class, family_label, family_of,
 from .config import Settings, get_settings
 from .errors import DataSourceError
 from .frames import from_ticks
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -76,6 +79,8 @@ class Status:
 
 _status = Status()
 _instruments: dict[str, Instrument] | None = None
+#: Summary of the last completed refresh cycle, for the health payload.
+_last_refresh: dict | None = None
 
 
 # --------------------------------------------------------------------------
@@ -359,6 +364,98 @@ def lookup(symbol_id: str) -> Instrument | None:
 
 
 # --------------------------------------------------------------------------
+# Refresh cycle
+# --------------------------------------------------------------------------
+
+def last_refresh() -> dict | None:
+    """Summary of the last completed refresh cycle, or None if none has run."""
+    return _last_refresh
+
+
+def cached_symbols(settings: Settings | None = None) -> list[str]:
+    """The symbol entries the cache holds right now, as key suffixes.
+
+    Read out of Redis rather than tracked in memory: another process may have
+    written an entry, and a symbol nobody has asked for in a while should drop
+    out of the refresh set on its own when its TTL expires instead of being
+    re-read from KQL forever.
+    """
+    s = settings or get_settings()
+    marker = cache.key(s, "ticks") + ":"
+    return sorted(
+        k[len(marker):]
+        for k in cache.keys(s, s.kql_database, s.kql_table, "ticks")
+        if k.startswith(marker) and len(k) > len(marker)
+    )
+
+
+def refresh_cache(settings: Settings | None = None) -> dict:
+    """Re-read the fixed window from KQL and replace the cached entries.
+
+    This is what keeps the fixed window *current*: the dashboard always serves
+    data from within `CACHE_REFRESH_MINUTES` of the feed, while any duration
+    inside the window stays free to change. Two things are refreshed -
+
+    * the instrument catalogue, so the selectors and the health counts see new
+      instruments and fresh tick counts, and
+    * the whole window for every symbol already in the cache, plus the
+      configured default ticker, so the first paint after a restart is warm.
+
+    A symbol whose read fails keeps its previous entry rather than being
+    evicted: the cycle is an optimisation, and a partial failure must not throw
+    away data that is merely older. Returns a JSON-able summary, which
+    ``/api/health`` publishes.
+    """
+    global _last_refresh
+    s = settings or get_settings()
+    started = pd.Timestamp.utcnow()
+    errors: list[str] = []
+
+    try:
+        instruments(refresh=True)          # rebuilds the process copy too
+    except DataSourceError as exc:
+        errors.append(f"catalogue: {exc}")
+
+    targets = set(cached_symbols(s))
+    try:
+        default_id = default_symbol_id(only_traded=True)
+    except DataSourceError as exc:
+        # The catalogue is what names the default ticker; when it cannot be
+        # read, the cached symbols are still worth refreshing.
+        errors.append(f"default symbol: {exc}")
+        default_id = None
+    if default_id:
+        targets.add(default_id)
+
+    refreshed = rows = 0
+    for name in sorted(targets):
+        symbol = None if name == "all" else name
+        try:
+            raw = load_raw(symbol, limit=s.max_ticks,
+                           lookback_minutes=s.cache_lookback_minutes)
+        except DataSourceError as exc:
+            errors.append(f"{name}: {exc}")
+            continue
+        if cache.set_frame(cache.key(s, "ticks", name), raw, s.cache_ttl_seconds, s):
+            refreshed += 1
+            rows += int(len(raw))
+
+    finished = pd.Timestamp.utcnow()
+    _last_refresh = {
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "seconds": round((finished - started).total_seconds(), 2),
+        "symbols": refreshed,
+        "rows": rows,
+        "window_minutes": s.cache_lookback_minutes,
+        "interval_minutes": s.cache_refresh_minutes,
+        "errors": errors,
+    }
+    log.info("Cache refresh: %s", _last_refresh)
+    return _last_refresh
+
+
+# --------------------------------------------------------------------------
 # Ticks
 # --------------------------------------------------------------------------
 
@@ -431,14 +528,16 @@ def reset() -> None:
 
     Redis holds the bulk of it, so the per-symbol tick keys and the catalogue
     key are deleted too; otherwise a refresh would rebuild them and still read
-    the stale copy back.
+    the stale copy back. The refresh stamp goes with them: with an empty cache
+    there is nothing the last cycle can vouch for.
     """
-    global _instruments, _status
+    global _instruments, _status, _last_refresh
     s = get_settings()
     cache.delete(s, cache.key(s, "catalogue"))
     for inst in (_instruments or {}):
         cache.delete(s, cache.key(s, "ticks", inst))
     cache.delete(s, cache.key(s, "ticks", "all"))
     _instruments = None
+    _last_refresh = None
     _status = Status()
     return status(refresh=True)

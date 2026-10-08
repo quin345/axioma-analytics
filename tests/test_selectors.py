@@ -123,6 +123,28 @@ def test_health_counters_reconcile(client):
     assert h["unclassified_count"] == 1
 
 
+def test_health_publishes_the_refresh_cycle(client, catalogue, monkeypatch):
+    """The cycle's state is read live, not taken from the cached probe."""
+    monkeypatch.setattr(service, "_last_refresh", {
+        "finished_at": "2026-10-08T01:30:00+00:00", "symbols": 3,
+    })
+
+    h = client.get("/api/health").json()
+
+    assert h["cache_refresh_minutes"] == 30
+    assert h["cache_refreshed_at"] == "2026-10-08T01:30:00+00:00"
+    assert h["cached_symbols"] == 3
+
+
+def test_health_is_silent_about_the_cycle_before_it_runs(client, catalogue, monkeypatch):
+    monkeypatch.setattr(service, "_last_refresh", None)
+
+    h = client.get("/api/health").json()
+
+    assert h["cache_refreshed_at"] is None
+    assert h["cached_symbols"] is None
+
+
 def test_coverage_note_is_no_longer_surfaced(client):
     """The hidden-instrument warning was removed from the health hints."""
     hints = client.get("/api/health").json()["hints"]

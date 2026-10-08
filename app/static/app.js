@@ -144,7 +144,8 @@ async function loadHealth() {
   // both are context for the numbers rather than headline problems.
   $("connDot").title = h.cache_connected === false
     ? (h.cache_error || "The Redis cache is unreachable.")
-    : `Window ${Math.round((h.lookback_minutes || 0) / 60 * 10) / 10} h, cached in Redis`;
+    : `Window ${Math.round((h.lookback_minutes || 0) / 60 * 10) / 10} h, cached in Redis`
+      + (h.cache_refresh_minutes ? `, refreshed every ${h.cache_refresh_minutes} min` : "");
   renderCoverage(h);
   return h;
 }

@@ -125,10 +125,30 @@ def client(settings: Settings | None = None) -> redis.Redis:
         return r
 
 
+def _call(fn, *args, **kwargs):
+    """Run one Redis command, following a cluster redirect once.
+
+    Redis Enterprise answers the *first* command on a fresh connection with
+    MOVED/ASK while it routes the client to the shard that owns the key, and
+    redis-py only follows those redirects for `RedisCluster`. Unhandled, a
+    cache miss shows up as ``Redis delete failed: MOVED <slot> <node>`` and the
+    command is skipped - which for the refresh cycle's key listing would mean
+    quietly refreshing nothing. Every command here is idempotent (GET, SET,
+    DELETE, KEYS, PING), so one retry is safe.
+    """
+    try:
+        return fn(*args, **kwargs)
+    except redis.ResponseError as exc:
+        if not any(code in str(exc) for code in ("MOVED", "ASK")):
+            raise
+        log.info("Following a Redis cluster redirect: %s", exc)
+        return fn(*args, **kwargs)
+
+
 def ping(settings: Settings | None = None) -> bool:
     """True when the cache answers; False (never raised) when it does not."""
     try:
-        return bool(client(settings).ping())
+        return bool(_call(client(settings).ping))
     except (redis.RedisError, DataSourceError, ClientAuthenticationError) as exc:
         log.warning("Redis cache unavailable: %s", exc)
         return False
@@ -141,9 +161,34 @@ def key(settings: Settings | None = None, *parts: object) -> str:
                      *(str(p) for p in parts)])
 
 
+def keys(settings: Settings | None = None, *parts: object) -> list[str]:
+    """Cache keys whose name starts with ``prefix:parts...``.
+
+    The refresh cycle uses this to find the per-symbol entries it has to
+    replace. The keyspace here is one key per instrument in use plus the
+    catalogue, so reading it is cheaper - and more accurate - than keeping a
+    separate index that could drift from what is actually stored. `KEYS` rather
+    than `SCAN MATCH`: Redis Enterprise has returned an empty page set for a
+    non-empty match on this instance, and at this keyspace size the O(N) walk is
+    not worth the paging.
+
+    Failures are reported as an empty listing, never raised: a cache that cannot
+    be listed simply leaves the cycle with nothing to refresh, and reads fall
+    through to KQL as they always do.
+    """
+    s = settings or get_settings()
+    pattern = ":".join([s.cache_key_prefix, *(str(p) for p in parts)]) + "*"
+    try:
+        found = _call(client(s).keys, pattern)
+    except (redis.RedisError, DataSourceError, ClientAuthenticationError) as exc:
+        log.warning("Redis key listing failed for %s: %s", pattern, exc)
+        return []
+    return sorted(k.decode("utf-8") if isinstance(k, bytes) else str(k) for k in found)
+
+
 def _get(k: str, settings: Settings | None) -> bytes | None:
     try:
-        return client(settings).get(k)
+        return _call(client(settings).get, k)
     except (redis.RedisError, DataSourceError, ClientAuthenticationError) as exc:
         log.warning("Redis read failed for %s: %s", k, exc)
         return None
@@ -151,7 +196,7 @@ def _get(k: str, settings: Settings | None) -> bytes | None:
 
 def _set(k: str, value: bytes, ttl: int, settings: Settings | None) -> bool:
     try:
-        client(settings).set(k, value, ex=int(ttl))
+        _call(client(settings).set, k, value, ex=int(ttl))
         return True
     except (redis.RedisError, DataSourceError, ClientAuthenticationError) as exc:
         log.warning("Redis write failed for %s: %s", k, exc)
@@ -203,7 +248,7 @@ def delete(settings: Settings | None = None, *keys: str) -> None:
     if not keys:
         return
     try:
-        client(settings).delete(*keys)
+        _call(client(settings).delete, *keys)
     except (redis.RedisError, DataSourceError, ClientAuthenticationError) as exc:
         log.warning("Redis delete failed: %s", exc)
 

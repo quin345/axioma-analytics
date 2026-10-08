@@ -11,7 +11,9 @@ The app reads **one** source: the production Fabric **KQL** database
 Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
 the dashboard reads KQL once per window rather than on every request. The cache
 window is fixed at `CACHE_LOOKBACK_HOURS` (4 by default); the UI may narrow it
-but never widen it.
+but never widen it. A background cycle (`CACHE_REFRESH_MINUTES`, 30 by default)
+re-reads that whole window on a timer, so what the dashboard serves is never
+more than half an hour behind the feed.
 
 There is no environment selector, no catalog discovery and no synthetic
 fallback - the configuration is just the endpoints, the Entra ID identity and
@@ -108,6 +110,14 @@ class Settings:
     cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=2700))
     #: The fixed window the cache holds and the UI may only narrow.
     cache_lookback_hours: int = field(default_factory=lambda: _env_int("CACHE_LOOKBACK_HOURS", default=4))
+    #: How often the background cycle re-reads that window from KQL and replaces
+    #: the cached copies. 30 minutes is the maximum age of what the dashboard
+    #: serves, and `cache_ttl_seconds` runs 1.5 cycles ahead of it so a single
+    #: missed cycle still leaves the cache populated. 0 switches the cycle off
+    #: and returns to lazy, on-demand caching.
+    cache_refresh_minutes: int = field(
+        default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=30)
+    )
 
     app_name: str = "Axioma Analytics"
     max_ticks: int = field(default_factory=lambda: _env_int("MAX_TICKS", default=200000))
@@ -156,6 +166,11 @@ class Settings:
     def cache_lookback_minutes(self) -> int:
         """The fixed cache window, in minutes - the widest the UI may ask for."""
         return max(1, self.cache_lookback_hours * 60)
+
+    @property
+    def cache_refresh_seconds(self) -> int:
+        """The refresh interval in seconds; 0 means the cycle is off."""
+        return max(0, self.cache_refresh_minutes) * 60
 
 
 @lru_cache(maxsize=1)

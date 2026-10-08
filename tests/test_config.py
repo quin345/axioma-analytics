@@ -20,6 +20,7 @@ _ENV_KEYS = (
     "KQL_LAG_MINUTES", "SYMBOL_TABLE", "DEFAULT_SYMBOL", "MAX_TICKS",
     "REDIS_HOST", "REDIS_PORT", "REDIS_SSL", "REDIS_DB", "REDIS_TIMEOUT",
     "REDIS_KEY_PREFIX", "REDIS_TTL_SECONDS", "CACHE_LOOKBACK_HOURS",
+    "CACHE_REFRESH_MINUTES",
     "FABRIC_TENANT_ID", "FABRIC_CLIENT_ID", "FABRIC_CLIENT_SECRET",
     "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
     "MAINTENANCE_MODE",
@@ -140,6 +141,30 @@ def test_cache_window_is_never_degenerate(monkeypatch):
 def test_cache_ttl_covers_one_ingestion_interval():
     """45 minutes: long enough to be useful, short enough not to outlive data."""
     assert Settings().cache_ttl_seconds == 2700
+
+
+def test_the_refresh_cycle_runs_every_half_hour():
+    s = Settings()
+    assert s.cache_refresh_minutes == 30
+    assert s.cache_refresh_seconds == 1800
+
+
+def test_the_refresh_cycle_is_overridable(monkeypatch):
+    monkeypatch.setenv("CACHE_REFRESH_MINUTES", "5")
+    assert Settings().cache_refresh_seconds == 300
+
+
+def test_the_refresh_cycle_can_be_switched_off(monkeypatch):
+    """0 means lazy caching: no background cycle, reads fill the cache."""
+    monkeypatch.setenv("CACHE_REFRESH_MINUTES", "0")
+    assert Settings().cache_refresh_seconds == 0
+
+
+def test_the_ttl_outlives_a_refresh_cycle():
+    """A missed cycle must not empty the cache: 2700 s covers 1.5 cycles."""
+    s = Settings()
+    assert s.cache_ttl_seconds > s.cache_refresh_seconds
+    assert s.cache_ttl_seconds >= s.cache_refresh_seconds * 1.5
 
 
 def test_cache_key_prefix_defaults(monkeypatch):

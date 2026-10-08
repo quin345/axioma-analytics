@@ -134,8 +134,15 @@ def redis(monkeypatch) -> dict:
         store["frames"][k] = frame
         return True
 
+    def keys(settings=None, *parts):
+        """The stored keys matching `prefix:parts*`, as Redis would list them."""
+        pattern = ":".join(["axioma", *(str(p) for p in parts)]) + "*"
+        head = pattern[:-1]
+        return sorted(k for k in store["frames"] if k.startswith(head))
+
     monkeypatch.setattr(service.cache, "get_frame", get_frame)
     monkeypatch.setattr(service.cache, "set_frame", set_frame)
+    monkeypatch.setattr(service.cache, "keys", keys)
     monkeypatch.setattr(service.cache, "delete",
                         lambda settings=None, *keys: store["deleted"].extend(keys))
     return store
@@ -143,13 +150,19 @@ def redis(monkeypatch) -> dict:
 
 @pytest.fixture
 def kql_rows(monkeypatch) -> dict:
-    """A stand-in for the one KQL read, counting how often it is made."""
-    calls: dict = {"load_raw": 0}
+    """A stand-in for the one KQL read, counting how often it is made.
+
+    `fail_on` lists symbols whose read raises, so the refresh cycle can be shown
+    leaving a good entry in place when one fetch goes wrong.
+    """
+    calls: dict = {"load_raw": 0, "fail_on": set()}
 
     def load_raw(symbol=None, *, limit=None, lookback_minutes=None):
         calls["load_raw"] += 1
         calls["symbol"] = symbol
         calls["lookback_minutes"] = lookback_minutes
+        if symbol in calls["fail_on"]:
+            raise DataSourceError(f"No usable aggregate rows for {symbol}.")
         return calls["frame"]
 
     calls["frame"] = _window(240)
@@ -238,4 +251,167 @@ def test_reset_drops_the_catalogue_and_every_symbol_key(monkeypatch, redis):
         "axioma:ctrader_dom:agg_dom:ticks:all",
     ]
     assert service._instruments is None
+
+
+def test_reset_also_forgets_the_refresh_stamp(monkeypatch, redis):
+    """Nothing is cached after a reset, so no cycle can vouch for it."""
+    monkeypatch.setattr(service, "_instruments", None)
+    monkeypatch.setattr(service, "_last_refresh", {"symbols": 2})
+    monkeypatch.setattr(service, "status", lambda **_: service.Status(connected=True))
+
+    service.reset()
+
+    assert service.last_refresh() is None
+
+
+# ----------------------------------------------------------------------
+# The refresh cycle: the fixed window is re-read every 30 minutes
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def catalogue(monkeypatch):
+    """A catalogue builder; the default ticker is present but untraded.
+
+    Untraded by default so the cycle refreshes exactly what is cached - the
+    tests that care about the default being warmed ask for `catalogue(ticks=24)`.
+    """
+    def build(ticks: int = 0) -> dict:
+        rows = {"41": service.Instrument("41", "XAUUSD", "Gold vs US Dollar", "metal", ticks)}
+        monkeypatch.setattr(service, "_instruments", rows)
+        monkeypatch.setattr(service, "instruments", lambda refresh=False: rows)
+        monkeypatch.setattr(service, "_last_refresh", None)
+        return rows
+
+    build()
+    return build
+
+
+def test_cached_symbols_are_listed_from_redis(redis, kql_rows):
+    """The refresh set is what is stored, not a memory list that can drift."""
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+
+    assert service.cached_symbols() == ["1", "2"]
+
+
+def test_the_cycle_replaces_every_cached_symbol(redis, kql_rows, catalogue):
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+    before = kql_rows["load_raw"]
+
+    service.refresh_cache()
+
+    # Both cached symbols were re-read and re-written in full, under the TTL.
+    assert redis["written"] == [
+        ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
+        ("axioma:ctrader_dom:agg_dom:ticks:2", 2700),
+    ]
+    assert kql_rows["load_raw"] == before + 2
+    assert len(redis["frames"]["axioma:ctrader_dom:agg_dom:ticks:1"]) == 240
+    assert kql_rows["lookback_minutes"] == 240      # the whole window, not a slice
+
+
+def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+
+    summary = service.refresh_cache()
+
+    assert summary["symbols"] == 1
+    assert summary["rows"] == 240
+    assert summary["window_minutes"] == 240
+    assert summary["interval_minutes"] == 30
+    assert summary["errors"] == []
+    assert summary["finished_at"] >= summary["started_at"]
+    assert service.last_refresh() == summary
+
+
+def test_the_cycle_warms_the_default_symbol_when_the_cache_is_empty(redis, kql_rows, catalogue):
+    """A restart with an empty cache still leaves the first paint fast."""
+    catalogue(ticks=24)
+    assert service.cached_symbols() == []
+
+    summary = service.refresh_cache()
+
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700)]
+    assert summary["symbols"] == 1
+
+
+def test_the_default_symbol_is_not_warmed_when_it_has_no_ticks(redis, kql_rows, catalogue):
+    """An untraded default would cache an empty frame and break the first paint."""
+    assert service.cached_symbols() == []
+
+    summary = service.refresh_cache()
+
+    assert redis["written"] == []
+    assert summary["symbols"] == 0
+
+
+def test_the_cycle_never_refreshes_the_same_symbol_twice(redis, kql_rows, catalogue):
+    """The default ticker is already cached here, so it is read once, not twice."""
+    catalogue(ticks=24)
+    service.load_ticks_cached("41", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+
+    service.refresh_cache()
+
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700)]
+
+
+def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
+    service.load_ticks_cached(None, limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+
+    service.refresh_cache()
+
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:all", 2700)]
+    assert kql_rows["symbol"] is None
+
+
+def test_a_failing_symbol_keeps_its_previous_entry(redis, kql_rows, catalogue):
+    """A partial failure must not evict data that is merely older."""
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+    kql_rows["fail_on"] = {"2"}
+
+    summary = service.refresh_cache()
+
+    assert summary["symbols"] == 1
+    assert summary["errors"] == ["2: No usable aggregate rows for 2."]
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:1", 2700)]
+    assert "axioma:ctrader_dom:agg_dom:ticks:2" in redis["frames"]
+
+
+def test_a_failed_catalogue_still_refreshes_the_ticks(monkeypatch, redis, kql_rows):
+    """The catalogue and the rows are separate reads; one failing is reported."""
+    def boom(refresh=False):
+        raise DataSourceError("KQL query failed: Forbidden (403-Forbidden)")
+
+    monkeypatch.setattr(service, "_instruments", None)
+    monkeypatch.setattr(service, "instruments", boom)
+    monkeypatch.setattr(service, "_last_refresh", None)
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    redis["written"].clear()
+
+    summary = service.refresh_cache()
+
+    assert summary["symbols"] == 1
+    assert summary["errors"] == [
+        "catalogue: KQL query failed: Forbidden (403-Forbidden)",
+        "default symbol: KQL query failed: Forbidden (403-Forbidden)",
+    ]
+
+
+def test_a_cache_that_cannot_be_listed_refreshes_nothing(monkeypatch, kql_rows, catalogue):
+    """A cache outage leaves the cycle with an empty set, not an error."""
+    monkeypatch.setattr(service.cache, "keys", lambda settings=None, *parts: [])
+    monkeypatch.setattr(service.cache, "set_frame",
+                        lambda k, f, ttl, settings=None: False)
+
+    summary = service.refresh_cache()
+
+    assert summary["symbols"] == 0
+    assert summary["errors"] == []
 

@@ -188,6 +188,21 @@ def test_a_cache_outage_never_masks_a_kql_failure(monkeypatch):
     assert st.hints[1] == st.cache_error
 
 
+def test_last_refresh_reports_the_cycle(monkeypatch):
+    """Health publishes when the window was last re-read, so a stalled cycle shows."""
+    stamp = {"finished_at": "2026-10-08T01:30:00+00:00",
+             "started_at": "2026-10-08T00:30:00+00:00", "symbols": 2}
+    monkeypatch.setattr(service, "_last_refresh", stamp)
+
+    assert service.last_refresh() == stamp
+
+
+def test_there_is_no_refresh_state_before_the_first_cycle(monkeypatch):
+    monkeypatch.setattr(service, "_last_refresh", None)
+
+    assert service.last_refresh() is None
+
+
 def test_the_probe_is_cached_until_refreshed(monkeypatch):
     seen = _patch_kql(monkeypatch)
     _patch_cache(monkeypatch)

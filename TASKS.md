@@ -8,6 +8,60 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-08 - Keep the 4-hour window fresh: refresh every 30 minutes
+
+### Backend
+- [x] `app/config.py`: `CACHE_REFRESH_MINUTES` (30 by default) plus
+      `cache_refresh_seconds`; 0 switches the cycle off
+- [x] `app/cache.py`: `keys()` lists the cached entries under a prefix, so the
+      cycle refreshes what is actually stored (`KEYS`, not `SCAN`: this Redis
+      Enterprise returned an empty page set for a non-empty match)
+- [x] `app/service.py`: `cached_symbols()` (the refresh set, read from Redis) and
+      `refresh_cache()` -> rebuild the catalogue, re-read the whole window for
+      every cached symbol plus `DEFAULT_SYMBOL`, keep a failed symbol's previous
+      entry, return a JSON summary; `Status.cache_refreshed_at`/`cached_symbols`
+- [x] `app/refresh.py`: the cycle - refresh immediately, then every interval, on
+      a worker thread so KQL never blocks the event loop; one failing cycle is
+      logged and the loop survives; cancelled on shutdown
+- [x] `app/main.py`: lifespan starts/stops the cycle; `/api/health` publishes
+      `cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`
+- [x] `scripts/refresh_cache.py`: one cycle from cron/systemd, non-zero exit when
+      the endpoint is unreachable (the alternative to the in-process cycle)
+
+### UI / config
+- [x] Health badge tooltip names the refresh cadence next to the window
+- [x] `.env` / `.env.example`: documented cache block with both knobs
+- [x] `run.py` banner prints the cadence
+
+### Verification
+- [x] `pytest` - 248 passed
+- [x] `tests/test_refresh.py`: first pass does not wait, the loop repeats, a
+      failing cycle is logged and the next still runs, 0 runs one pass,
+      `start()` schedules nothing when off, shutdown cancels a running cycle
+- [x] `tests/test_service.py`: the cycle replaces every cached symbol under the
+      TTL over the whole window, warms the default (and not an untraded one),
+      reads a symbol once, keeps the `all` entry, keeps a failed symbol's entry,
+      reports a failed catalogue, does nothing when the cache cannot be listed
+- [x] `tests/test_status.py` / `tests/test_config.py`: health fields, defaults,
+      overrides and the TTL-outlives-the-cycle invariant
+- [x] `tests/test_refresh_script.py`: summary/JSON output and exit codes
+- [x] Docs: `README.md` (cache section, systemd + cron, verifying, troubleshooting)
+
+**Notes:**
+- 30 minutes is the age ceiling of what a page serves, and anything inside the
+  window still costs no query - the fixed window is unchanged, only its
+  freshness is now guaranteed.
+- The TTL (2700 s) is 1.5 cycles, so one missed cycle still leaves the cache
+  populated; a longer cycle with a shorter TTL would serve an empty cache.
+- The cycle refreshes what is cached rather than every traded instrument: the
+  set is bounded by real use, and an instrument nobody asks for never costs a
+  query. A restart warms `DEFAULT_SYMBOL`, so the first paint is still fast.
+- The cycle lives in the web process because the deployment is a single uvicorn
+  worker. `CACHE_REFRESH_MINUTES=0` plus `scripts/refresh_cache.py` on a timer is
+  the supported alternative; running both would double the KQL work.
+
+---
+
 ## 2026-10-08 - One source (KQL) + Redis cache, fixed 4-hour window
 
 ### Backend

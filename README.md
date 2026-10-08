@@ -10,7 +10,8 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 (Eventhouse) database `ctrader_dom`. Every table it reads lives there — the
 per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
 (`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
-(Entra ID, no access key) so a dashboard request never re-scans the table.
+(Entra ID, no access key) so a dashboard request never re-scans the table, and
+that four-hour window is re-read from KQL every 30 minutes.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -41,6 +42,7 @@ REDIS_HOST="<name>.<region>.redis.azure.net"
 REDIS_PORT="10000"
 REDIS_TTL_SECONDS="2700"
 CACHE_LOOKBACK_HOURS="4"
+CACHE_REFRESH_MINUTES="30"
 
 # Authentication - see the table below.
 FABRIC_MANAGED_IDENTITY="true"
@@ -67,6 +69,33 @@ control is built from it, and `/api/analytics` clamps every request to it —
 asking for more returns the whole window instead of a `422`, so a bookmarked
 URL or a stale tab keeps working. A client can therefore narrow the window,
 never widen it, and never trigger a second KQL read.
+
+### Keeping the window current
+
+A cache is only useful if it is fresh, so the app re-reads the fixed window on a
+timer: **every `CACHE_REFRESH_MINUTES` (30 by default)** a background task
+re-reads KQL and replaces the cached entries. What the dashboard serves is
+therefore at most half an hour behind the feed, and anything inside the window
+still costs no query at all.
+
+| Piece | Value | Why |
+|---|---|---|
+| Window | `CACHE_LOOKBACK_HOURS="4"` | One KQL read per symbol covers four hours; the UI may narrow it. |
+| Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows. Set `0` to switch the cycle off and cache lazily, on demand. |
+| TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+
+Each cycle refreshes the instrument catalogue and re-reads the whole window for
+**every symbol already in the cache**, plus the configured `DEFAULT_SYMBOL` — so
+a restart warms the default view instead of leaving the next visitor to pay for
+the scan (the cycle runs immediately on start, then sleeps). A symbol nobody has
+asked for in a while drops out on its own when its TTL expires, so the set stays
+bounded by real use rather than by the size of the instrument dimension. A
+symbol whose read fails keeps its previous entry: a partial failure must not
+evict data that is merely older.
+
+`/api/health` reports the cycle: `cache_refresh_minutes`, `cache_refreshed_at`
+and `cached_symbols`. If `cache_refreshed_at` stops advancing, the cycle is
+failing or switched off — reads still work, they just fall back to KQL.
 
 ### Asset classification
 
@@ -200,11 +229,37 @@ and a **loopback bind**. The unit also sets `ProtectSystem=strict` with
 Managed identity needs only outbound HTTPS to the instance metadata endpoint, so
 no extra capability is granted.
 
+The refresh cycle runs inside this process. That is deliberate: there is exactly
+one uvicorn worker, so one refresher, and nothing to coordinate with a lock or a
+second unit. `Restart=always` restarts the cycle with the app, and because the
+cycle refreshes immediately there is no cold window after a restart.
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now axioma.service
 systemctl status axioma.service
-journalctl -u axioma.service -f
+journalctl -u axioma.service -f          # one "Cache refresh: {...}" line per cycle
+```
+
+#### Refreshing from a timer instead
+
+If the KQL work should not sit in the web process, switch the cycle off in
+`.env` (`CACHE_REFRESH_MINUTES="0"`) and run one cycle per timer. The script does
+what the in-process cycle does, and exits non-zero when the endpoint is
+unreachable so a timer surfaces it:
+
+```bash
+*/30 * * * * /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
+    >> /var/log/axioma-refresh.log 2>&1
+```
+
+```ini
+# /etc/systemd/system/axioma-refresh.service   (+ .timer, OnCalendar=*:0/30)
+[Service]
+Type=oneshot
+User=azureuser
+WorkingDirectory=/home/azureuser/axioma-analytics
+ExecStart=/usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py
 ```
 
 ### nginx
@@ -238,7 +293,9 @@ curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front p
 came back from KQL and the instrument names came from the same KQL database.
 `cache_connected` reports the Redis cache separately — it decides whether a
 request costs a KQL query, but a cache failure is never an outage, because
-reads fall through to KQL.
+reads fall through to KQL. `cache_refreshed_at` (with `cached_symbols`) is the
+age of what the cache is serving: on a healthy 30-minute cycle it moves every
+half hour, and `cache_refresh_minutes` is the interval it is aiming for.
 
 ### Deploying an update
 
@@ -400,6 +457,7 @@ are never exposed.
 app/
   config.py      .env -> Settings (KQL endpoint, Redis, credentials, object names)
   cache.py       Redis client (Entra ID), catalogue + per-symbol Parquet caching
+  refresh.py     the background cycle that re-reads the fixed window
   errors.py      DataSourceError, shared by the transport and the API layer
   kql.py         Kusto client, tick-metric queries and probes (KQL)
   frames.py      tick-metric rows -> canonical tick frame
@@ -410,10 +468,13 @@ app/
   static/        dashboard (Chart.js), holding page, front-facing explainer
 scripts/
   grant_workspace_access.py   grant the SP a role on the workspace
+  refresh_cache.py            one cycle from cron/systemd instead of the app
 tests/
   test_analytics.py / test_frames.py / test_assets.py / test_config.py
   test_kql.py         KQL query text, parameters and credential selection
   test_service.py     cache-backed reads, window clamping, cache-outage fallthrough
+  test_refresh.py     the refresh cycle (first pass, repeat, failure, shutdown)
+  test_refresh_script.py    the one-shot script's summary and exit codes
   test_status.py      the health probe (KQL gates it, cache is reported)
   test_selectors.py / test_unavailable.py   HTTP-level behaviour
 ```
@@ -430,7 +491,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
@@ -482,13 +543,16 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
+the refresh cycle (immediate first pass, repeat, a failing cycle that keeps the
+loop alive, the default symbol warmed, a failing symbol keeping its previous
+entry, cancellation on shutdown, the one-shot script's exit codes),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, drawdown sign, strict JSON serialisability, and a degenerate
 flat-price series (guards against divide-by-zero).
 
 Redis is not required to run the tests: the KQL layer and the Redis client are
-both stubbed.
+both stubbed, and the cycle is driven with a stub instead of the network.
 
 ---
 
@@ -498,7 +562,9 @@ both stubbed.
 |---|---|
 | `Could not login because the authentication failed (18456)` | The identity has no workspace role. Grant **Contributor**. |
 | Health shows `cache_connected: false` | The Redis cache is unreachable or the identity has no data-access role on it. The dashboard still works (the read falls through to KQL); check the Redis resource's data-access policy / **Redis Data Contributor** assignment. |
-| Cached ticks look stale after a pipeline backfill | Delete the keys (`axioma:ticks:*`, `axioma:catalogue`). The TTL (`REDIS_TTL_SECONDS`) bounds this anyway. |
+| Cached ticks look stale after a pipeline backfill | Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`), or wait for the next cycle: the window is re-read every `CACHE_REFRESH_MINUTES`. The TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |
+| Health's `cache_refreshed_at` is not advancing | The cycle is failing or switched off (`CACHE_REFRESH_MINUTES=0`). Check `journalctl -u axioma.service` for `Cache refresh cycle failed`; the dashboard still works, every request just falls through to KQL. |
+| Every request is slow again | The cache is empty or unreachable, so each read costs a KQL scan. Check `cache_connected` and whether the symbols are cached (`cached_symbols`). |
 | `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |
 | `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |
