@@ -162,6 +162,22 @@ def unavailable() -> Any:
     )
 
 
+@app.get("/welcome")
+def welcome() -> Any:
+    """The front-facing explainer, always reachable.
+
+    A separate page from the dashboard: it describes what the app is and what
+    it measures, then links into `app.axiomanalytics.info`. Served at its own
+    path so the `www` host -- and anyone previewing it -- renders the same
+    content. It is a static asset and never touches the warehouse, so it stays
+    up during maintenance mode.
+    """
+    return FileResponse(
+        STATIC_DIR / "landing.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
 @app.get("/")
 def index() -> Any:
     """The dashboard, or the holding page while maintenance mode is on.

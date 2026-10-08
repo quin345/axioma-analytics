@@ -210,6 +210,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
 curl -sk https://app.axiomanalytics.info/api/health            # through nginx
+curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page
 ```
 
 `connected: true` with a non-zero `row_count` **and** a non-zero `dimension_rows`
@@ -227,32 +228,93 @@ sudo systemctl restart axioma.service
 `/etc/nginx/sites-available/axiomanalytics.bak` keeps the previous proxy
 config for reference.
 
-The certificate covers exactly two names — `axiomanalytics.info` and
-`app.axiomanalytics.info`. `app` is a CNAME to the bare domain in DNS.
-**`www.axiomanalytics.info` is not on the certificate.** It is reserved for
-other use and has no DNS record pointing here. Do not add it to the renewal
-command — Let's Encrypt HTTP-01 validation needs to resolve the name, so the
-issuance would fail and take the working certificate down with it.
+The certificate must cover **three** names — `axiomanalytics.info`,
+`app.axiomanalytics.info` and `www.axiomanalytics.info`. `app` and `www` are
+CNAMEs to the bare domain in DNS.
 
-Renew with only the two certified names:
+`www` is the **front door**: it serves the explainer page (see *Front page*).
+It is only reachable over TLS once the name resolves **and** is on the
+certificate, so the two steps are ordered:
+
+1. **DNS first.** Add the `www` record at the registrar — see *Pointing `www`
+   at the server*. Until the name resolves, Let's Encrypt's HTTP-01 challenge
+   cannot validate it.
+2. **Then expand the certificate:**
 
 ```bash
-sudo certbot certonly --nginx -d axiomanalytics.info -d app.axiomanalytics.info --expand
+sudo certbot certonly --nginx \
+  -d axiomanalytics.info -d app.axiomanalytics.info -d www.axiomanalytics.info \
+  --expand
 ```
 
-`www` still has an nginx block, but it only exists to catch requests that
-arrive with that `Host` before DNS is repointed. It serves the `app`
-certificate and 301s to `https://app.axiomanalytics.info` rather than
-returning 444, which browsers rendered as a connection/privacy error. A
-browser will still flag a cert-name mismatch on `www` itself — that is
-expected and unavoidable until either the name is added to the certificate
-or DNS for `www` is pointed somewhere else. Once DNS is repointed, delete the
-block.
+Do not run `--expand` before the DNS record exists: the challenge fails, and a
+failed expansion can leave the already-working names pointing at the old
+certificate line.
+
+The `www` server block now serves the explainer at `/` (proxied to the app's
+`/welcome`), proxies `/static/` for the brand assets, and 301s every other path
+to `https://app.axiomanalytics.info` — `www` is not a site of its own.
 
 `Strict-Transport-Security: max-age=31536000` is set on the HTTPS servers
-without `includeSubDomains` or `preload`: those directives would apply to
-`www`, which cannot be validated, so including them would make the warning
-sticky and un-dismissable.
+without `includeSubDomains` or `preload`. Those directives would apply to every
+subname, including any that is not on this certificate; a mismatch makes the
+HSTS warning sticky and un-dismissable. Leave them off until every subname is
+deliberate.
+
+### Front page
+
+`www.axiomanalytics.info` is the front-facing explainer: a single static page
+(`app/static/landing.html`, served at `/welcome`) that describes what AXIOMA is,
+what it measures (the ten analytic blocks), where the numbers come from, and
+links into the dashboard on `app.axiomanalytics.info`.
+
+Like the holding page it is **self-contained** — inline styles, no dependency on
+`styles.css`, `app.js` or the analytics API — so it renders even while the
+dashboard is in maintenance mode. It is served at its own path rather than `/`,
+so `/` stays the dashboard and the page can be previewed directly.
+
+### Pointing `www` at the server (GoDaddy)
+
+DNS for `axiomanalytics.info` is managed at GoDaddy
+(`ns31.domaincontrol.com` / `ns32.domaincontrol.com`). `www` currently has no
+record at all, so nothing resolves for it. Add one:
+
+1. Sign in to GoDaddy → **My Products** → `axiomanalytics.info` → **DNS**
+   (or *Manage DNS*).
+2. **Add** a record in the DNS records table:
+
+   | Field | Value |
+   |---|---|
+   | Type | `CNAME` |
+   | Name (Host) | `www` |
+   | Value (Points to) | `axiomanalytics.info` |
+   | TTL | Default (1 hour is fine) |
+
+   If GoDaddy already has a `www` record, **edit** it to the same value instead
+   of adding a second one. (An `A` record `www → 102.37.108.66` works equally
+   well; a CNAME is preferred so the record follows the bare domain if the server
+   IP ever changes.)
+3. Save. Propagation is usually minutes but can take up to an hour.
+4. Confirm it resolves, then expand the certificate:
+
+```bash
+dig +short www.axiomanalytics.info      # must print the server IP before certbot
+sudo certbot certonly --nginx \
+  -d axiomanalytics.info -d app.axiomanalytics.info -d www.axiomanalytics.info \
+  --expand
+sudo systemctl reload nginx
+```
+
+5. Verify:
+
+```bash
+curl -sI https://www.axiomanalytics.info/ | head -1          # HTTP/2 200
+curl -s  https://www.axiomanalytics.info/ | grep -c "What it measures"
+```
+
+GoDaddy forwarding must stay **off** for `www`: an enabled *Forwarding* rule
+short-circuits the DNS record and sends visitors somewhere else before they ever
+reach nginx.
 
 ---
 
@@ -314,7 +376,7 @@ app/
   analytics.py   all computations (pure functions, no I/O)
   service.py     instrument catalogue, health probing, TTL cache
   main.py        FastAPI app + static dashboard
-  static/        dashboard (Chart.js)
+  static/        dashboard (Chart.js), holding page, front-facing explainer
 scripts/
   grant_workspace_access.py   grant the SP a role on the workspace
 tests/
@@ -340,6 +402,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
+| `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
 
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
 `summary`; omitting `asset_class` returns everything.

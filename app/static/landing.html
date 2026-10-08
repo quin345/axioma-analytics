@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AXIOMA Analytics &middot; what it measures</title>
+<meta name="description" content="AXIOMA Analytics turns the production aggregate DOM feed into tick-level microstructure analytics - order flow, spread, liquidity, volatility and price behaviour - across every traded asset class." />
+<!-- The branding set is shared with the dashboard: same mark, same favicons. -->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256" />
+<link rel="icon" href="/static/icon-32.png" type="image/png" sizes="32x32" />
+<link rel="icon" href="/static/icon-180.png" type="image/png" sizes="180x180" />
+<link rel="apple-touch-icon" href="/static/icon-180.png" />
+<link rel="mask-icon" href="/static/favicon.svg" color="#4c9aff" />
+<meta name="theme-color" content="#0b0f17" />
+<!--
+  Front-facing explainer for www.axiomanalytics.info. Self-contained on purpose:
+  like the holding page it must render even if the dashboard's own assets
+  (styles.css, app.js) or the analytics API are unavailable, so it depends on
+  nothing but the favicon files. The tokens below mirror :root in styles.css.
+-->
+<style>
+:root{
+  --bg:#0b0f17; --panel:#121826; --panel2:#182032; --line:#232d42;
+  --fg:#e6ecf7; --muted:#8798b4; --accent:#4c9aff; --up:#22c55e; --down:#ef4444;
+  --warn:#f59e0b; --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.6 "Inter",-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:flex;flex-direction:column;min-height:100vh;
+  -webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;
+  padding:16px 24px;border-bottom:1px solid var(--line);background:var(--panel);
+  position:sticky;top:0;z-index:20}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:38px;height:38px;flex:0 0 38px;display:block}
+h1{font-size:19px;margin:0}
+.sub{margin:2px 0 0;color:var(--muted);font-size:12px}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:9px 16px;border-radius:9px;
+  font-size:13px;font-weight:600;white-space:nowrap}
+.btn.primary{background:var(--accent);color:#04101f}
+.btn.primary:hover{filter:brightness(1.1);text-decoration:none}
+.btn.ghost{border:1px solid var(--line);color:var(--muted)}
+.btn.ghost:hover{color:var(--fg);border-color:var(--accent);text-decoration:none}
+.btn .arrow{font-weight:700}
+
+.wrap{flex:1;width:100%;max-width:1060px;margin:0 auto;padding:0 24px}
+
+.hero{padding:64px 0 44px;border-bottom:1px solid var(--line)}
+.pill{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  padding:4px 12px;border-radius:20px;background:rgba(76,154,255,.14);color:var(--accent);
+  border:1px solid rgba(76,154,255,.32)}
+.hero h2{margin:18px 0 14px;font-size:clamp(28px,4.6vw,44px);font-weight:700;
+  letter-spacing:-.02em;line-height:1.12;max-width:22ch}
+.hero h2 .grad{background:linear-gradient(90deg,#4f9dff,#22d3a7);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{margin:0;max-width:64ch;color:var(--muted);font-size:16px}
+.hero .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:28px}
+
+.strip{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin:44px 0 0}
+.strip .cell{background:var(--panel);padding:18px 20px}
+.strip .n{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;
+  background:linear-gradient(90deg,#4f9dff,#22d3a7);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.strip .l{margin:4px 0 0;color:var(--muted);font-size:12.5px}
+@media (max-width:760px){.strip{grid-template-columns:repeat(2,1fr)}}
+
+section.block{padding:52px 0 8px}
+.block h2.sec{font-size:13px;margin:0 0 6px;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--accent)}
+.block p.intro{margin:0 0 26px;max-width:72ch;color:var(--muted)}
+
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media (max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.cards{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px 22px}
+.card h3{margin:0 0 8px;font-size:15px;font-weight:650;display:flex;align-items:center;gap:9px}
+.card h3 .dot{width:8px;height:8px;border-radius:50%;flex:0 0 8px;
+  background:linear-gradient(135deg,#4f9dff,#22d3a7)}
+.card p{margin:0;color:var(--muted);font-size:13.5px}
+.card ul{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:13.5px}
+.card li{margin:3px 0}
+.card li b{color:var(--fg);font-weight:600}
+
+footer{border-top:1px solid var(--line);background:var(--panel);color:var(--muted);
+  font-size:12.5px;padding:20px 24px;display:flex;flex-wrap:wrap;gap:8px 14px;
+  align-items:center;justify-content:center;margin-top:56px}
+footer .sep{width:1px;height:13px;background:var(--line)}
+footer strong{color:var(--fg)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <!-- Diamond: the market instrument. Flat top, converging to a point. -->
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <!-- Ascending bar pair: the analytics readout behind the mark. -->
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
+      <defs>
+        <linearGradient id="ax-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4f9dff" />
+          <stop offset="100%" stop-color="#22d3a7" />
+        </linearGradient>
+      </defs>
+    </svg>
+    <div>
+      <h1>AXIOMA</h1>
+      <p class="sub">Tick microstructure &middot; market data analytics</p>
+    </div>
+  </div>
+  <a class="btn primary" href="https://app.axiomanalytics.info/">
+    Open the dashboard <span class="arrow">&rarr;</span>
+  </a>
+</header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <span class="pill">Production market-data terminal</span>
+    <h2>The microstructure of <span class="grad">every tick</span> we capture.</h2>
+    <p class="lede">
+      AXIOMA Analytics reads the production aggregate DOM feed and turns it into
+      tick-level analytics. For any instrument on the desk it shows how price
+      moved, how liquidity was posted and taken, how spreads behaved and how
+      volatile the tape was &mdash; computed from every quote update in the
+      window, not from a daily close.
+    </p>
+    <div class="actions">
+      <a class="btn primary" href="https://app.axiomanalytics.info/">
+        Launch AXIOMA Analytics <span class="arrow">&rarr;</span>
+      </a>
+      <a class="btn ghost" href="#measures">See what it measures</a>
+    </div>
+
+    <div class="strip" role="list" aria-label="Key facts">
+      <div class="cell" role="listitem">
+        <p class="n">Tick-level</p>
+        <p class="l">Every book event in the window, per symbol</p>
+      </div>
+      <div class="cell" role="listitem">
+        <p class="n">9 classes</p>
+        <p class="l">FX, metals, energy, indices, crypto, bonds, futures</p>
+      </div>
+      <div class="cell" role="listitem">
+        <p class="n">10 blocks</p>
+        <p class="l">Summary, OHLCV, liquidity, distribution, behaviour</p>
+      </div>
+      <div class="cell" role="listitem">
+        <p class="n">Every 45&nbsp;min</p>
+        <p class="l">Pipeline writes fresh state snapshots on this cadence</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-how">
+    <h2 class="sec" id="h-how">How it works</h2>
+    <p class="intro">
+      AXIOMA is not a price display. It is an analytics engine that reads the
+      raw feed the trading pipeline already writes, classifies each instrument
+      by its own asset class, and computes a full microstructure report on
+      demand.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>1. Read the feed</h3>
+        <p>
+          Every aggregate DOM row for the selected symbol and window is loaded
+          &mdash; best bid, best ask, resting sizes on each side, the pipeline's
+          own imbalance and the derived mid. One-sided and crossed books are
+          dropped so no panel is drawn from a quote that cannot exist.
+        </p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>2. Classify</h3>
+        <p>
+          Instruments are grouped by asset class using the pipeline's own
+          classification chain, subdivided for FX, with a fallback to the symbol
+          signals so nothing silently disappears from the picker.
+        </p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>3. Compute &amp; chart</h3>
+        <p>
+          The analytics layer resamples bars, builds the order-flow, spread,
+          depth, volume-profile, distribution, drawdown and return-behaviour
+          series, and streams them to the browser as clean JSON.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" id="measures" aria-labelledby="h-measures">
+    <h2 class="sec" id="h-measures">What it measures</h2>
+    <p class="intro">
+      Ten analytic blocks, all computed from the tick window you select. Change
+      the symbol, timeframe, rolling window or look-back and every panel
+      recomputes together.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Summary &amp; OHLCV</h3>
+        <ul>
+          <li>ticks, open/high/low/close, net change</li>
+          <li>realised and annualised volatility, spread statistics</li>
+          <li>ticks per minute and tick inter-arrival</li>
+          <li>resampled bars from 1&nbsp;s to 1&nbsp;d with VWAP, per-bar spread and tick count</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Order flow &amp; spread</h3>
+        <ul>
+          <li>order-flow imbalance (signed volume by tick direction)</li>
+          <li>bid-ask spread evolution in basis points</li>
+          <li>large trades and their one-tick market impact</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Liquidity</h3>
+        <ul>
+          <li>volume-at-price profile with POC and the 70% value area</li>
+          <li>high-volume nodes</li>
+          <li>book depth: resting size per side and depth imbalance</li>
+          <li>activity by hour of day (UTC)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Distribution &amp; risk</h3>
+        <ul>
+          <li>return histogram, skew and excess kurtosis</li>
+          <li>Jarque-Bera normality test and bullish ratio</li>
+          <li>drawdown path and worst episodes (peak, trough, recovery)</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Price behaviour</h3>
+        <ul>
+          <li>autocorrelation of returns</li>
+          <li>efficiency ratio and Hurst exponent</li>
+          <li>variance ratios</li>
+          <li>rolling volatility, rolling spread and cumulative return</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Coverage &amp; calendar</h3>
+        <ul>
+          <li>instrument coverage per asset class</li>
+          <li>a data calendar sizing each day by tick count</li>
+          <li>the latest-tick timestamp and freshness, so a stale window is obvious</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-data">
+    <h2 class="sec" id="h-data">Where the numbers come from</h2>
+    <p class="intro">
+      Two production sources on the analytics estate, and nothing else. There is
+      no synthetic or demo data, and the storage internals are never sent to the
+      browser.
+    </p>
+    <div class="cards">
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>The rows</h3>
+        <p>
+          Per-tick aggregate DOM rows from the production eventhouse: one
+          pre-aggregated state snapshot per symbol and timestamp &mdash;
+          top-of-book quotes plus aggregate resting size. These are point-in-time
+          snapshots, not a reconstruction of the full order book.
+        </p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>The instruments</h3>
+        <p>
+          The instrument dimension supplies tickers, descriptions and the
+          asset-class chain, so the UI shows <b>XAUUSD</b>, <b>EURUSD</b> or
+          <b>BTCUSD</b> rather than raw numeric ids.
+        </p>
+      </div>
+      <div class="card">
+        <h3><span class="dot" aria-hidden="true"></span>Freshness</h3>
+        <p>
+          The pipeline writes state snapshots on a fixed cadence. Every screen
+          states when the newest tick landed and when the next refresh is due, so
+          you always know how current the view is.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-open">
+    <h2 class="sec" id="h-open">Explore it yourself</h2>
+    <p class="intro">
+      Pick an asset class, choose a symbol, set the window and read the panels.
+      The dashboard runs live against the production feed.
+    </p>
+    <div class="actions" style="display:flex;flex-wrap:wrap;gap:12px">
+      <a class="btn primary" href="https://app.axiomanalytics.info/">
+        Open AXIOMA Analytics <span class="arrow">&rarr;</span>
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <strong>AXIOMA Analytics</strong>
+  <span class="sep" aria-hidden="true"></span>
+  <span>Tick microstructure &middot; market data analytics</span>
+  <span class="sep" aria-hidden="true"></span>
+  <span><a href="https://app.axiomanalytics.info/">app.axiomanalytics.info</a></span>
+  <span class="sep" aria-hidden="true"></span>
+  <span>For access or questions, contact the data platform team.</span>
+</footer>
+
+</body>
+</html>
+
