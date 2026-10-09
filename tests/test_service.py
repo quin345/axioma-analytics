@@ -104,6 +104,44 @@ def test_narrowing_of_the_full_window_changes_nothing():
     assert len(service._narrow(raw, 240, 100000)) == len(raw)
 
 
+# ----------------------------------------------------------------------
+# Point in time: the slice ends where the user chose
+# ----------------------------------------------------------------------
+
+def test_a_point_in_time_ends_the_window_there():
+    """Stepping back along the timeline returns what led up to that moment,
+    not the newest rows."""
+    raw = _window(240)                     # 00:00 - 03:59
+    out = service._narrow(raw, 60, 100000, "2026-10-08T02:59:00Z")
+
+    assert out["timestamp"].max() == pd.Timestamp("2026-10-08T02:59:00", tz="UTC")
+    assert out["timestamp"].min() == pd.Timestamp("2026-10-08T01:59:00", tz="UTC")
+    assert len(out) == 61
+
+
+def test_a_point_ahead_of_the_data_means_up_to_the_newest_row():
+    """The timeline runs up to "now" while the cache runs to the newest row, so
+    a point in the future is clamped rather than returning nothing."""
+    raw = _window(240)
+    out = service._narrow(raw, 60, 100000, "2026-10-08T04:30:00Z")
+
+    assert out["timestamp"].max() == raw["timestamp"].max()
+    assert len(out) == 61
+
+
+def test_a_point_older_than_the_lookback_leaves_nothing():
+    raw = _window(240)
+    assert service._narrow(raw, 60, 100000, "2026-10-07T23:00:00Z").empty
+
+
+def test_an_unreadable_point_in_time_is_refused():
+    """Silently re-anchoring on the newest row would show a report the user did
+    not ask for, so the request fails loudly instead."""
+    raw = _window(240)
+    with pytest.raises(DataSourceError):
+        service._narrow(raw, 60, 100000, "not a timestamp")
+
+
 def test_the_row_cap_is_applied_to_the_narrowed_tail():
     raw = _window(3600, freq="1s")
     out = service._narrow(raw, 60, 10)
@@ -208,6 +246,31 @@ def test_the_same_window_serves_any_duration(redis, kql_rows):
     for minutes in (5, 30, 120, 240):
         service.load_ticks_cached("1", limit=100000, lookback_minutes=minutes)
 
+    assert kql_rows["load_raw"] == 1
+
+
+def test_the_same_window_serves_any_point_in_time(redis, kql_rows):
+    """Moving along the timeline costs nothing either: the cached entry holds
+    the whole window, so a point in time only trims the copy in memory."""
+    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    before = kql_rows["load_raw"]
+
+    frame = service.load_ticks_cached("1", limit=100000, lookback_minutes=60,
+                                      end_time="2026-10-08T02:59:00Z")
+
+    assert kql_rows["load_raw"] == before
+    assert frame["ts"].max() == pd.Timestamp("2026-10-08T02:59:00", tz="UTC")
+    assert len(frame) == 61
+
+
+def test_a_point_in_time_with_no_rows_is_a_data_error(redis, kql_rows):
+    """A point older than the lookback leaves nothing to analyse, and the error
+    names the point so the message is not read as a feed problem."""
+    with pytest.raises(DataSourceError) as exc:
+        service.load_ticks_cached("1", limit=100000, lookback_minutes=60,
+                                  end_time="2026-10-07T23:00:00Z")
+
+    assert "ending at 2026-10-07T23:00:00Z" in str(exc.value)
     assert kql_rows["load_raw"] == 1
 
 

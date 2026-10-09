@@ -8,7 +8,68 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
-## 2026-10-08 - Clock-slot refresh, sliding 4-hour window, development page (dev)
+## 2026-10-09 - Point in time: 4 h timeline in 5 min steps, lookback 5-240 min, 8 h cache (dev)
+
+### Backend
+- [x] `app/config.py`: `CACHE_LOOKBACK_HOURS` default 4 -> **8** - a 4-hour
+      timeline plus the widest 240-minute lookback from its earliest point is
+      exactly 8 h, so every combination the controls offer is inside the cache
+      (`test_the_window_covers_the_timeline_and_its_widest_lookback`)
+- [x] `app/config.py`: new `TIMELINE_MINUTES` (240), `TIMELINE_STEP_MINUTES` (5),
+      `LOOKBACK_MIN_MINUTES` (5), `LOOKBACK_MAX_MINUTES` (240) and a
+      `max_lookback_minutes` property that caps the ceiling at the window, so a
+      shorter cache narrows the control instead of promising history it cannot
+      serve
+- [x] `app/service.py`: `Status` carries the four control values; `status()`
+      fills them from settings
+- [x] `app/service.py`: `_narrow()` takes `end_time` - the slice **ends** at the
+      chosen point instead of at the newest row; a point ahead of the data is
+      clamped to the newest row, a point older than the lookback leaves nothing,
+      and an unparseable one raises rather than silently showing the newest rows
+- [x] `app/service.py`: `load_ticks()` / `load_ticks_cached()` take `end_time`
+      and pass it through; the empty-window error names the point
+- [x] `app/main.py`: `/api/analytics` takes `as_of` (ISO 8601) and echoes it in
+      `meta`; `/api/health` publishes the four control values
+- [x] `.env` / `.env.example`: window raised to 8, new timeline/lookback knobs
+      documented
+
+### UI
+- [x] Header badge: "Latest tick ..." -> "**Last update ...**", floored to the
+      30-minute refresh step (`fmt.halfhour`) and read from the feed's newest
+      row, so it no longer moves with the point in time on screen
+- [x] "Duration" `<select>` replaced by a **Point in time** slider (4 h span,
+      5-minute steps, oldest left) plus a **Lookback** `<select>` (5-240 min in
+      5-minute steps), both built from `/api/health`
+- [x] `buildTimeline()`: every stop on the clock grid, newest stop never behind
+      the data, and the chosen point kept as an absolute instant so newer data
+      does not slide it (the newest stop still follows the feed)
+- [x] `analyse()` sends `lookback_minutes` + `as_of`; the coverage detail block
+      reports the point in time; the calendar hint names the new controls
+
+### Verification
+- [x] `pytest` - 307 passed
+- [x] `tests/test_config.py`: the 8 h default, the timeline+lookback sum, the
+      clamp of the ceiling to the window, the new knobs' defaults and overrides
+- [x] `tests/test_status.py`: the probe publishes the control values; a shorter
+      window lowers the lookback ceiling
+- [x] `tests/test_service.py`: a point ends the window there, a future point is
+      clamped, an old point leaves nothing, a bad point is refused, a point in
+      time costs no second KQL read
+- [x] `tests/test_analytics_api.py`: `as_of` reaches the read and is echoed in
+      `meta`; omitting it analyses the newest rows; a point with nothing behind
+      it is a `502` naming the point
+- [x] `tests/test_maintenance.py`: the dashboard serves the slider and the
+      lookback select (and no duration select), the header says "Last update",
+      and every id `app.js` reads exists in `index.html`
+- [x] Live check against the warehouse: earliest timeline point (4 h back) with a
+      240-minute lookback returns rows from the 8 h cache; a point beyond it is a
+      `502`; the freshness strip still describes the loaded window
+
+**Notes:**
+- The strip's "Latest tick" is unchanged on purpose: the header badge is about
+  the feed, the strip is about the window on screen.
+
+---
 
 ### Backend
 - [x] `app/refresh.py`: `seconds_until_next_slot()` - the cycle now sleeps until the

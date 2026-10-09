@@ -91,8 +91,16 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "cache_connected": st.cache_connected,
         "cache_error": st.cache_error,
         # The fixed window the cache holds. The UI may narrow it, never widen
-        # it, so it is published as the ceiling for the duration control.
+        # it, so it is published as the ceiling for the lookback control.
         "lookback_minutes": st.lookback_minutes or s.cache_lookback_minutes,
+        # The point-in-time controls, published rather than hard-coded so a
+        # shorter cache window or a different grid reaches the UI unchanged:
+        # a `timeline_minutes` long timeline in `timeline_step_minutes` steps,
+        # and the lookback choices offered at each of its points.
+        "timeline_minutes": st.timeline_minutes,
+        "timeline_step_minutes": st.timeline_step_minutes,
+        "lookback_min_minutes": st.lookback_min_minutes,
+        "lookback_max_minutes": st.lookback_max_minutes,
         "cache_ttl_seconds": s.cache_ttl_seconds,
         # The cycle that keeps that window current: how often it runs, when it
         # last finished and how many symbols it replaced.
@@ -161,16 +169,25 @@ def analytics_report(
         None, ge=1,
         description="How much of the cached window to analyse; clamped to it.",
     ),
+    as_of: str | None = Query(
+        None,
+        description=(
+            "Point in time to end at, ISO 8601. Omitted - or ahead of the data - "
+            "means up to the newest row; anything older re-anchors the lookback "
+            "on that point instead."
+        ),
+    ),
 ) -> dict:
     """Full analytics bundle for one symbol, from the cached window.
 
-    The duration is clamped rather than rejected: the cache holds a fixed
-    window, so asking for more returns everything there is. That keeps a
-    bookmarked URL or a stale tab working instead of returning a 422.
+    Both the point in time and the duration are clamped rather than rejected:
+    the cache holds a fixed window, so asking for more than it has returns
+    everything there is. That keeps a bookmarked URL or a stale tab working
+    instead of returning a 422.
     """
     requested = service.clamp_lookback(lookback_minutes)
     try:
-        frame = service.load_ticks_cached(symbol, limit, requested)
+        frame = service.load_ticks_cached(symbol, limit, requested, end_time=as_of)
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -193,6 +210,9 @@ def analytics_report(
         "rows_analysed": int(len(frame)),
         "lookback_minutes": requested,
         "latest_tick": latest_tick,
+        # The point in time the window was anchored on, echoed so the UI can
+        # confirm which point a report belongs to after the fact.
+        "as_of": as_of,
         "generated_at": pd.Timestamp.utcnow().isoformat(),
     }
     report["meta"] = meta

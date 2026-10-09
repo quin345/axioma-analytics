@@ -9,6 +9,7 @@ these routes serve files and never touch the warehouse.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -135,3 +136,47 @@ def test_the_outage_page_is_retained_for_future_use(client):
     r = client.get("/unavailable")
     assert r.status_code == 200
     assert "Temporarily unavailable" in r.text
+
+
+# ----------------------------------------------------------------------
+# The point-in-time controls
+# ----------------------------------------------------------------------
+
+def test_the_dashboard_replaces_the_duration_picker(client):
+    """A four-hour timeline in five-minute steps, plus a lookback from 5 to 240
+    minutes at whichever point is chosen."""
+    r = client.get("/dashboard")
+
+    assert r.status_code == 200
+    # The timeline: a range, not a dropdown - 49 five-minute stops.
+    assert 'id="asOf"' in r.text and 'type="range"' in r.text
+    assert 'min="0" max="240" step="5"' in r.text
+    assert 'id="asOfOut"' in r.text
+    # The lookback at that point, filled from the API.
+    assert 'id="lookback"' in r.text
+    assert 'id="duration"' not in r.text
+
+
+def test_the_header_says_last_update_not_latest_tick(client):
+    """The badge beside "Connected" is about the feed, not the loaded window,
+    so it is scoped to the header: the freshness strip below keeps its own
+    "Latest tick" label, which describes the window on screen."""
+    header = client.get("/dashboard").text.partition('<div id="banner"')[0]
+
+    assert 'id="lastTick"' in header and "Last update" in header
+    assert "Latest tick" not in header
+    # The alignment is stated in the tooltip, so it is not a surprise.
+    assert "30-minute refresh step" in header
+
+
+def test_every_control_the_script_reads_exists_in_the_page():
+    """index.html and app.js are two separately cached files; a newer script
+    against an older page leaves it reading controls that are not there. Both
+    sides of every binding are pinned here."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    referenced = {m.group(1) for m in re.finditer(r'(?:\$|val|on)\("([^"]+)"', js)}
+    assert referenced, "no element references found in app.js"
+    missing = [i for i in referenced if f'id="{i}"' not in html]
+    assert missing == [], f"app.js reads controls index.html does not define: {missing}"

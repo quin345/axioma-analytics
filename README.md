@@ -64,12 +64,22 @@ instrument catalogue under one key and each symbol's ticks as a Parquet blob
 under its own. A cache miss (or a Redis outage) reads KQL and repopulates;
 a KQL failure is what sets `connected: false`, never a cache failure.
 
-The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 4 by default).
-`/api/health` publishes it as `lookback_minutes`, the dashboard's *Duration*
-control is built from it, and `/api/analytics` clamps every request to it —
-asking for more returns the whole window instead of a `422`, so a bookmarked
-URL or a stale tab keeps working. A client can therefore narrow the window,
-never widen it, and never trigger a second KQL read.
+The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 8 by default).
+`/api/health` publishes it as `lookback_minutes`, and `/api/analytics` clamps
+every request to it — asking for more returns the whole window instead of a
+`422`, so a bookmarked URL or a stale tab keeps working. A client can therefore
+narrow the window, never widen it, and never trigger a second KQL read.
+
+Eight hours is what the dashboard's point-in-time controls need. The *Point in
+time* slider spans four hours (`TIMELINE_MINUTES`) in five-minute steps
+(`TIMELINE_STEP_MINUTES`), and at each point on it a lookback of 5 to 240
+minutes (`LOOKBACK_MIN_MINUTES` / `LOOKBACK_MAX_MINUTES`) may be chosen. The
+earliest point taken back by the widest lookback therefore reaches exactly
+4 h + 4 h, so every combination the controls offer is served from the cache.
+`/api/health` publishes all four values and the lookback ceiling is capped by
+the window, so a shorter cache narrows the control instead of offering history
+it cannot fill. Moving along the timeline or changing the lookback is a free,
+in-memory narrowing of the cached copy — same as the duration was before.
 
 ### Keeping the window current
 
@@ -89,14 +99,16 @@ Each cycle slides rather than re-reads:
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
   are dropped, which on a 30-minute cycle is exactly the earliest half hour.
 
-A cache entry therefore never holds more than four hours of a symbol, and the
+A cache entry therefore never holds more than eight hours of a symbol, and the
 KQL read per cycle covers only the interval, not the whole window. The purge is
 anchored on the newest row rather than the wall clock, so a stalled feed keeps
 its data while no ticks arrive.
 
 | Piece | Value | Why |
 |---|---|---|
-| Window | `CACHE_LOOKBACK_HOURS="4"` | Each symbol's cache entry holds at most four hours; the UI may narrow it. |
+| Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute lookback. |
+| Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* slider: four hours in five-minute steps. |
+| Lookback | `LOOKBACK_MIN_MINUTES="5"`, `LOOKBACK_MAX_MINUTES="240"` | The history offered at each point. The ceiling is capped by the window. |
 | Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
 | TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 
@@ -521,7 +533,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `lookback_min_minutes`, `lookback_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
@@ -534,9 +546,23 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 `summary`; omitting `asset_class` returns everything.
 
 `/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
-`lookback_minutes`. `lookback_minutes` is clamped to the cache's fixed window
-(`lookback_minutes` in `/api/health`), never rejected. Its `meta` block echoes
-the request's window and the symbol's `asset_class`.
+`lookback_minutes`, `as_of`.
+
+`lookback_minutes` is clamped to the cache's fixed window (`lookback_minutes` in
+`/api/health`), never rejected. `as_of` is the point in time the window ends at
+(ISO 8601); omitted — or ahead of the newest row — means "up to the newest row",
+and anything older re-anchors the lookback on that point. A point with nothing
+behind it inside the window is a `502` naming the point, not a report built from
+rows nobody asked for.
+
+Its `meta` block echoes the request's `as_of`, `lookback_minutes` and
+`latest_tick` (the newest tick in the slice actually returned) alongside the
+symbol's `asset_class`.
+
+```bash
+# The last hour, ending two hours ago.
+curl -s 'localhost:8000/api/analytics?symbol=41&lookback_minutes=60&as_of=2026-10-09T02:20:00Z'
+```
 
 ---
 
