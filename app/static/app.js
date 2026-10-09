@@ -113,6 +113,22 @@ function val(id, fallback = "") {
   return el ? el.value : fallback;
 }
 
+/**
+ * Set an element's text, optionally its class.
+ *
+ * Only touch className when a class is supplied: assigning unconditionally
+ * would strip the styling classes the markup already carries. Top-level so both
+ * loadHealth() (the cadence strip) and renderFreshness() can use it - as a
+ * local inside renderFreshness it was out of scope for loadHealth, which threw
+ * "set is not defined" and surfaced as a Connection problem banner.
+ */
+function set(id, text, cls) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  if (cls) el.className = cls;
+}
+
 function hideBanner() {
   const el = $("banner");
   el.className = "banner";   // reset any state classes (and clear inline border colour)
@@ -515,14 +531,7 @@ function renderFreshness(report) {
   const ageMs = feed ? Date.now() - new Date(feed).getTime() : null;
   const ageText = age(ageMs);
 
-  // Only touch className when a class is supplied: assigning unconditionally
-  // would strip the styling classes the markup already carries.
-  const set = (id, text, cls) => {
-    const el = $(id);
-    if (!el) return;
-    el.textContent = text;
-    if (cls) el.className = cls;
-  };
+  // Only touch className when a class is supplied (see set() above).
   set("lastTick",
       feed ? `Last update ${fmt.hm(feed)} UTC` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
