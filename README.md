@@ -64,12 +64,22 @@ instrument catalogue under one key and each symbol's ticks as a Parquet blob
 under its own. A cache miss (or a Redis outage) reads KQL and repopulates;
 a KQL failure is what sets `connected: false`, never a cache failure.
 
-The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 4 by default).
-`/api/health` publishes it as `lookback_minutes`, the dashboard's *Duration*
-control is built from it, and `/api/analytics` clamps every request to it —
-asking for more returns the whole window instead of a `422`, so a bookmarked
-URL or a stale tab keeps working. A client can therefore narrow the window,
-never widen it, and never trigger a second KQL read.
+The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 8 by default).
+`/api/health` publishes it as `lookback_minutes`, and `/api/analytics` clamps
+every request to it — asking for more returns the whole window instead of a
+`422`, so a bookmarked URL or a stale tab keeps working. A client can therefore
+narrow the window, never widen it, and never trigger a second KQL read.
+
+Eight hours is what the dashboard's point-in-time controls need. The *Point in
+time* field spans four hours (`TIMELINE_MINUTES`) in five-minute steps
+(`TIMELINE_STEP_MINUTES`), and at each point on it an aggregate *Window* of 5
+to 240 minutes (`WINDOW_MIN_MINUTES` / `WINDOW_MAX_MINUTES`) may be chosen. The
+earliest point taken back by the widest window therefore reaches exactly
+4 h + 4 h, so every combination the controls offer is served from the cache.
+`/api/health` publishes all four values and the window ceiling is capped by
+the cache, so a shorter cache narrows the control instead of offering history
+it cannot fill. Moving the point in time or changing the window is a free,
+in-memory narrowing of the cached copy.
 
 ### Keeping the window current
 
@@ -89,14 +99,16 @@ Each cycle slides rather than re-reads:
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
   are dropped, which on a 30-minute cycle is exactly the earliest half hour.
 
-A cache entry therefore never holds more than four hours of a symbol, and the
+A cache entry therefore never holds more than eight hours of a symbol, and the
 KQL read per cycle covers only the interval, not the whole window. The purge is
 anchored on the newest row rather than the wall clock, so a stalled feed keeps
 its data while no ticks arrive.
 
 | Piece | Value | Why |
 |---|---|---|
-| Window | `CACHE_LOOKBACK_HOURS="4"` | Each symbol's cache entry holds at most four hours; the UI may narrow it. |
+| Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute aggregate window. |
+| Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
+| Window | `WINDOW_MIN_MINUTES="5"`, `WINDOW_MAX_MINUTES="240"` | The aggregate window offered at each point in time. The ceiling is capped by the cache. |
 | Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
 | TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 
@@ -291,6 +303,13 @@ It redirects HTTP to HTTPS (with the ACME challenge path carved out so
 | `/static/` | Short `expires`, so unversioned filenames still revalidate. |
 | `/` | Dashboard and everything else. |
 
+The bare-domain and `www` blocks are front doors, not sites of their own:
+their `/` proxies to the app's `/welcome` (the explainer), `/static/` proxies
+for the brand assets, and every other path 301s to
+`https://app.axiomanalytics.info`. Port 80 for those hosts 301s to the same
+host over TLS (`https://$host$request_uri`), so neither front door funnels
+visitors through `app`.
+
 `client_max_body_size` is raised to 8 MB because analytics payloads run past
 nginx's 1 MB default.
 
@@ -303,7 +322,9 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
 curl -sk https://app.axiomanalytics.info/api/health            # through nginx
-curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page
+curl -s https://app.axiomanalytics.info/ | grep -c 'id="banner"'   # dashboard at the root
+curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page (www)
+curl -s https://axiomanalytics.info/  | grep -c "What it measures"  # front page (bare)
 ```
 
 `connected: true` with a non-zero `row_count` means the full path works: rows
@@ -328,8 +349,9 @@ The certificate must cover **three** names — `axiomanalytics.info`,
 `app.axiomanalytics.info` and `www.axiomanalytics.info`. `app` and `www` are
 CNAMEs to the bare domain in DNS.
 
-`www` is the **front door**: it serves the explainer page (see *Front page*).
-It is only reachable over TLS once the name resolves **and** is on the
+`www` and the bare domain are the **front doors**: they serve the explainer
+page (see *Front page*).
+They are only reachable over TLS once the name resolves **and** is on the
 certificate, so the two steps are ordered:
 
 1. **DNS first.** Add the `www` record at the registrar — see *Pointing `www`
@@ -347,9 +369,10 @@ Do not run `--expand` before the DNS record exists: the challenge fails, and a
 failed expansion can leave the already-working names pointing at the old
 certificate line.
 
-The `www` server block now serves the explainer at `/` (proxied to the app's
-`/welcome`), proxies `/static/` for the brand assets, and 301s every other path
-to `https://app.axiomanalytics.info` — `www` is not a site of its own.
+The `www` and bare-domain server blocks both serve the explainer at `/`
+(proxied to the app's `/welcome`), proxy `/static/` for the brand assets, and
+301 every other path to `https://app.axiomanalytics.info` — neither is a site
+of its own.
 
 `Strict-Transport-Security: max-age=31536000` is set on the HTTPS servers
 without `includeSubDomains` or `preload`. Those directives would apply to every
@@ -367,33 +390,25 @@ links into the dashboard on `app.axiomanalytics.info`.
 Like the holding page it is **self-contained** — inline styles, no dependency on
 `styles.css`, `app.js` or the analytics API — so it renders even while the
 dashboard is in maintenance mode. It is served at its own path rather than `/`,
-so it can be previewed directly. While the app is under development, `/` serves
-the development notice; the dashboard itself is not served from `main` at all
-(it lives on `dev`).
+so it can be previewed directly. nginx gives both front-door hosts their own
+root: `www.axiomanalytics.info/` and `axiomanalytics.info/` proxy to
+`/welcome`, while `app.axiomanalytics.info/` is the dashboard itself.
 
-### The main page while under development
+### The main page
 
-`/` is the only place either state page appears:
-
-* under development (the default) it serves `app/static/unavailable.html` — a
-  self-contained "under development" notice with gear artwork that also pitches
-  the service (two clickable cards linking on to `/welcome`; no `/docs` or
-  `/dashboard` links on `main` — those live on `dev`), and
-* with `MAINTENANCE_MODE=1` it serves `app/static/maintenance.html` with a 503,
-  so proxies and uptime checks do not cache an outage as healthy.
-
-Both files are refused everywhere else: `/dashboard` and `/unavailable` do not
-exist on this branch, and the static mount returns 404 for
-`unavailable.html`, `maintenance.html` and the dashboard's own files
-(`index.html`, `app.js`, `styles.css`) — a visitor can never open a state page
-out of context. The dashboard is served from `dev` only. When the build is
-finished, restoring the dashboard route in `app/main.py` brings it back to `/`.
+`/` serves the dashboard (`app/static/index.html`) — the build notice that
+held the root while the app was being rebuilt is no longer served; the asset
+(`unavailable.html`) is retained. `/dashboard` answers the same file so links
+and bookmarks formed during the build still resolve, and the branded outage
+page (`app/static/maintenance.html`) stays at `/unavailable`.
+`MAINTENANCE_MODE=1` serves *that* page from `/` with a 503.
 
 ### Pointing `www` at the server (GoDaddy)
 
 DNS for `axiomanalytics.info` is managed at GoDaddy
-(`ns31.domaincontrol.com` / `ns32.domaincontrol.com`). `www` currently has no
-record at all, so nothing resolves for it. Add one:
+(`ns31.domaincontrol.com` / `ns32.domaincontrol.com`). `www` resolves through
+a `CNAME` to the bare domain (`app` likewise). If `www` ever loses its record,
+re-add one:
 
 1. Sign in to GoDaddy → **My Products** → `axiomanalytics.info` → **DNS**
    (or *Manage DNS*).
@@ -424,8 +439,9 @@ sudo systemctl reload nginx
 5. Verify:
 
 ```bash
-curl -sI https://www.axiomanalytics.info/ | head -1          # HTTP/2 200
+curl -s -o /dev/null -w '%{http_code}\n' https://www.axiomanalytics.info/  # 200
 curl -s  https://www.axiomanalytics.info/ | grep -c "What it measures"
+curl -s  https://axiomanalytics.info/     | grep -c "What it measures"
 ```
 
 GoDaddy forwarding must stay **off** for `www`: an enabled *Forwarding* rule
@@ -528,24 +544,36 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `lookback_minutes` window, the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
-| `GET /` | State page: the development notice (`unavailable.html`, 200) by default, the outage page (`maintenance.html`, 503) under `MAINTENANCE_MODE=1` — the only routes to either |
+| `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
+| `GET /dashboard` | The dashboard itself, retained at its own path |
+| `GET /unavailable` | The branded outage page, retained for future maintenance windows |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
-
-The dashboard is served from `dev` only: `main` has no `/dashboard` route, and
-its static files (`index.html`, `app.js`, `styles.css`) return 404, as do
-`unavailable.html` and `maintenance.html` under `/static/`.
 
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
 `summary`; omitting `asset_class` returns everything.
 
 `/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
-`lookback_minutes`. `lookback_minutes` is clamped to the cache's fixed window
-(`lookback_minutes` in `/api/health`), never rejected. Its `meta` block echoes
-the request's window and the symbol's `asset_class`.
+`window_minutes`, `lookback_minutes` (deprecated alias), `as_of`.
+
+`window_minutes` is clamped to the cache's fixed window (`lookback_minutes` in
+`/api/health`), never rejected. `as_of` is the point in time the window ends at
+(ISO 8601); omitted — or ahead of the newest row — means "up to the newest row",
+and anything older re-anchors the window on that point. A point with nothing
+behind it inside the window is a `502` naming the point, not a report built from
+rows nobody asked for.
+
+Its `meta` block echoes the request's `as_of`, `window_minutes` and
+`latest_tick` (the newest tick in the slice actually returned) alongside the
+symbol's `asset_class`.
+
+```bash
+# The last hour, ending two hours ago.
+curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-09T02:20:00Z'
+```
 
 ---
 
@@ -589,8 +617,8 @@ the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest half hour, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
-the development notice at `/` plus the refused entry points (`/dashboard`,
-`/unavailable`, and the state pages' and dashboard's files under `/static/`),
+the pages and routes around them (`/` serving the dashboard, the retained
+`/dashboard` alias, `/unavailable` and `/welcome`),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, drawdown sign, strict JSON serialisability, and a degenerate

@@ -90,8 +90,19 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "hints": hints,
         "cache_connected": st.cache_connected,
         "cache_error": st.cache_error,
-        # The fixed window the cache holds. The UI may narrow it, never widen
-        # it, so it is published as the ceiling for the duration control.
+        # The point-in-time controls, published rather than hard-coded so a
+        # shorter cache window or a different grid reaches the UI unchanged:
+        # a `timeline_minutes` long timeline in `timeline_step_minutes` steps,
+        # and the aggregate window offered at each of its points.
+        "timeline_minutes": st.timeline_minutes,
+        "timeline_step_minutes": st.timeline_step_minutes,
+        "window_min_minutes": st.window_min_minutes,
+        "window_max_minutes": st.window_max_minutes,
+        # The aggregate window the analysis runs over, bounded by what Redis
+        # holds.
+        "window_minutes": st.window_minutes or s.cache_lookback_minutes,
+        # The raw cache window for anyone who needs it (refresh scripts, the
+        # badge tooltip); the UI never asks for this much history.
         "lookback_minutes": st.lookback_minutes or s.cache_lookback_minutes,
         "cache_ttl_seconds": s.cache_ttl_seconds,
         # The cycle that keeps that window current: how often it runs, when it
@@ -157,20 +168,34 @@ def analytics_report(
     window: int = Query(50, ge=2, le=5000),
     bins: int = Query(60, ge=10, le=300),
     limit: int = Query(50_000, ge=100, le=500_000),
+    window_minutes: int | None = Query(
+        None, ge=1,
+        description="How many minutes the aggregate window runs for, ending at the chosen point in time; clamped to the cached window.",
+    ),
     lookback_minutes: int | None = Query(
         None, ge=1,
-        description="How much of the cached window to analyse; clamped to it.",
+        description="Deprecated alias for `window_minutes`; kept so bookmarked URLs keep working.",
+    ),
+    as_of: str | None = Query(
+        None,
+        description=(
+            "Point in time to end at, ISO 8601. Omitted - or ahead of the data - "
+            "means up to the newest row; anything older re-anchors the window "
+            "on that point instead."
+        ),
     ),
 ) -> dict:
     """Full analytics bundle for one symbol, from the cached window.
 
-    The duration is clamped rather than rejected: the cache holds a fixed
-    window, so asking for more returns everything there is. That keeps a
-    bookmarked URL or a stale tab working instead of returning a 422.
+    Both the point in time and the aggregate window are clamped rather than
+    rejected: the cache holds a fixed window, so asking for more than it has
+    returns everything there is. That keeps a bookmarked URL or a stale tab
+    working instead of returning a 422.
     """
-    requested = service.clamp_lookback(lookback_minutes)
+    selection = window_minutes if window_minutes is not None else lookback_minutes
+    requested = service.clamp_window(selection)
     try:
-        frame = service.load_ticks_cached(symbol, limit, requested)
+        frame = service.load_ticks_cached(symbol, limit, requested, end_time=as_of)
     except DataSourceError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -191,12 +216,45 @@ def analytics_report(
         "asset_class_label": CLASS_LABELS.get(inst.asset_class, "Unclassified") if inst else None,
         "family": inst.family if inst else None,
         "rows_analysed": int(len(frame)),
-        "lookback_minutes": requested,
+        "window_minutes": requested,
         "latest_tick": latest_tick,
+        # The point in time the window was anchored on, echoed so the UI can
+        # confirm which point a report belongs to after the fact.
+        "as_of": as_of,
         "generated_at": pd.Timestamp.utcnow().isoformat(),
     }
     report["meta"] = meta
     return report
+
+
+@app.get("/unavailable")
+def unavailable() -> Any:
+    """The branded "temporarily unavailable" holding page, always reachable.
+
+    Served at its own path so it can be previewed (and linked to) while the
+    dashboard is still up; `/` only swaps to it when MAINTENANCE_MODE is on.
+    It is kept for future outage windows even though the main page now shows
+    the development notice - a real outage and a planned build are different
+    messages, and this is the one for outages.
+    """
+    return FileResponse(
+        STATIC_DIR / "maintenance.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.get("/dashboard")
+def dashboard() -> Any:
+    """The dashboard itself, retained at its own path.
+
+    `/` serves this page now (the build notice held the root while the app was
+    being rebuilt and is gone), but the path is kept so links and bookmarks
+    formed during that period still resolve. It is the same file as `/`.
+    """
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
 
 
 @app.get("/welcome")
@@ -217,15 +275,15 @@ def welcome() -> Any:
 
 @app.get("/")
 def index() -> Any:
-    """The main page: the development notice, or the outage page in maintenance.
+    """The dashboard, or the outage page while maintenance mode is on.
 
-    This is the only place either state page is shown. Under development (the
-    default) it serves `unavailable.html` - "under development", with the gear
-    artwork - with a 200; MAINTENANCE_MODE swaps in `maintenance.html` with a
-    503 rather than 200, so proxies and uptime checks do not cache the outage
-    as healthy. The dashboard is not served from this branch at all (it lives
-    on `dev`), and the static mount refuses these files directly, so a visitor
-    can never open a state page out of context.
+    The dashboard is the main page at last: `app.axiomanalytics.info/` serves
+    it directly (`/dashboard` is only a retained alias). The bare domain and
+    `www` are front doors of their own - nginx routes their roots to
+    `/welcome`, the explainer - so this route never has to guess which page a
+    hostname came for. MAINTENANCE_MODE keeps its original meaning: a real
+    outage serves `maintenance.html` with a 503 rather than 200, so proxies and
+    uptime checks do not cache the outage as healthy.
     """
     if get_settings().maintenance:
         return FileResponse(
@@ -234,7 +292,7 @@ def index() -> Any:
             headers={"Cache-Control": "no-cache, must-revalidate"},
         )
     return FileResponse(
-        STATIC_DIR / "unavailable.html",
+        STATIC_DIR / "index.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
@@ -246,31 +304,7 @@ if STATIC_DIR.exists():
     # both on every load keeps the pair consistent; ETag/Last-Modified still
     # make the common case a cheap 304.
     class RevalidatingStatic(StaticFiles):
-        """Static files that must be revalidated on every request.
-
-        A handful of files are refused outright (404) as well:
-
-        * `unavailable.html` and `maintenance.html` are state pages that belong
-          to `/` alone - it picks the one matching the server's real state, and
-          opened raw either one claims a condition that may not hold, and
-        * `index.html`, `app.js` and `styles.css` are the dashboard, which is
-          served from the `dev` branch only. The files stay in the repository
-          so the branches keep merging; nothing on this branch hands them out.
-        """
-
-        _BLOCKED = frozenset({
-            "unavailable.html",
-            "maintenance.html",
-            "index.html",
-            "app.js",
-            "styles.css",
-        })
-
-        def lookup_path(self, path: str):
-            # Basename match, so "./unavailable.html" is refused as well.
-            if path.split("/")[-1] in self._BLOCKED:
-                return "", None
-            return super().lookup_path(path)
+        """Static files that must be revalidated on every request."""
 
         def file_response(self, *args, **kwargs):
             resp = super().file_response(*args, **kwargs)

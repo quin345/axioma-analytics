@@ -8,6 +8,99 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-09 - Point-in-time field, aggregate window, 8 h cache, descending ladder (dev)
+
+### Backend
+- [x] `app/config.py`: `CACHE_LOOKBACK_HOURS` default 4 -> **8** - a 4-hour
+      point-in-time timeline plus the widest 240-minute aggregate window from
+      its earliest point is exactly 8 h, so every combination the controls offer
+      is inside the cache (`test_the_window_covers_the_timeline_and_its_widest_window`)
+- [x] `app/config.py`: new `TIMELINE_MINUTES` (240), `TIMELINE_STEP_MINUTES` (5),
+      `WINDOW_MIN_MINUTES` (5), `WINDOW_MAX_MINUTES` (240) and a
+      `max_window_minutes` property that caps the window ceiling at the cache,
+      so a shorter cache narrows the control instead of promising history it
+      cannot serve
+- [x] `app/service.py`: `clamp_lookback` -> `clamp_window`; `_narrow`,
+      `load_ticks`, `load_ticks_cached` take `end_time` (the slice *ends* at the
+      chosen point; a future point clamps to the newest row, an old one leaves
+      nothing, an unparseable one raises rather than silently re-anchoring);
+      the empty-window error names the point; the refresh summary's window is
+      now `cache_window_minutes` so it cannot be confused with the aggregate one
+- [x] `app/main.py`: `/api/analytics` takes `window_minutes` (with
+      `lookback_minutes` kept as a deprecated alias) and `as_of`, and echoes
+      both in `meta`; `/api/health` publishes `window_minutes`,
+      `window_min_minutes`, `window_max_minutes` alongside `lookback_minutes`
+- [x] `app/analytics.py`: `volume_profile` hands `bins` and `high_volume_nodes`
+      over in **descending price order** (highest first, matching how the ladder
+      reads top-to-bottom); point-of-control and value area are still computed
+      on the ascending order where adjacency means anything
+- [x] `.env` / `.env.example`: window raised to 8, new timeline/window knobs
+      documented
+
+### UI
+- [x] Header badge: "Latest tick ..." -> "**Last update ...**", floored to the
+      30-minute refresh step and read from the feed's newest row, so it no
+      longer moves with the point in time on screen
+- [x] Cadence strip: "Data refreshes every **30** minutes", mirrored from
+      `cache_refresh_minutes` (was a hard-coded 45), and the badge tooltip names
+      the window and cache state
+- [x] "Next refresh" now lands on the **clock grid** (`nextRefresh(interval)`
+      returns the next :00/:30 mark strictly after now, mirroring the server's
+      wall-clock slot scheduling) instead of "newest tick + 45 minutes"
+- [x] The point-in-time slider is now a **time field** (`<input type="time"
+      step="300">`): type a HH:MM on the 5-minute grid inside the 4-hour window;
+      it snaps to the step, clamps to the window (a slot past the newest stop
+      was typed yesterday, one before the oldest tomorrow) and shows the chosen
+      time, how far back it sits, and the window it ranges inside
+- [x] "Lookback" -> "**Window**" (`#windowMinutes`): the aggregate window
+      ending at the chosen point, 5-240 minutes, built from `/api/health`;
+      `analyse()` sends `window_minutes`, the coverage detail and the calendar
+      hint use the new wording
+- [x] Volume-at-price: price levels run top-to-bottom from the highest price
+
+### Verification
+- [x] `pytest` - 314 passed
+- [x] `tests/test_config.py`: the 8 h default, the timeline+window sum, the
+      clamp of the ceiling to the cache, the new knobs' defaults and overrides
+- [x] `tests/test_status.py`: the probe publishes the control values; a shorter
+      cache lowers the window ceiling
+- [x] `tests/test_service.py`: a point ends the window there, a future point is
+      clamped, an old point leaves nothing, a bad point is refused, a point in
+      time costs no second KQL read
+- [x] `tests/test_analytics_api.py`: `window_minutes` reaches the read and is
+      echoed in `meta`; the deprecated `lookback_minutes` alias still selects a
+      window and loses to `window_minutes`; a point with nothing behind it is a
+      `502` naming the point
+- [x] `tests/test_analytics.py`: volume-profile bins and nodes run descending,
+      value area survives the inversion
+- [x] `tests/test_maintenance.py`: the dashboard serves the time field and the
+      window select (and no duration/lookback/range control), the header says
+      "Last update", the cadence strip says 30 minutes, and every id `app.js`
+      reads exists in `index.html`
+- [x] `tests/test_maintenance.py`: two script-sanity checks - every helper
+      `app.js` calls is declared in `app.js`, and no function is declared
+      twice - so this class of rename damage (a call site left pointing at a
+      deleted helper, or two declarations shadowing each other) fails the
+      suite instead of silently emptying the dashboard's selects
+- [x] Live check against the warehouse: `window_minutes` + `as_of` return the
+      expected slice, the deprecated alias works, and the 60 volume-at-price
+      bins come back highest-price-first
+
+**Notes:**
+- The lookback-to-window rename initially captured `fillTimeframes` as a
+  second `fillWindows`: `init()` still awaited the deleted name (the TypeError
+  was swallowed, leaving the symbol/timeframe/window selects empty) and the
+  timeframe picker lost its filler. `fillTimeframes` is restored, the stray
+  duplicate is gone, and both failure modes are pinned by the script-sanity
+  tests above - `node --check` alone cannot see either.
+- The strip's "Latest tick" is unchanged on purpose: the header badge is about
+  the feed, the strip is about the window on screen.
+- `lookback_minutes` stays in `/api/health` as the raw cache window (the badge
+  tooltip reads it) while `window_minutes` is the aggregate window the analysis
+  runs over; they happen to share a value but mean different things.
+
+---
+
 ## 2026-10-08 - Clock-slot refresh, sliding 4-hour window, development page (dev)
 
 ### Backend
@@ -33,16 +126,13 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 ### Pages
 - [x] `app/static/unavailable.html`: new self-contained "under development"
       notice - brand header/footer, animated gear artwork (two counter-rotating
-      gradient gears), amber status pill; on `main` two clickable service cards
-      (analytics, data freshness) link only to `/welcome` - the API-docs and
-      dashboard links live on `dev`; "Check again" removed
-- [x] `app/main.py`: `/` is the only route to either state page - the
-      development notice (200) by default, `maintenance.html` with 503 under
-      `MAINTENANCE_MODE=1`; `/dashboard` and `/unavailable` routes removed and
-      the static mount 404s `unavailable.html`, `maintenance.html`,
-      `index.html`, `app.js`, `styles.css` (dashboard dev-only, state pages
-      never raw); `landing.html`/`welcome` untouched
-- [x] `app/static/maintenance.html` untouched - served from `/` in maintenance
+      gradient gears), amber status pill; three clickable service cards
+      (analytics, data freshness, API) linking to `/welcome` and `/docs`;
+      "Check again" removed
+- [x] `app/main.py`: `/` serves the development notice (200);
+      `MAINTENANCE_MODE=1` still serves `maintenance.html` from `/` with 503;
+      `/unavailable` retained; dashboard retained at `/dashboard`
+- [x] `app/static/maintenance.html` untouched - kept for future outage windows
 
 ### Verification
 - [x] `pytest` - 285 passed

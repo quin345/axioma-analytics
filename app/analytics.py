@@ -323,11 +323,17 @@ def volume_profile(df: pd.DataFrame, *, bins: int = 60) -> dict:
                 lo_i -= 1; acc += down
         va_lo, va_hi = _f(labels[lo_i]), _f(labels[hi_i])
 
+    # The ladder reads top-to-bottom from the highest price, so the bins are
+    # returned in descending price order. Point-of-control, value area and the
+    # high-volume nodes are computed on the ascending order where adjacency
+    # means anything, then the bins are handed over inverted.
     return {
-        "bins": profile,
+        "bins": list(reversed(profile)),
         "poc": _f(labels[poc_i]),
         "value_area": [va_lo, va_hi] if va_lo is not None else None,
-        "high_volume_nodes": _high_volume_nodes(profile),
+        "high_volume_nodes": sorted(
+            _high_volume_nodes(profile), key=lambda n: n["price"], reverse=True
+        ),
     }
 
 

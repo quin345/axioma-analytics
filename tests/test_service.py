@@ -61,29 +61,29 @@ def _window(periods: int = 240, freq: str = "1min", symbol: str = "1") -> pd.Dat
 # Clamping: the UI may narrow the window, never widen it
 # ----------------------------------------------------------------------
 
-def test_no_duration_means_the_whole_window():
-    assert service.clamp_lookback(None) == 240
+def test_no_window_means_the_whole_cache():
+    assert service.clamp_window(None) == 240
 
 
-def test_a_narrower_duration_is_kept():
-    assert service.clamp_lookback(30) == 30
+def test_a_narrower_window_is_kept():
+    assert service.clamp_window(30) == 30
 
 
-def test_a_wider_duration_is_clamped_to_the_window():
+def test_a_wider_window_is_clamped_to_the_cache():
     """More history than the cache holds is served with what there is."""
-    assert service.clamp_lookback(1440) == 240
+    assert service.clamp_window(1440) == 240
 
 
-def test_a_duration_of_zero_becomes_one_minute():
-    assert service.clamp_lookback(0) == 1
+def test_a_window_of_zero_becomes_one_minute():
+    assert service.clamp_window(0) == 1
 
 
-def test_a_nonsense_duration_falls_back_to_the_window():
-    assert service.clamp_lookback("banana") == 240
+def test_a_nonsense_window_falls_back_to_the_cache():
+    assert service.clamp_window("banana") == 240
 
 
-def test_the_clamp_honours_a_configured_window():
-    assert service.clamp_lookback(600, Settings(cache_lookback_hours=1)) == 60
+def test_the_clamp_honours_a_configured_cache():
+    assert service.clamp_window(600, Settings(cache_lookback_hours=1)) == 60
 
 
 # ----------------------------------------------------------------------
@@ -102,6 +102,44 @@ def test_narrowing_keeps_the_tail_not_the_head():
 def test_narrowing_of_the_full_window_changes_nothing():
     raw = _window(240)
     assert len(service._narrow(raw, 240, 100000)) == len(raw)
+
+
+# ----------------------------------------------------------------------
+# Point in time: the slice ends where the user chose
+# ----------------------------------------------------------------------
+
+def test_a_point_in_time_ends_the_window_there():
+    """Stepping back along the timeline returns what led up to that moment,
+    not the newest rows."""
+    raw = _window(240)                     # 00:00 - 03:59
+    out = service._narrow(raw, 60, 100000, "2026-10-08T02:59:00Z")
+
+    assert out["timestamp"].max() == pd.Timestamp("2026-10-08T02:59:00", tz="UTC")
+    assert out["timestamp"].min() == pd.Timestamp("2026-10-08T01:59:00", tz="UTC")
+    assert len(out) == 61
+
+
+def test_a_point_ahead_of_the_data_means_up_to_the_newest_row():
+    """The timeline runs up to "now" while the cache runs to the newest row, so
+    a point in the future is clamped rather than returning nothing."""
+    raw = _window(240)
+    out = service._narrow(raw, 60, 100000, "2026-10-08T04:30:00Z")
+
+    assert out["timestamp"].max() == raw["timestamp"].max()
+    assert len(out) == 61
+
+
+def test_a_point_older_than_the_window_leaves_nothing():
+    raw = _window(240)
+    assert service._narrow(raw, 60, 100000, "2026-10-07T23:00:00Z").empty
+
+
+def test_an_unreadable_point_in_time_is_refused():
+    """Silently re-anchoring on the newest row would show a report the user did
+    not ask for, so the request fails loudly instead."""
+    raw = _window(240)
+    with pytest.raises(DataSourceError):
+        service._narrow(raw, 60, 100000, "not a timestamp")
 
 
 def test_the_row_cap_is_applied_to_the_narrowed_tail():
@@ -181,7 +219,7 @@ def kql_rows(monkeypatch) -> dict:
 
 
 def test_a_cold_symbol_reads_kql_once_and_caches_the_full_window(redis, kql_rows):
-    frame = service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    frame = service.load_ticks_cached("1", limit=100000, window_minutes=60)
 
     assert len(frame) == 61
     assert kql_rows["load_raw"] == 1
@@ -194,27 +232,52 @@ def test_a_cold_symbol_reads_kql_once_and_caches_the_full_window(redis, kql_rows
 
 
 def test_a_warm_symbol_is_served_from_redis(redis, kql_rows):
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=240)
+    service.load_ticks_cached("1", limit=100000, window_minutes=240)
     before = kql_rows["load_raw"]
 
-    frame = service.load_ticks_cached("1", limit=100000, lookback_minutes=15)
+    frame = service.load_ticks_cached("1", limit=100000, window_minutes=15)
 
     assert kql_rows["load_raw"] == before      # no second query
     assert len(frame) == 16
 
 
-def test_the_same_window_serves_any_duration(redis, kql_rows):
-    """The point of the fixed window: switching duration is free."""
+def test_the_same_window_serves_any_window(redis, kql_rows):
+    """The point of the fixed window: switching the window is free."""
     for minutes in (5, 30, 120, 240):
-        service.load_ticks_cached("1", limit=100000, lookback_minutes=minutes)
+        service.load_ticks_cached("1", limit=100000, window_minutes=minutes)
 
     assert kql_rows["load_raw"] == 1
 
 
+def test_the_same_window_serves_any_point_in_time(redis, kql_rows):
+    """Moving along the timeline costs nothing either: the cached entry holds
+    the whole window, so a point in time only trims the copy in memory."""
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    before = kql_rows["load_raw"]
+
+    frame = service.load_ticks_cached("1", limit=100000, window_minutes=60,
+                                      end_time="2026-10-08T02:59:00Z")
+
+    assert kql_rows["load_raw"] == before
+    assert frame["ts"].max() == pd.Timestamp("2026-10-08T02:59:00", tz="UTC")
+    assert len(frame) == 61
+
+
+def test_a_point_in_time_with_no_rows_is_a_data_error(redis, kql_rows):
+    """A point older than the window leaves nothing to analyse, and the error
+    names the point so the message is not read as a feed problem."""
+    with pytest.raises(DataSourceError) as exc:
+        service.load_ticks_cached("1", limit=100000, window_minutes=60,
+                                  end_time="2026-10-07T23:00:00Z")
+
+    assert "ending at 2026-10-07T23:00:00Z" in str(exc.value)
+    assert kql_rows["load_raw"] == 1
+
+
 def test_each_symbol_gets_its_own_cache_entry(redis, kql_rows):
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
     kql_rows["frame"] = _window(240, symbol="2")
-    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("2", limit=100000, window_minutes=60)
 
     assert [k for k, _ in redis["written"]] == [
         "axioma:ctrader_dom:agg_dom:ticks:1",
@@ -224,7 +287,7 @@ def test_each_symbol_gets_its_own_cache_entry(redis, kql_rows):
 
 
 def test_a_symbol_less_read_is_cached_under_all(redis, kql_rows):
-    service.load_ticks_cached(None, limit=100000, lookback_minutes=60)
+    service.load_ticks_cached(None, limit=100000, window_minutes=60)
     assert redis["written"][0][0] == "axioma:ctrader_dom:agg_dom:ticks:all"
 
 
@@ -233,7 +296,7 @@ def test_a_cache_outage_still_returns_data(monkeypatch, kql_rows):
     monkeypatch.setattr(service.cache, "get_frame", lambda k, settings=None: None)
     monkeypatch.setattr(service.cache, "set_frame", lambda k, f, ttl, settings=None: False)
 
-    frame = service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    frame = service.load_ticks_cached("1", limit=100000, window_minutes=60)
 
     assert len(frame) == 61
     assert kql_rows["load_raw"] == 1
@@ -243,7 +306,7 @@ def test_an_empty_window_is_reported_as_a_data_error(redis, kql_rows):
     redis["frames"]["axioma:ctrader_dom:agg_dom:ticks:1"] = _window(0)
 
     with pytest.raises(DataSourceError) as exc:
-        service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+        service.load_ticks_cached("1", limit=100000, window_minutes=60)
 
     assert "60 minute" in str(exc.value)
 
@@ -298,15 +361,15 @@ def catalogue(monkeypatch):
 
 def test_cached_symbols_are_listed_from_redis(redis, kql_rows):
     """The refresh set is what is stored, not a memory list that can drift."""
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
-    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    service.load_ticks_cached("2", limit=100000, window_minutes=60)
 
     assert service.cached_symbols() == ["1", "2"]
 
 
 def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
-    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    service.load_ticks_cached("2", limit=100000, window_minutes=60)
     redis["written"].clear()
     before = kql_rows["load_raw"]
 
@@ -319,7 +382,7 @@ def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
     ]
     assert kql_rows["load_raw"] == before + 2
     # A warm symbol is fetched only from its newest cached row - never over
-    # the whole window, and with no lookback re-anchoring.
+    # the whole window, and with no window re-anchoring.
     assert kql_rows["starts"][-2:] == [
         "2026-10-08T03:59:00+00:00", "2026-10-08T03:59:00+00:00",
     ]
@@ -330,7 +393,7 @@ def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
 
 def test_the_cycle_purges_the_earliest_30_minutes(redis, kql_rows, catalogue):
     """The window only ever holds four hours: the oldest slice is dropped."""
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
     redis["written"].clear()
     # The feed advances half an hour: 30 new minutes arrive on top of the 4 h.
     kql_rows["frame"] = _window(270)
@@ -352,7 +415,7 @@ def test_the_cycle_purges_the_earliest_30_minutes(redis, kql_rows, catalogue):
 
 def test_the_slide_keeps_the_newer_copy_of_an_overlapping_row(redis, kql_rows, catalogue):
     """The slice starts at the cached newest row, so it arrives twice."""
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
     kql_rows["frame"] = _window(270)
 
     service.refresh_cache()
@@ -392,7 +455,7 @@ def test_the_slide_purges_anchored_on_the_newest_row():
 
 
 def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
     redis["written"].clear()
 
     summary = service.refresh_cache()
@@ -400,7 +463,7 @@ def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
     assert summary["symbols"] == 1
     assert summary["rows"] == 240
     assert summary["purged"] == 0            # nothing had aged out yet
-    assert summary["window_minutes"] == 240
+    assert summary["cache_window_minutes"] == 240
     assert summary["interval_minutes"] == 30
     assert summary["errors"] == []
     assert summary["finished_at"] >= summary["started_at"]
@@ -431,7 +494,7 @@ def test_the_default_symbol_is_not_warmed_when_it_has_no_ticks(redis, kql_rows, 
 def test_the_cycle_never_refreshes_the_same_symbol_twice(redis, kql_rows, catalogue):
     """The default ticker is already cached here, so it is read once, not twice."""
     catalogue(ticks=24)
-    service.load_ticks_cached("41", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("41", limit=100000, window_minutes=60)
     redis["written"].clear()
 
     service.refresh_cache()
@@ -440,7 +503,7 @@ def test_the_cycle_never_refreshes_the_same_symbol_twice(redis, kql_rows, catalo
 
 
 def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
-    service.load_ticks_cached(None, limit=100000, lookback_minutes=60)
+    service.load_ticks_cached(None, limit=100000, window_minutes=60)
     redis["written"].clear()
 
     service.refresh_cache()
@@ -451,8 +514,8 @@ def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
 
 def test_a_failing_symbol_keeps_its_previous_entry(redis, kql_rows, catalogue):
     """A partial failure must not evict data that is merely older."""
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
-    service.load_ticks_cached("2", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    service.load_ticks_cached("2", limit=100000, window_minutes=60)
     redis["written"].clear()
     kql_rows["fail_on"] = {"2"}
 
@@ -472,7 +535,7 @@ def test_a_failed_catalogue_still_refreshes_the_ticks(monkeypatch, redis, kql_ro
     monkeypatch.setattr(service, "_instruments", None)
     monkeypatch.setattr(service, "instruments", boom)
     monkeypatch.setattr(service, "_last_refresh", None)
-    service.load_ticks_cached("1", limit=100000, lookback_minutes=60)
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
     redis["written"].clear()
 
     summary = service.refresh_cache()

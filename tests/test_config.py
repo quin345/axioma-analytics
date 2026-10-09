@@ -121,16 +121,52 @@ def test_cache_defaults_are_entra_authenticated():
     assert Settings().redis_timeout == 15
 
 
-def test_cache_window_is_fixed_at_four_hours():
+def test_cache_window_is_fixed_at_eight_hours():
+    """Four hours of timeline plus the widest (240 minute) window from its
+    earliest point: 8 h is the smallest window that covers every combination
+    the point-in-time controls offer."""
     s = Settings()
-    assert s.cache_lookback_hours == 4
-    assert s.cache_lookback_minutes == 240
+    assert s.cache_lookback_hours == 8
+    assert s.cache_lookback_minutes == 480
+
+
+def test_the_window_covers_the_timeline_and_its_widest_window():
+    """The point of the 8-hour window: the oldest selectable moment, taken back
+    by the widest selectable window, must still land inside the cache."""
+    s = Settings()
+    assert s.timeline_minutes + s.window_max_minutes == s.cache_lookback_minutes
+    assert s.max_window_minutes <= s.cache_lookback_minutes
 
 
 def test_cache_window_is_overridable(monkeypatch):
-    monkeypatch.setenv("CACHE_LOOKBACK_HOURS", "8")
+    monkeypatch.setenv("CACHE_LOOKBACK_HOURS", "4")
     s = Settings()
-    assert (s.cache_lookback_hours, s.cache_lookback_minutes) == (8, 480)
+    assert (s.cache_lookback_hours, s.cache_lookback_minutes) == (4, 240)
+
+
+def test_the_widest_window_is_clamped_to_the_cache(monkeypatch):
+    """A shorter cache window narrows the window control, it does not offer
+    history the cache cannot serve."""
+    s = Settings(cache_lookback_hours=1)
+    assert s.max_window_minutes == 60
+    assert s.max_window_minutes == s.cache_lookback_minutes
+
+
+def test_the_point_in_time_controls_default() -> None:
+    s = Settings()
+    assert (s.timeline_minutes, s.timeline_step_minutes) == (240, 5)
+    assert (s.window_min_minutes, s.window_max_minutes) == (5, 240)
+
+
+def test_the_point_in_time_controls_are_overridable(monkeypatch):
+    monkeypatch.setenv("TIMELINE_MINUTES", "120")
+    monkeypatch.setenv("TIMELINE_STEP_MINUTES", "10")
+    monkeypatch.setenv("WINDOW_MIN_MINUTES", "10")
+    monkeypatch.setenv("WINDOW_MAX_MINUTES", "60")
+    s = Settings()
+    assert (s.timeline_minutes, s.timeline_step_minutes) == (120, 10)
+    assert (s.window_min_minutes, s.window_max_minutes) == (10, 60)
+    assert s.max_window_minutes == 60
 
 
 def test_cache_window_is_never_degenerate(monkeypatch):
