@@ -81,11 +81,15 @@ def test_page_is_self_contained():
 # How it is served
 # ----------------------------------------------------------------------
 
-def test_page_is_always_reachable_for_preview(client):
-    r = client.get("/unavailable")
-    assert r.status_code == 200
-    assert "Temporarily unavailable" in r.text
-    assert r.headers["cache-control"] == "no-cache, must-revalidate"
+def test_page_is_not_reachable_directly(client):
+    """The outage page is only ever seen from `/`, with its real status code.
+
+    At its own path (or as a raw file) it would read as a live outage even
+    when the site is healthy, so both entry points are refused; `/` serves it
+    with the 503 while MAINTENANCE_MODE is on.
+    """
+    assert client.get("/unavailable").status_code == 404
+    assert client.get("/static/maintenance.html").status_code == 404
 
 
 def test_root_serves_the_development_notice_by_default(client):

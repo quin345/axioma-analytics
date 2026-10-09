@@ -368,20 +368,26 @@ Like the holding page it is **self-contained** — inline styles, no dependency 
 `styles.css`, `app.js` or the analytics API — so it renders even while the
 dashboard is in maintenance mode. It is served at its own path rather than `/`,
 so it can be previewed directly. While the app is under development, `/` serves
-the development notice and the dashboard itself lives at `/dashboard`.
+the development notice; the dashboard itself is not served from `main` at all
+(it lives on `dev`).
 
 ### The main page while under development
 
-`/` currently serves `app/static/unavailable.html` — a self-contained "under
-development" notice with gear artwork — because the app is being rebuilt. The
-notice also acts as a landing page: two clickable cards pitch the service
-(analytics, data freshness) and link on to `/welcome`; on `main` there are no
-links to `/docs` or `/dashboard` (those live on `dev`). The
-dashboard is retained at `/dashboard` (and in `index.html`), and the branded
-outage page (`app/static/maintenance.html`) is retained at `/unavailable` for
-future maintenance windows; `MAINTENANCE_MODE=1` still serves *that* page from
-`/` with a 503. When the build is finished, deleting the maintenance route in
-`app/main.py` restores the dashboard to `/`.
+`/` is the only place either state page appears:
+
+* under development (the default) it serves `app/static/unavailable.html` — a
+  self-contained "under development" notice with gear artwork that also pitches
+  the service (two clickable cards linking on to `/welcome`; no `/docs` or
+  `/dashboard` links on `main` — those live on `dev`), and
+* with `MAINTENANCE_MODE=1` it serves `app/static/maintenance.html` with a 503,
+  so proxies and uptime checks do not cache an outage as healthy.
+
+Both files are refused everywhere else: `/dashboard` and `/unavailable` do not
+exist on this branch, and the static mount returns 404 for
+`unavailable.html`, `maintenance.html` and the dashboard's own files
+(`index.html`, `app.js`, `styles.css`) — a visitor can never open a state page
+out of context. The dashboard is served from `dev` only. When the build is
+finished, restoring the dashboard route in `app/main.py` brings it back to `/`.
 
 ### Pointing `www` at the server (GoDaddy)
 
@@ -526,10 +532,12 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
-| `GET /` | The development notice (`unavailable.html`) while the app is under development |
-| `GET /dashboard` | The dashboard itself, retained at its own path |
-| `GET /unavailable` | The branded outage page, retained for future maintenance windows |
+| `GET /` | State page: the development notice (`unavailable.html`, 200) by default, the outage page (`maintenance.html`, 503) under `MAINTENANCE_MODE=1` — the only routes to either |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
+
+The dashboard is served from `dev` only: `main` has no `/dashboard` route, and
+its static files (`index.html`, `app.js`, `styles.css`) return 404, as do
+`unavailable.html` and `maintenance.html` under `/static/`.
 
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
 `summary`; omitting `asset_class` returns everything.
@@ -581,8 +589,8 @@ the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest half hour, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
-the development notice and the retained pages at `/`, `/dashboard` and
-`/unavailable`,
+the development notice at `/` plus the refused entry points (`/dashboard`,
+`/unavailable`, and the state pages' and dashboard's files under `/static/`),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, drawdown sign, strict JSON serialisability, and a degenerate

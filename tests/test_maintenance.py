@@ -1,11 +1,12 @@
 """Tests for the "under development" page that replaces the main page.
 
 While the app is being built, `/` serves a self-contained development notice
-(unavailable.html, gear artwork) instead of the dashboard. The dashboard
-itself is retained at `/dashboard`, and the branded outage page
-(maintenance.html) is retained for future maintenance windows - a planned
-build and a real outage are different messages. No data source required:
-these routes serve files and never touch the warehouse.
+(unavailable.html, gear artwork) instead of the dashboard. The dashboard is
+only on `dev` - no route and no static file on this branch - and the branded
+outage page (maintenance.html) is served from `/` with a 503 while
+MAINTENANCE_MODE is on. Neither state page is reachable as a raw file: only
+`/` picks the one that matches the server's real state. No data source
+required: these routes serve files and never touch the warehouse.
 """
 from __future__ import annotations
 
@@ -131,16 +132,26 @@ def test_root_serves_the_development_notice(client):
     assert r.headers["cache-control"] == "no-cache, must-revalidate"
 
 
-def test_the_dashboard_is_retained_at_its_own_path(client):
-    """`/` is the notice; the dashboard itself still answers at /dashboard."""
-    r = client.get("/dashboard")
-    assert r.status_code == 200
-    assert 'src="/static/app.js"' in r.text
-    assert 'id="banner"' in r.text
-    assert "Under development" not in r.text
+def test_the_dashboard_is_only_on_dev(client):
+    """No route and no static file for the dashboard on this branch."""
+    assert client.get("/dashboard").status_code == 404
+    for asset in ("/static/index.html", "/static/app.js", "/static/styles.css"):
+        assert client.get(asset).status_code == 404
 
 
-def test_the_outage_page_is_retained_for_future_use(client):
-    r = client.get("/unavailable")
-    assert r.status_code == 200
-    assert "Temporarily unavailable" in r.text
+def test_the_state_pages_are_not_reachable_as_files(client):
+    """Both state pages answer from `/` only, never as raw static files.
+
+    Opened directly either one claims a condition that may not hold (build in
+    progress, or an outage while the site is healthy), so the mount refuses
+    them and `/` stays the single place that picks the right page.
+    """
+    assert client.get("/unavailable").status_code == 404
+    assert client.get("/static/unavailable.html").status_code == 404
+    assert client.get("/static/maintenance.html").status_code == 404
+
+
+def test_the_shared_static_assets_still_serve(client):
+    """The block must not take the assets the served pages need with it."""
+    assert client.get("/static/favicon.svg").status_code == 200
+    assert client.get("/static/landing.html").status_code == 200

@@ -199,37 +199,6 @@ def analytics_report(
     return report
 
 
-@app.get("/unavailable")
-def unavailable() -> Any:
-    """The branded "temporarily unavailable" holding page, always reachable.
-
-    Served at its own path so it can be previewed (and linked to) while the
-    dashboard is still up; `/` only swaps to it when MAINTENANCE_MODE is on.
-    It is kept for future outage windows even though the main page now shows
-    the development notice - a real outage and a planned build are different
-    messages, and this is the one for outages.
-    """
-    return FileResponse(
-        STATIC_DIR / "maintenance.html",
-        headers={"Cache-Control": "no-cache, must-revalidate"},
-    )
-
-
-@app.get("/dashboard")
-def dashboard() -> Any:
-    """The dashboard itself, kept reachable while `/` shows the build notice.
-
-    The main page is the development notice for now; the dashboard still lives
-    at this path (and in `index.html`) so it can be previewed during the work
-    and restored to `/` by deleting the maintenance route when the build is
-    finished.
-    """
-    return FileResponse(
-        STATIC_DIR / "index.html",
-        headers={"Cache-Control": "no-cache, must-revalidate"},
-    )
-
-
 @app.get("/welcome")
 def welcome() -> Any:
     """The front-facing explainer, always reachable.
@@ -248,14 +217,15 @@ def welcome() -> Any:
 
 @app.get("/")
 def index() -> Any:
-    """The development notice, or the outage page while maintenance mode is on.
+    """The main page: the development notice, or the outage page in maintenance.
 
-    The main page is replaced by `unavailable.html` - "under development",
-    with the gear artwork - while the app is being built, so `/` no longer
-    serves the dashboard (it is still reachable at `/dashboard`). MAINTENANCE_MODE
-    keeps its original meaning: a real outage serves `maintenance.html` with a
+    This is the only place either state page is shown. Under development (the
+    default) it serves `unavailable.html` - "under development", with the gear
+    artwork - with a 200; MAINTENANCE_MODE swaps in `maintenance.html` with a
     503 rather than 200, so proxies and uptime checks do not cache the outage
-    as healthy.
+    as healthy. The dashboard is not served from this branch at all (it lives
+    on `dev`), and the static mount refuses these files directly, so a visitor
+    can never open a state page out of context.
     """
     if get_settings().maintenance:
         return FileResponse(
@@ -276,7 +246,31 @@ if STATIC_DIR.exists():
     # both on every load keeps the pair consistent; ETag/Last-Modified still
     # make the common case a cheap 304.
     class RevalidatingStatic(StaticFiles):
-        """Static files that must be revalidated on every request."""
+        """Static files that must be revalidated on every request.
+
+        A handful of files are refused outright (404) as well:
+
+        * `unavailable.html` and `maintenance.html` are state pages that belong
+          to `/` alone - it picks the one matching the server's real state, and
+          opened raw either one claims a condition that may not hold, and
+        * `index.html`, `app.js` and `styles.css` are the dashboard, which is
+          served from the `dev` branch only. The files stay in the repository
+          so the branches keep merging; nothing on this branch hands them out.
+        """
+
+        _BLOCKED = frozenset({
+            "unavailable.html",
+            "maintenance.html",
+            "index.html",
+            "app.js",
+            "styles.css",
+        })
+
+        def lookup_path(self, path: str):
+            # Basename match, so "./unavailable.html" is refused as well.
+            if path.split("/")[-1] in self._BLOCKED:
+                return "", None
+            return super().lookup_path(path)
 
         def file_response(self, *args, **kwargs):
             resp = super().file_response(*args, **kwargs)

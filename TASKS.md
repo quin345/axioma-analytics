@@ -36,10 +36,13 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
       gradient gears), amber status pill; on `main` two clickable service cards
       (analytics, data freshness) link only to `/welcome` - the API-docs and
       dashboard links live on `dev`; "Check again" removed
-- [x] `app/main.py`: `/` serves the development notice (200);
-      `MAINTENANCE_MODE=1` still serves `maintenance.html` from `/` with 503;
-      `/unavailable` retained; dashboard retained at `/dashboard`
-- [x] `app/static/maintenance.html` untouched - kept for future outage windows
+- [x] `app/main.py`: `/` is the only route to either state page - the
+      development notice (200) by default, `maintenance.html` with 503 under
+      `MAINTENANCE_MODE=1`; `/dashboard` and `/unavailable` routes removed and
+      the static mount 404s `unavailable.html`, `maintenance.html`,
+      `index.html`, `app.js`, `styles.css` (dashboard dev-only, state pages
+      never raw); `landing.html`/`welcome` untouched
+- [x] `app/static/maintenance.html` untouched - served from `/` in maintenance
 
 ### Verification
 - [x] `pytest` - 285 passed
