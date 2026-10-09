@@ -8,11 +8,11 @@ puts every KQL result in Redis so a dashboard request never re-scans a table an
 earlier request has already read.
 
 The cache window is fixed. One KQL read covers `CACHE_LOOKBACK_HOURS` (8 by
-default) of ticks per symbol; the point in time and the lookback the caller asks
-for only *narrow* that window in memory. Selecting 30 minutes after 8 hours
-therefore costs no query at all, and the UI cannot ask for more history than the
-cache holds - which is what makes a 4-hour timeline with a 240 minute lookback at
-its earliest point work: 4 + 4 hours is exactly the window.
+default) of ticks per symbol; the point in time and the aggregate window the
+caller asks for only *narrow* that window in memory. Selecting 30 minutes after
+8 hours therefore costs no query at all, and the UI cannot ask for more history
+than the cache holds - which is what makes a 4-hour timeline with a 240 minute
+window at its earliest point work: 4 + 4 hours is exactly the window.
 """
 from __future__ import annotations
 
@@ -74,17 +74,20 @@ class Status:
     #: Redis cache reachability. ``None`` while it has not been probed.
     cache_connected: bool | None = None
     cache_error: str | None = None
-    #: The fixed window the cache holds, echoed so the UI can bound its own
-    #: lookback control to it.
+    #: The raw cache window (480), kept for the badge tooltip and for clients
+    #: built before the rename to "window": the UI never asks for this much.
     lookback_minutes: int | None = None
+    #: The aggregate window the analysis runs over, echoed so the UI can bound
+    #: the window control to it.
+    window_minutes: int | None = None
     #: The point-in-time controls, echoed with the window so the UI can build
     #: them from the API: a `timeline_minutes` long timeline in
-    #: `timeline_step_minutes` steps, and lookback choices from
-    #: `lookback_min_minutes` up to `lookback_max_minutes`.
+    #: `timeline_step_minutes` steps, and aggregate-window choices from
+    #: `window_min_minutes` up to `window_max_minutes`.
     timeline_minutes: int | None = None
     timeline_step_minutes: int | None = None
-    lookback_min_minutes: int | None = None
-    lookback_max_minutes: int | None = None
+    window_min_minutes: int | None = None
+    window_max_minutes: int | None = None
 
 
 _status = Status()
@@ -97,8 +100,8 @@ _last_refresh: dict | None = None
 # Window
 # --------------------------------------------------------------------------
 
-def clamp_lookback(minutes: int | None, settings: Settings | None = None) -> int:
-    """The requested duration, clamped to the fixed cache window.
+def clamp_window(minutes: int | None, settings: Settings | None = None) -> int:
+    """The requested aggregate window, clamped to the fixed cache window.
 
     The UI may narrow the window but never widen it: a request for more history
     than the cache holds is served with everything there is rather than
@@ -133,10 +136,11 @@ def status(*, refresh: bool = False) -> Status:
     s = get_settings()
     st = Status(
         lookback_minutes=s.cache_lookback_minutes,
+        window_minutes=s.cache_lookback_minutes,
         timeline_minutes=max(1, s.timeline_minutes),
         timeline_step_minutes=max(1, s.timeline_step_minutes),
-        lookback_min_minutes=max(1, s.lookback_min_minutes),
-        lookback_max_minutes=s.max_lookback_minutes,
+        window_min_minutes=max(1, s.window_min_minutes),
+        window_max_minutes=s.max_window_minutes,
     )
     try:
         with kql.connect(s) as client:
@@ -523,7 +527,10 @@ def refresh_cache(settings: Settings | None = None) -> dict:
         "symbols": refreshed,
         "rows": rows,
         "purged": purged,
-        "window_minutes": s.cache_lookback_minutes,
+        # The cache window being refreshed (480 by default). Named apart from
+        # the health payload's `window_minutes`, which is the *aggregate* window
+        # the analysis runs over and is capped by this one.
+        "cache_window_minutes": s.cache_lookback_minutes,
         "interval_minutes": s.cache_refresh_minutes,
         "errors": errors,
     }
@@ -560,7 +567,7 @@ def load_raw(symbol: str | None = None, *, limit: int | None = None,
         )
 
 
-def _narrow(raw: pd.DataFrame, lookback_minutes: int, limit: int,
+def _narrow(raw: pd.DataFrame, window_minutes: int, limit: int,
             end_time: object = None) -> pd.DataFrame:
     """The requested slice of the cached window: anchored, then capped.
 
@@ -571,7 +578,7 @@ def _narrow(raw: pd.DataFrame, lookback_minutes: int, limit: int,
     ahead of the data is clamped to the newest row, and an unparseable one is
     refused rather than silently re-anchored on the newest row.
 
-    Doing the work in pandas rather than KQL is what makes a point or lookback
+    Doing the work in pandas rather than KQL is what makes a point or window
     change free once the window is cached.
     """
     if raw.empty:
@@ -588,28 +595,28 @@ def _narrow(raw: pd.DataFrame, lookback_minutes: int, limit: int,
         # A point in the future (the timeline runs up to "now", the cache only
         # to the newest row) still means "up to the latest data".
         end = min(end, want.tz_convert("UTC"))
-    cutoff = end - pd.Timedelta(minutes=int(lookback_minutes))
+    cutoff = end - pd.Timedelta(minutes=int(window_minutes))
     return raw.loc[(ts >= cutoff) & (ts <= end)].tail(int(limit))
 
 
 def load_ticks(symbol: str | None = None, *, limit: int | None = None,
-               lookback_minutes: int | None = None,
+               window_minutes: int | None = None,
                end_time: object = None) -> pd.DataFrame:
     """Canonical ticks for one symbol, read through the cache."""
-    return load_ticks_cached(symbol, limit=limit, lookback_minutes=lookback_minutes,
+    return load_ticks_cached(symbol, limit=limit, window_minutes=window_minutes,
                              end_time=end_time)
 
 def load_ticks_cached(symbol: str | None, limit: int | None = None,
-                      lookback_minutes: int | None = None,
+                      window_minutes: int | None = None,
                       end_time: object = None) -> pd.DataFrame:
     """Canonical ticks, served from Redis and narrowed to the request.
 
     The cached entry is the *whole* fixed window for a symbol, so the point in
-    time and the lookback only trim the in-memory copy. A second request for the
-    same symbol therefore never re-queries KQL, whatever it asks for.
+    time and the aggregate window only trim the in-memory copy. A second request
+    for the same symbol therefore never re-queries KQL, whatever it asks for.
     """
     s = get_settings()
-    minutes = clamp_lookback(lookback_minutes, s)
+    minutes = clamp_window(window_minutes, s)
     cap = int(limit or s.max_ticks)
     ck = cache.key(s, "ticks", (symbol or "").strip() or "all")
 
@@ -620,7 +627,7 @@ def load_ticks_cached(symbol: str | None, limit: int | None = None,
 
     frame = from_ticks(_narrow(raw, minutes, cap, end_time))
     if frame.empty:
-        window = f"in the last {minutes} minute(s)"
+        window = f"in the {minutes} minute(s) aggregate window"
         if end_time is not None:
             window = f"ending at {end_time} within the last {minutes} minute(s)"
         raise DataSourceError(

@@ -17,10 +17,10 @@ the earliest half hour and reading only the newest, so what the dashboard
 serves is never more than half an hour behind the feed and a symbol's cache
 entry never holds more than eight hours of rows.
 
-Eight hours is the sum the point-in-time controls need: the timeline the user
-picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the lookback
-at that point may be `LOOKBACK_MAX_MINUTES` (240) more, so the earliest point
-with the widest lookback reaches exactly eight hours back. Anything shorter and
+Eight hours is the sum the aggregate-window controls need: the timeline the user
+picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the window
+at that point may be `WINDOW_MAX_MINUTES` (240) more, so the earliest point
+with the widest window reaches exactly eight hours back. Anything shorter and
 the oldest selectable combination would fall outside the cache.
 
 There is no environment selector, no catalog discovery and no synthetic
@@ -118,8 +118,8 @@ class Settings:
     cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=2700))
     #: The fixed window the cache holds and the UI may only narrow. Eight hours
     #: = a four-hour point-in-time timeline plus the widest (240 minute)
-    #: lookback from its earliest point, so every combination the controls offer
-    #: is served from the cache.
+    #: aggregate window from its earliest point, so every combination the
+    #: controls offer is served from the cache.
     cache_lookback_hours: int = field(default_factory=lambda: _env_int("CACHE_LOOKBACK_HOURS", default=8))
     #: How often the background cycle slides that window from KQL: on the
     #: clock marks (:00 and :30 for 30), the earliest interval is purged and
@@ -131,7 +131,7 @@ class Settings:
         default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=30)
     )
 
-    # --- Point-in-time controls -------------------------------------------
+    # --- Aggregate window ---------------------------------------------------
     #: The timeline the user picks a point from: this many minutes long, in
     #: steps of `timeline_step_minutes`. Four hours in five-minute steps puts
     #: every point on the clock grid while keeping the picker to 49 positions.
@@ -139,13 +139,13 @@ class Settings:
     timeline_step_minutes: int = field(
         default_factory=lambda: _env_int("TIMELINE_STEP_MINUTES", default=5)
     )
-    #: The lookback choices offered at a point, in minutes. The widest plus the
-    #: timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
-    lookback_min_minutes: int = field(
-        default_factory=lambda: _env_int("LOOKBACK_MIN_MINUTES", default=5)
+    #: The aggregate-window choices offered at a point, in minutes. The widest
+    #: plus the timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
+    window_min_minutes: int = field(
+        default_factory=lambda: _env_int("WINDOW_MIN_MINUTES", default=5)
     )
-    lookback_max_minutes: int = field(
-        default_factory=lambda: _env_int("LOOKBACK_MAX_MINUTES", default=240)
+    window_max_minutes: int = field(
+        default_factory=lambda: _env_int("WINDOW_MAX_MINUTES", default=240)
     )
 
     app_name: str = "Axioma Analytics"
@@ -197,15 +197,15 @@ class Settings:
         return max(1, self.cache_lookback_hours * 60)
 
     @property
-    def max_lookback_minutes(self) -> int:
-        """The widest lookback the UI may offer, in minutes.
+    def max_window_minutes(self) -> int:
+        """The widest aggregate window the UI may offer, in minutes.
 
-        `lookback_max_minutes` is what the control is built from, but never
-        beyond what the cache can serve: a lookback wider than the window would
+        `window_max_minutes` is what the control is built from, but never
+        beyond what the cache can serve: a window wider than the cache would
         silently return less than the user asked for.
         """
-        lo = max(1, self.lookback_min_minutes)
-        return max(lo, min(self.lookback_max_minutes, self.cache_lookback_minutes))
+        lo = max(1, self.window_min_minutes)
+        return max(lo, min(self.window_max_minutes, self.cache_lookback_minutes))
 
     @property
     def cache_refresh_seconds(self) -> int:

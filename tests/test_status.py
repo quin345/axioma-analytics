@@ -116,7 +116,7 @@ def test_the_fixed_window_is_echoed_on_the_probe(monkeypatch):
 
 
 def test_the_point_in_time_controls_are_echoed_on_the_probe(monkeypatch):
-    """The timeline and the lookback choices are built from the API, so the
+    """The timeline and the window choices are built from the API, so the
     probe has to publish them - hard-coding them client-side would let the UI
     offer history the cache cannot serve."""
     _patch_kql(monkeypatch)
@@ -125,12 +125,12 @@ def test_the_point_in_time_controls_are_echoed_on_the_probe(monkeypatch):
     st = service.status(refresh=True)
 
     assert (st.timeline_minutes, st.timeline_step_minutes) == (240, 5)
-    assert (st.lookback_min_minutes, st.lookback_max_minutes) == (5, 240)
+    assert (st.window_min_minutes, st.window_max_minutes) == (5, 240)
 
 
-def test_the_lookback_ceiling_follows_a_shorter_window(monkeypatch):
-    """`lookback_max_minutes` is capped by the window, so a shorter cache never
-    advertises a lookback it cannot fill."""
+def test_the_window_ceiling_follows_a_shorter_cache(monkeypatch):
+    """`window_max_minutes` is capped by the cache, so a shorter cache never
+    advertises a window it cannot fill."""
     monkeypatch.setattr(service, "get_settings",
                         lambda: Settings(kql_host="https://kql.example.invalid",
                                          cache_lookback_hours=1))
@@ -139,8 +139,8 @@ def test_the_lookback_ceiling_follows_a_shorter_window(monkeypatch):
 
     st = service.status(refresh=True)
 
-    assert st.lookback_minutes == 60
-    assert st.lookback_max_minutes == 60
+    assert st.window_minutes == 60
+    assert st.window_max_minutes == 60
 
 
 def test_a_failing_kql_endpoint_disconnects_the_dashboard(monkeypatch):

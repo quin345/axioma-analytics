@@ -143,30 +143,37 @@ def test_the_outage_page_is_retained_for_future_use(client):
 # ----------------------------------------------------------------------
 
 def test_the_dashboard_replaces_the_duration_picker(client):
-    """A four-hour timeline in five-minute steps, plus a lookback from 5 to 240
-    minutes at whichever point is chosen."""
+    """A four-hour point-in-time field plus an aggregate window, in place of
+    the old duration picker."""
     r = client.get("/dashboard")
 
     assert r.status_code == 200
-    # The timeline: a range, not a dropdown - 49 five-minute stops.
-    assert 'id="asOf"' in r.text and 'type="range"' in r.text
-    assert 'min="0" max="240" step="5"' in r.text
+    # The point in time: a time field on the 5-minute grid, with its window.
+    assert 'id="asOf"' in r.text and 'type="time"' in r.text
+    assert 'step="300"' in r.text
     assert 'id="asOfOut"' in r.text
-    # The lookback at that point, filled from the API.
-    assert 'id="lookback"' in r.text
+    assert 'id="asOfRange"' in r.text
+    # The aggregate window, filled from the API.
+    assert 'id="windowMinutes"' in r.text
     assert 'id="duration"' not in r.text
+    assert 'id="lookback"' not in r.text
+    assert 'type="range"' not in r.text
 
 
 def test_the_header_says_last_update_not_latest_tick(client):
     """The badge beside "Connected" is about the feed, not the loaded window,
     so it is scoped to the header: the freshness strip below keeps its own
     "Latest tick" label, which describes the window on screen."""
-    header = client.get("/dashboard").text.partition('<div id="banner"')[0]
+    page = client.get("/dashboard").text
+    header = page.partition('<div id="banner"')[0]
 
     assert 'id="lastTick"' in header and "Last update" in header
     assert "Latest tick" not in header
     # The alignment is stated in the tooltip, so it is not a surprise.
     assert "30-minute refresh step" in header
+    # The cadence strip leads with the 30-minute grid, not 45.
+    assert "Data refreshes every 30 minutes" in page
+    assert "Data refreshes every 45 minutes" not in page
 
 
 def test_every_control_the_script_reads_exists_in_the_page():
@@ -180,3 +187,138 @@ def test_every_control_the_script_reads_exists_in_the_page():
     assert referenced, "no element references found in app.js"
     missing = [i for i in referenced if f'id="{i}"' not in html]
     assert missing == [], f"app.js reads controls index.html does not define: {missing}"
+
+
+# ----------------------------------------------------------------------
+# The dashboard script
+# ----------------------------------------------------------------------
+
+#: JS globals and language keywords a page script may call without defining
+#: them itself. Everything else app.js invokes must be declared in app.js.
+_JS_GLOBALS = {
+    "AbortController", "Array", "BigInt", "Boolean", "Chart", "Date", "Error",
+    "Image", "Infinity", "Intl", "JSON", "Map", "Math", "NaN", "Number", "Object",
+    "Promise", "Proxy", "RegExp", "ResizeObserver", "IntersectionObserver", "Set",
+    "String", "Symbol", "URL", "URLSearchParams", "WeakMap", "WeakSet", "alert",
+    "atob", "btoa", "cancelAnimationFrame", "clearInterval", "clearTimeout",
+    "console", "crypto", "decodeURIComponent", "document", "encodeURIComponent",
+    "fetch", "getComputedStyle", "history", "isFinite", "isNaN", "location",
+    "matchMedia", "navigator", "parseFloat", "parseInt", "performance", "prompt",
+    "queueMicrotask", "requestAnimationFrame", "setInterval", "setTimeout",
+    "structuredClone", "window",
+}
+_JS_KEYWORDS = {
+    "async", "await", "case", "catch", "class", "const", "delete", "do", "else",
+    "for", "function", "if", "in", "instanceof", "let", "new", "of", "return",
+    "switch", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
+}
+
+
+def _js_code(js: str) -> str:
+    """Comments, string literals and regex literals blanked out; code kept.
+
+    What remains is scan-able as plain source. Without it, words inside strings
+    (a CSS ``rgba(...)`` colour, say) read as call sites. Template
+    interpolations are *kept* - that is real code - but wrapped in parentheses
+    so neighbouring pieces (``${m}${esc(x)}``) cannot glue into one bogus
+    identifier.
+    """
+    out: list[str] = []
+    i, n = 0, len(js)
+    while i < n:
+        c = js[i]
+        if js.startswith("//", i):
+            j = js.find("\n", i)
+            i = n if j < 0 else j
+        elif js.startswith("/*", i):
+            j = js.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+        elif c in "\"'":
+            q, i = c, i + 1
+            while i < n and js[i] != q:
+                i += 2 if js[i] == "\\" else 1
+            i += 1
+            out.append(q + q)
+        elif c == "`":
+            i += 1
+            while i < n:
+                if js.startswith("${", i):
+                    j, depth = i + 2, 1
+                    while j < n and depth:
+                        depth += (js[j] == "{") - (js[j] == "}")
+                        j += 1
+                    out.append("(" + js[i + 2:j - 1] + ")")
+                    i = j
+                elif js[i] == "\\":
+                    i += 2
+                elif js[i] == "`":
+                    i += 1
+                    break
+                else:
+                    i += 1
+            out.append("``")
+        elif c == "/":
+            # A slash after a value is division; after punctuation or at a
+            # statement start it opens a regex literal, whose body may contain
+            # quotes that would otherwise derail the string scan above.
+            prev = "".join(out).rstrip()[-1:] if out else ""
+            if prev in "(,=:[!&|?{};":
+                j, esc, in_class = i + 1, False, False
+                while j < n:
+                    ch = js[j]
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == "[":
+                        in_class = True
+                    elif ch == "]":
+                        in_class = False
+                    elif ch == "/" and not in_class:
+                        break
+                    elif ch == "\n":
+                        break
+                    j += 1
+                i = j + 1
+                out.append("//")
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def test_every_helper_the_script_calls_is_defined():
+    """A rename that leaves a call site behind breaks the dashboard at load,
+    not at import: `init()` catches the TypeError, so the page comes up with
+    empty selects and a generic banner instead of a stack trace - invisible to
+    `node --check` and to every pytest that only reads the served HTML.
+
+    (Half of the lookback-to-window rename did exactly this: `fillTimeframes`
+    was renamed away, but `init()` still awaited it.)
+    """
+    code = _js_code((STATIC / "app.js").read_text(encoding="utf-8"))
+
+    defined = set(re.findall(r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", code))
+    defined |= set(re.findall(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", code))
+    called = {m.group(1) for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(", code)}
+
+    missing = sorted(called - defined - _JS_GLOBALS - _JS_KEYWORDS)
+    assert missing == [], f"app.js calls helpers it never defines: {missing}"
+
+
+def test_the_script_never_declares_a_helper_twice():
+    """Two declarations of the same name silently shadow each other: the later
+    one wins for the whole script and the earlier becomes dead code nobody
+    notices. The same rename shipped two `fillWindows`, one of them a stray
+    copy that hid the loss of the timeframe picker.
+    """
+    code = _js_code((STATIC / "app.js").read_text(encoding="utf-8"))
+    names = re.findall(
+        r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", code, re.M
+    )
+
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert dupes == [], f"app.js declares these functions more than once: {dupes}"

@@ -1,5 +1,5 @@
 """Tests for `/api/analytics` as the dashboard calls it: a point in time plus a
-lookback, over the cached window.
+window, over the cached window.
 
 No data source required: the tick read is faked with a frame of known rows, so
 what is under test is the endpoint's contract - `as_of` reaches the read, it is
@@ -57,8 +57,8 @@ def client(monkeypatch):
     config.get_settings.cache_clear()
     seen: list[dict] = []
 
-    def fake_load(symbol=None, limit=None, lookback_minutes=None, end_time=None):
-        seen.append({"lookback_minutes": lookback_minutes, "end_time": end_time})
+    def fake_load(symbol=None, limit=None, window_minutes=None, end_time=None):
+        seen.append({"window_minutes": window_minutes, "end_time": end_time})
         frame = from_ticks(_rows())
         if end_time is not None:
             end = pd.Timestamp(end_time)
@@ -66,7 +66,7 @@ def client(monkeypatch):
             if frame.empty:
                 raise DataSourceError(
                     f"No usable aggregate rows for {symbol or 'any instrument'} "
-                    f"ending at {end_time} within the last {lookback_minutes} minute(s)."
+                    f"ending at {end_time} within the last {window_minutes} minute(s)."
                 )
         return frame
 
@@ -80,17 +80,17 @@ def client(monkeypatch):
 # ----------------------------------------------------------------------
 
 def test_health_publishes_the_point_in_time_controls(client):
-    """The timeline and the lookback choices come from the API, so a shorter
+    """The timeline and the window choices come from the API, so a shorter
     cache window or a different grid reaches the UI without a code change."""
     r = client[0].get("/api/health")
     body = r.json()
 
     assert r.status_code == 200
-    # Four hours of timeline plus the widest (240 min) lookback = 8 hours.
+    # Four hours of timeline plus the widest (240 min) window = 8 hours.
     assert body["lookback_minutes"] == 480
     assert (body["timeline_minutes"], body["timeline_step_minutes"]) == (240, 5)
-    assert (body["lookback_min_minutes"], body["lookback_max_minutes"]) == (5, 240)
-    assert body["timeline_minutes"] + body["lookback_max_minutes"] == body["lookback_minutes"]
+    assert (body["window_min_minutes"], body["window_max_minutes"]) == (5, 240)
+    assert body["timeline_minutes"] + body["window_max_minutes"] == body["lookback_minutes"]
 
 
 # ----------------------------------------------------------------------
@@ -101,21 +101,45 @@ def test_the_chosen_point_reaches_the_read(client):
     test_client, seen = client
 
     r = test_client.get("/api/analytics", params={
-        "symbol": "1", "as_of": "2026-10-08T02:59:00Z", "lookback_minutes": 60,
+        "symbol": "1", "as_of": "2026-10-08T02:59:00Z", "window_minutes": 60,
     })
 
     assert r.status_code == 200
     assert seen[-1]["end_time"] == "2026-10-08T02:59:00Z"
-    assert seen[-1]["lookback_minutes"] == 60
+    assert seen[-1]["window_minutes"] == 60
+    assert r.json()["meta"]["window_minutes"] == 60
     assert r.json()["meta"]["as_of"] == "2026-10-08T02:59:00Z"
     # The report really ends at the chosen point, not at the newest row.
     assert r.json()["meta"]["latest_tick"].startswith("2026-10-08T02:59:00")
 
 
+def test_the_deprecated_lookback_alias_still_selects_a_window(client):
+    """A bookmarked `lookback_minutes` URL keeps its meaning after the rename."""
+    test_client, seen = client
+
+    r = test_client.get("/api/analytics", params={
+        "symbol": "1", "lookback_minutes": 120,
+    })
+
+    assert r.status_code == 200
+    assert seen[-1]["window_minutes"] == 120
+    assert r.json()["meta"]["window_minutes"] == 120
+
+
+def test_window_minutes_wins_over_the_alias(client):
+    test_client, seen = client
+
+    test_client.get("/api/analytics", params={
+        "symbol": "1", "window_minutes": 30, "lookback_minutes": 120,
+    })
+
+    assert seen[-1]["window_minutes"] == 30
+
+
 def test_omitting_the_point_analyses_the_newest_rows(client):
     test_client, seen = client
 
-    r = test_client.get("/api/analytics", params={"symbol": "1", "lookback_minutes": 60})
+    r = test_client.get("/api/analytics", params={"symbol": "1", "window_minutes": 60})
 
     assert r.status_code == 200
     assert seen[-1]["end_time"] is None
@@ -129,7 +153,7 @@ def test_a_point_with_nothing_behind_it_is_reported(client):
     test_client, _ = client
 
     r = test_client.get("/api/analytics", params={
-        "symbol": "1", "as_of": "2026-10-07T23:00:00Z", "lookback_minutes": 60,
+        "symbol": "1", "as_of": "2026-10-07T23:00:00Z", "window_minutes": 60,
     })
 
     assert r.status_code == 502

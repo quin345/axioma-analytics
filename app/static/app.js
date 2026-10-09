@@ -38,6 +38,13 @@ const fmt = {
     d.setUTCMinutes(d.getUTCMinutes() < 30 ? 0 : 30, 0, 0);
     return d.toISOString().replace("T", " ").slice(0, 16);
   },
+  /** UTC "HH:MM:SS" from an ISO instant for the clock-grid badges. */
+  hm: (iso) => {
+    if (!iso) return "\u2013";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return String(iso);
+    return d.toISOString().replace("T", " ").slice(11, 19);
+  },
   /** Full timestamp with millis: "10-06 22:09:14.747". Tick metrics can
    * repeat the same quote many times a second, so second precision made every
    * row in Latest ticks look identical even though the instants differed. */
@@ -140,6 +147,12 @@ async function loadHealth() {
   if (h.connected) {
     dot.className = "dot ok";
     $("connText").textContent = h.has_data ? "Connected" : "Connected \u00b7 no data";
+    // The badge tooltip keeps the window and cache state for context rather
+    // than noise: how much Redis holds and how often the cycle tops it up.
+    dot.title = h.cache_connected === false
+      ? (h.cache_error || "The Redis cache is unreachable.")
+      : `Window ${Math.round((h.lookback_minutes || 0) / 60 * 10) / 10} h, cached in Redis`
+        + (h.cache_refresh_minutes ? `, refreshed every ${h.cache_refresh_minutes} min` : "");
   } else {
     dot.className = "dot bad";
     $("connText").textContent = "Offline";
@@ -149,16 +162,18 @@ async function loadHealth() {
   // outage arrives as one of those hints: reads still work, they just cost a
   // KQL query, which is a warning rather than a failure.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
-  // The lookback control's ceiling, and the cache state, on the badge tooltip -
-  // both are context for the numbers rather than headline problems.
-  $("connDot").title = h.cache_connected === false
-    ? (h.cache_error || "The Redis cache is unreachable.")
-    : `Window ${Math.round((h.lookback_minutes || 0) / 60 * 10) / 10} h, cached in Redis`
-      + (h.cache_refresh_minutes ? `, refreshed every ${h.cache_refresh_minutes} min` : "");
+  // The controls are configured from the API so they can never drift from what
+  // the service actually offers. The refresh cycle runs on the :00/:30 clock
+  // grid, so 30 minutes gives 05:00, 05:30, ...
+  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 30;
+  // The cadence strip: "Data refreshes every 30 minutes", mirrored from the API.
+  set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
   // The timeline is anchored on the newest row the feed has, so a symbol switch
   // (which can change that row) re-anchors it; `buildTimeline` keeps whatever
   // point the user picked rather than sliding it.
+  // The field may sit after the report, so anchor it on the newest data and
+  // rebuild the earliest/latest bounds before renderFreshness paints the badge.
   buildTimeline(h.latest_tick || undefined);
   renderFreshness();
   return h;
@@ -257,11 +272,13 @@ function fillSymbols(symbols) {
   sel.value = stillThere ? prev : fallback;
 }
 
+/** Bar timeframes for the picker, read from `/api/health` so the control can
+ * only ever offer one the analytics endpoint accepts. */
 async function fillTimeframes(h) {
   const health = h || (await api("/api/health"));
   const sel = $("timeframe");
   if (!sel) return;
-  sel.innerHTML = health.timeframes
+  sel.innerHTML = (health.timeframes || [])
     .map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
   sel.value = "1m";
 }
@@ -272,8 +289,8 @@ async function fillTimeframes(h) {
  *
  * Every stop sits on the clock grid (:00, :05, ...) and the newest stop is
  * never behind the feed - it is the next grid mark at or after the newest data.
- * That is what keeps the oldest stop with the widest lookback inside the cached
- * window: span (4 h) + lookback (4 h) = the 8 hours Redis holds, exactly. The
+ * That is what keeps the oldest stop with the widest window inside the cached
+ * window: span (4 h) + window (4 h) = the 8 hours Redis holds, exactly. The
  * chosen point is kept as an absolute instant, so refilling the controls or
  * newer data arriving does not silently move what the user selected.
  */
@@ -288,6 +305,13 @@ function durationLabel(m) {
   return `${Number.isInteger(hr) ? hr : hr.toFixed(1)} h`;
 }
 
+/** How far the chosen point sits behind the newest stop: "45 min" / "1 h 55 min". */
+function backLabel(minutes) {
+  const m = Math.round(minutes);
+  if (m < 60) return `${m} min back`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min back`;
+}
+
 /** Rebuild the timeline around `fromIso`, keeping the chosen point if it fits. */
 function buildTimeline(fromIso) {
   const h = window.__health || {};
@@ -296,6 +320,7 @@ function buildTimeline(fromIso) {
   const stepMs = step * 60000;
   const base = new Date(fromIso || Date.now()).getTime();
   if (Number.isNaN(base)) return;
+
   // Ceil to the next mark: stops on the grid, newest stop not behind the data.
   const anchor = Math.ceil(base / stepMs) * stepMs;
   timeline.step = step;
@@ -303,45 +328,71 @@ function buildTimeline(fromIso) {
   timeline.latest = anchor;
   timeline.earliest = anchor - span * 60000;
 
-  let point = window.__asOf;
-  // Nothing chosen yet, or the user was on the newest stop: follow the feed.
-  if (point === null || window.__asOfLatest) point = anchor;
-  point = Math.min(timeline.latest, Math.max(timeline.earliest, point));
-  point = timeline.earliest + Math.round((point - timeline.earliest) / stepMs) * stepMs;
-  window.__asOf = point;
-  window.__asOfLatest = point === timeline.latest;
-
-  const slider = $("asOf");
-  if (slider) {
-    slider.min = "0";
-    slider.max = String(span);
-    slider.step = String(step);
-    slider.value = String(Math.round((point - timeline.earliest) / 60000));
+  // The input is a HH:MM wall-clock time, so intersect the typed slot with the
+  // 4-hour window and keep the stop grid: the field can never show a point the
+  // analysis does not honour. An empty field, or a first paint, follows the
+  // newest stop instead of inventing a midnight slot.
+  const input = $("asOf");
+  const typed = input ? String(input.value || "").trim() : "";
+  if (typed) {
+    const anchorDate = new Date(anchor);
+    const hh = Math.min(23, Number(input.value.split(":")[0] || "0"));
+    const mm = Math.min(59, Number(input.value.split(":")[1] || "0"));
+    const cand = Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth(),
+                           anchorDate.getUTCDate(), hh, mm);
+    if (cand > timeline.latest + 12 * 3600000) cand -= 86400000;  // same slot, yesterday
+    else if (cand < timeline.earliest - 12 * 3600000) cand += 86400000;
+    let point = Math.min(timeline.latest, Math.max(timeline.earliest, cand));
+    point = timeline.earliest + Math.round((point - timeline.earliest) / stepMs) * stepMs;
+    window.__asOf = point;
+    window.__asOfLatest = point === timeline.latest;
+    input.value = fmt.hm(new Date(point).toISOString());
   }
   renderAsOf();
 }
 
-/** The chosen point next to the slider: its time, and how far back that is. */
+/** The chosen point next to the input: its time and how far back that is. */
 function renderAsOf() {
   const out = $("asOfOut");
+  const rng = $("asOfRange");
   if (!out) return;
   const point = window.__asOf;
-  if (point === null || timeline.latest === null) {
+  if (point === null || timeline.latest === null || timeline.earliest === null) {
     out.textContent = "\u2013";
+    rng.textContent = "";
     return;
   }
   const back = Math.round((timeline.latest - point) / 60000);
+  // The label carries the full UTC stamp (the window can straddle midnight),
+  // plus how far behind the newest stop the point sits.
   out.textContent = `${fmt.time(new Date(point).toISOString())} UTC`
-    + (back > 0 ? ` \u00b7 ${durationLabel(back)} back` : " \u00b7 latest");
+    + (back > 0 ? ` · ${backLabel(back)}` : " · latest");
+  // The window the field may range inside, so a time field always stays inside.
+  rng.textContent = `${fmt.time(new Date(timeline.earliest).toISOString())} – ${fmt.time(new Date(timeline.latest).toISOString())} UTC`;
 }
 
-/** Read the slider back into the chosen point. */
+/** Type a time on the 5-minute grid: parse, snap to the step and clamp to the
+ * 4-hour window. A bare HH:MM carries no date, so one slot that sits past the
+ * newest stop was typed yesterday, and one before the oldest stop tomorrow.
+ * The field is rewritten with exactly what the analysis honours. */
 function onAsOfInput() {
   if (timeline.earliest === null) return;
-  const slider = $("asOf");
-  if (!slider) return;
-  window.__asOf = timeline.earliest + Number(slider.value) * 60000;
-  window.__asOfLatest = window.__asOf >= timeline.latest;
+  const input = $("asOf");
+  if (!input) return;
+  const stepMs = timeline.step * 60000;
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(input.value || "").trim());
+  if (!m) return;
+  const hh = Math.min(23, Number(m[1]));
+  const mm = Math.min(59, Number(m[2]));
+  const base = new Date(timeline.latest);
+  let cand = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), hh, mm);
+  if (cand > timeline.latest + 12 * 3600000) cand -= 86400000;   // same slot, yesterday
+  else if (cand < timeline.earliest - 12 * 3600000) cand += 86400000;
+  let point = Math.min(timeline.latest, Math.max(timeline.earliest, cand));
+  point = timeline.earliest + Math.round((point - timeline.earliest) / stepMs) * stepMs;
+  window.__asOf = point;
+  window.__asOfLatest = point === timeline.latest;
+  input.value = fmt.hm(new Date(point).toISOString());
   renderAsOf();
 }
 
@@ -351,31 +402,27 @@ function asOfIso() {
 }
 
 /**
- * Lookback choices at the chosen point, in minutes: every step from the
- * minimum up to the maximum the API publishes.
- *
- * Built from `/api/health` rather than a fixed list, so the control can never
- * offer more history than the cache holds - which is what keeps every choice a
- * free, in-memory narrowing instead of a second KQL read.
+ * The aggregate window: how many minutes the analysis runs for, ending at the
+ * chosen point in time. Every step from the minimum up to the maximum the API
+ * publishes, built from the API so it can never offer more history than the
+ * cache holds - a window change is always a free, in-memory narrowing.
  */
-function fillLookbacks(h) {
-  const sel = $("lookback");
+function fillWindows(h) {
+  const sel = $("windowMinutes");
   if (!sel) return;
   const step = Math.max(1, Number(h && h.timeline_step_minutes) || 5);
-  const min = Math.max(1, Number(h && h.lookback_min_minutes) || 5);
+  const min = Math.max(1, Number(h && h.window_min_minutes) || 5);
   const max = Math.max(min,
-    Number(h && h.lookback_max_minutes) || Number(h && h.lookback_minutes) || 240);
+    Number(h && h.window_max_minutes) || Number(h && h.lookback_minutes) || 240);
   const choices = [];
   for (let m = min; m <= max; m += step) choices.push(m);
   if (choices[choices.length - 1] !== max) choices.push(max);
-  const keep = Number(val("lookback", 60));
+  const keep = Number(val("windowMinutes", 60));
   sel.innerHTML = choices
     .map((m) => `<option value="${m}">${esc(durationLabel(m))}</option>`).join("");
-  // Open on an hour where it is offered - enough ticks for the rolling metrics
-  // to mean something - otherwise keep the selection or take the widest choice.
-  sel.value = String(choices.includes(keep) ? keep
-    : (choices.includes(60) ? 60 : max));
+  sel.value = String(choices.includes(keep) ? keep : (choices.includes(60) ? 60 : max));
 }
+
 
 /* ---------------- KPI tiles ---------------- */
 
@@ -406,7 +453,7 @@ function renderKpis(s, m) {
 /* ---------------- data freshness ---------------- */
 
 /** Ingest cadence for the aggregate DOM table, in minutes. */
-const REFRESH_MINUTES = 45;
+let REFRESH_MINUTES = 30;
 
 /** Full UTC stamp: "2026-10-05 11:46:10". */
 function stamp(iso) {
@@ -427,11 +474,22 @@ function age(ms) {
   return `${h}h ${String(m % 60).padStart(2, "0")}m`;
 }
 
-/** Wall-clock time the next ingest is expected, given the newest tick. */
-function nextRefresh(lastIso) {
-  const d = lastIso ? new Date(lastIso) : null;
-  if (!d || Number.isNaN(d.getTime())) return null;
-  return new Date(d.getTime() + REFRESH_MINUTES * 60_000);
+/**
+ * Wall-clock time the next ingest is expected: the first clock mark the
+ * cycle runs on (:00/:30 for a 30 minute interval) strictly after now, in
+ * local time. The cycle is scheduled against the local wall clock, so this
+ * mirrors that; two refreshes separated by the full interval can never be
+ * missed, and the badge never hints at a mark that has already passed.
+ */
+function nextRefresh(intervalMinutes) {
+  const interval = Math.max(1, Number(intervalMinutes) || REFRESH_MINUTES) * 60_000;
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const elapsed = now.getTime() - midnight.getTime();
+  // The cycle lands on the next full interval mark, never one exactly at now:
+  // waiting a full interval avoids double-firing and keeps the grid aligned.
+  const slot = Math.floor(elapsed / interval) * interval + interval;
+  return new Date(midnight.getTime() + slot);
 }
 
 /**
@@ -466,7 +524,7 @@ function renderFreshness(report) {
     if (cls) el.className = cls;
   };
   set("lastTick",
-      feed ? `Last update ${fmt.halfhour(feed)} UTC` : "Last update unavailable");
+      feed ? `Last update ${fmt.hm(feed)} UTC` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
@@ -474,15 +532,17 @@ function renderFreshness(report) {
   // The strip reports the loaded window; without a report there is nothing new
   // to say, so a health refresh leaves what the last analysis wrote alone.
   if (!report) return;
-  const stampText = stamp(windowLatest);
+  const stampText = fmt.hm(windowLatest);
   set("fbLastTick", stampText, ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
 
-  const next = nextRefresh(windowLatest);
+  // Next refresh: the next clock slot the ingest cycle runs on, strictly after
+  // now - minutes past the hour are snapped to :00/:30 regardless of the feed.
+  const next = nextRefresh(REFRESH_MINUTES);
   set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
-    badge.title = `Data last updated ${fmt.halfhour(feed)} UTC. Next refresh expected ${stamp(next.toISOString())} UTC.`;
+    badge.title = `Data last updated ${fmt.hm(feed)} UTC. Next ingest expected ${fmt.hm(next.toISOString())} UTC, on the :00/:30 refresh slots.`;
   }
 }
 
@@ -782,11 +842,11 @@ const DETAILS = {
        ["Total volume", fmt.int(s.total_volume)],
        ["Avg tick size", fmt.num(s.avg_tick_size)]]) +
       block("Coverage",
-        "How much history the chosen point and its lookback actually returned, "
-        + "within the cached window. Fewer ticks than expected usually means a "
-        + "quiet instrument rather than a missing feed.",
+        "How much history the aggregate window actually returned, within the " +
+        "cached window. Fewer ticks than expected usually means a " +
+        "quiet instrument rather than a missing feed.",
         [["Rows analysed", fmt.int(r.meta && r.meta.rows_analysed)],
-         ["Lookback", `${fmt.n(s.duration_seconds / 3600, 2)} h`],
+         ["Window", `${fmt.n(s.duration_seconds / 3600, 2)} h`],
          ["Point in time", esc(fmt.time(r.meta && r.meta.as_of))],
          ["Ticks / minute", fmt.n(s.ticks_per_minute, 1)],
          ["Realised vol", `${fmt.n(s.realized_vol_bps, 2)} bps`],
@@ -1177,13 +1237,13 @@ function renderCalendar(r) {
       : "no data";
   }
   if (!cal.days.length) {
-    box.innerHTML = `<p class="note">No calendar days in the selected window. Widen the lookback, or move the point in time later.</p>`;
+    box.innerHTML = `<p class="note">No calendar days in the selected window. Widen the window, or move the point in time later.</p>`;
     const label = $("calLabel");
     if (label) label.textContent = "\u2013";
     return;
   }
   // Default to the last day that actually carries data rather than to "today",
-  // which usually falls outside a lookback measured in minutes.
+  // which usually falls outside a window measured in minutes.
   if (!cal.selected || !cal.days.some((d) => d.date === cal.selected)) {
     cal.selected = cal.days[cal.days.length - 1].date;
   }
@@ -1228,10 +1288,10 @@ async function analyse() {
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
-      // Minutes back from the chosen point; the API clamps it to the cached
-      // window anyway, so a stale page or a hand-edited URL still returns data
-      // rather than a 422.
-      lookback_minutes: val("lookback", 60) || 60,
+      // How wide the aggregate window runs ending at the chosen point; the API
+      // clamps it to the cached window anyway, so a stale page or a
+      // hand-edited URL still returns data rather than a 422.
+      window_minutes: val("windowMinutes", 60) || 60,
       // The chosen point in time. Absent until the timeline is built, which the
       // API reads as "up to the newest row".
       ...(asOfIso() ? { as_of: asOfIso() } : {}),
@@ -1270,10 +1330,10 @@ function renderPriceTag(meta) {
 async function init() {
   try {
     // One health call, reused for the connection badge, the timeframes, the
-    // timeline and the lookback picker's bounds.
+    // timeline and the window picker's bounds.
     const health = await loadHealth();
     await fillTimeframes(health);
-    fillLookbacks(health);
+    fillWindows(health);
     await loadClassSummary();
     await loadSymbols();
     renderCoverage(health);
@@ -1297,7 +1357,7 @@ on("refresh", "click", async () => {
   setLoading(true);
   try {
     const health = await loadHealth();
-    fillLookbacks(health);
+    fillWindows(health);
     await loadClassSummary();
     await loadSymbols();
     await analyse();
@@ -1308,7 +1368,8 @@ on("refresh", "click", async () => {
 on("symbol", "change", analyse);
 // Dragging the timeline moves the point in time; the label follows the drag,
 // the analysis waits for the "Run" click so a drag costs one query, not fifty.
-on("asOf", "input", onAsOfInput);
+on("asOf", "change", onAsOfInput);
+on("asOf", "blur", onAsOfInput);
 on("calPrev", "click", () => shiftMonth(-1));
 on("calNext", "click", () => shiftMonth(1));
 on("calToday", "click", () => {

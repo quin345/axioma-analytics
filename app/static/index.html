@@ -54,13 +54,13 @@
 <!-- Always visible, unlike the hint banner which only appears when there is
      something to say. States the ingest cadence and when the last tick landed. -->
 <div class="freshbar" role="status" aria-live="polite">
-  <span class="cadence" title="The ingest pipeline writes tick metrics on this interval">
+  <span class="cadence" title="The ingest pipeline writes tick metrics on this interval (clock slots :00/:30)">
     <svg class="fb-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
       <circle cx="8" cy="8" r="6.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
       <path d="M8 4.6 V8 L10.4 9.6" fill="none" stroke="currentColor"
             stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    Data refreshes every 45 minutes
+    <span id="fbCadence">Data refreshes every 30 minutes</span>
   </span>
   <span class="fb-sep" aria-hidden="true"></span>
   <span class="fb-item">Latest tick <strong id="fbLastTick">&ndash;</strong> UTC</span>
@@ -83,21 +83,22 @@
   <label>Rolling window
     <input id="window" type="number" value="50" min="2" max="5000" step="10" />
   </label>
-  <!-- Point in time: a four-hour timeline in five-minute steps. The slider
-       walks it oldest (left) to newest (right); the analysis ends at the chosen
-       point, and the lookback below says how far back from it to go. -->
+  <!-- Point in time: type a time on the 5-minute grid that the analysis ends at.
+       It sits inside the last 4 hours, so the window wraps across midnight when
+       it has to; the field always shows a valid UTC wall-clock time. -->
   <label>Point in time
     <span class="tlrow">
-      <input id="asOf" type="range" min="0" max="240" step="5" value="240"
-             title="Four hours in five-minute steps: drag to the moment the analysis should end at." />
-      <output id="asOfOut" class="tlout" for="asOf">&ndash;</output>
+      <input id="asOf" type="time" step="300" autocomplete="off"
+             title="Type a time on the 5-minute grid inside the last 4 hours (UTC). The field is normalized to the chosen window." />
+      <output id="asOfOut" class="tlout">–</output>
     </span>
+    <span id="asOfRange" class="tlout tlrange"></span>
   </label>
-  <!-- Lookback: history from that point. Filled from the API, so it cannot
-       offer more than the cached window holds. -->
-  <label>Lookback
-    <select id="lookback"
-            title="How far back from the chosen point to analyse: 5 to 240 minutes. Filled from the API, so it cannot ask for more history than the cache holds."></select>
+  <!-- Aggregate window: the analysis window ending at the chosen point, in
+       minutes. Run from 5 to the widest the cache holds. -->
+  <label>Window
+    <select id="windowMinutes"
+            title="Aggregation window ending at the chosen point in time: 5 to 240 minutes."></select>
   </label>
   <label>Max ticks
     <input id="limit" type="number" value="50000" min="100" max="500000" step="5000" />

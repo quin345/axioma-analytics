@@ -53,7 +53,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
-        window = summary["window_minutes"] / 60
+        window = summary["cache_window_minutes"] / 60
         print(f"Refreshed {summary['symbols']} symbol(s) over {window:g} h, "
               f"{summary['rows']} row(s), in {summary['seconds']}s "
               f"(next cycle in {summary['interval_minutes']} min).")

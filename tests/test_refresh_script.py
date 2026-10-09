@@ -25,7 +25,7 @@ _SUMMARY = {
     "seconds": 2.0,
     "symbols": 1,
     "rows": 240,
-    "window_minutes": 240,
+    "cache_window_minutes": 240,
     "interval_minutes": 30,
     "errors": [],
 }

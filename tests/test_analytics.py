@@ -106,6 +106,27 @@ def test_volume_profile_poc_inside_range(frame):
     assert sum(b["volume"] for b in vp["bins"]) == pytest.approx(frame["volume"].sum(), rel=1e-6)
 
 
+def test_volume_profile_bins_run_price_descending(frame):
+    """The ladder reads top-to-bottom from the highest price, so the API hands
+    the bins over inverted; the chart labels follow the same order."""
+    vp = analytics.volume_profile(frame, bins=30)
+    prices = [b["price"] for b in vp["bins"]]
+    assert prices == sorted(prices, reverse=True)
+
+
+def test_volume_profile_nodes_are_price_descending(frame):
+    vp = analytics.volume_profile(frame, bins=30)
+    nodes = [n["price"] for n in vp["high_volume_nodes"]]
+    assert nodes == sorted(nodes, reverse=True)
+
+
+def test_volume_profile_value_area_survives_the_inversion(frame):
+    """The value area is computed on the ascending order (where adjacency means
+    something); inverting the bins must not reorder its endpoints."""
+    vp = analytics.volume_profile(frame, bins=30)
+    assert vp["value_area"][0] <= vp["poc"] <= vp["value_area"][1]
+
+
 def test_return_distribution_stats(frame):
     d = analytics.return_distribution(frame, bins=25)
     assert d["histogram"]
