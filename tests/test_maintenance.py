@@ -1,11 +1,11 @@
-"""Tests for the "under development" page that replaces the main page.
+"""Tests for the "under development" page and the routes around it.
 
-While the app is being built, `/` serves a self-contained development notice
-(unavailable.html, gear artwork) instead of the dashboard. The dashboard
-itself is retained at `/dashboard`, and the branded outage page
-(maintenance.html) is retained for future maintenance windows - a planned
-build and a real outage are different messages. No data source required:
-these routes serve files and never touch the warehouse.
+The notice (unavailable.html) held `/` while the app was being built; the
+dashboard serves `/` now, so the notice is tested as an asset while the serving
+tests cover the new reality - the dashboard at `/`, its retained alias at
+`/dashboard`, and the branded outage page (maintenance.html) at `/unavailable`
+- a planned build and a real outage are different messages. No data source
+required: these routes serve files and never touch the warehouse.
 """
 from __future__ import annotations
 
@@ -115,16 +115,18 @@ def test_page_has_no_check_again_option():
 # How it is served
 # ----------------------------------------------------------------------
 
-def test_root_serves_the_development_notice(client):
+def test_root_serves_the_dashboard(client):
+    """`/` is the dashboard; the development notice no longer holds the root."""
     r = client.get("/")
     assert r.status_code == 200
-    assert "Under development" in r.text
-    assert "building something new" in r.text
+    assert 'src="/static/app.js"' in r.text
+    assert 'id="banner"' in r.text
+    assert "Under development" not in r.text
     assert r.headers["cache-control"] == "no-cache, must-revalidate"
 
 
 def test_the_dashboard_is_retained_at_its_own_path(client):
-    """`/` is the notice; the dashboard itself still answers at /dashboard."""
+    """`/` serves the dashboard too; this path is the retained alias."""
     r = client.get("/dashboard")
     assert r.status_code == 200
     assert 'src="/static/app.js"' in r.text

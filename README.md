@@ -303,6 +303,13 @@ It redirects HTTP to HTTPS (with the ACME challenge path carved out so
 | `/static/` | Short `expires`, so unversioned filenames still revalidate. |
 | `/` | Dashboard and everything else. |
 
+The bare-domain and `www` blocks are front doors, not sites of their own:
+their `/` proxies to the app's `/welcome` (the explainer), `/static/` proxies
+for the brand assets, and every other path 301s to
+`https://app.axiomanalytics.info`. Port 80 for those hosts 301s to the same
+host over TLS (`https://$host$request_uri`), so neither front door funnels
+visitors through `app`.
+
 `client_max_body_size` is raised to 8 MB because analytics payloads run past
 nginx's 1 MB default.
 
@@ -315,7 +322,9 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
 curl -sk https://app.axiomanalytics.info/api/health            # through nginx
-curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page
+curl -s https://app.axiomanalytics.info/ | grep -c 'id="banner"'   # dashboard at the root
+curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page (www)
+curl -s https://axiomanalytics.info/  | grep -c "What it measures"  # front page (bare)
 ```
 
 `connected: true` with a non-zero `row_count` means the full path works: rows
@@ -340,8 +349,9 @@ The certificate must cover **three** names — `axiomanalytics.info`,
 `app.axiomanalytics.info` and `www.axiomanalytics.info`. `app` and `www` are
 CNAMEs to the bare domain in DNS.
 
-`www` is the **front door**: it serves the explainer page (see *Front page*).
-It is only reachable over TLS once the name resolves **and** is on the
+`www` and the bare domain are the **front doors**: they serve the explainer
+page (see *Front page*).
+They are only reachable over TLS once the name resolves **and** is on the
 certificate, so the two steps are ordered:
 
 1. **DNS first.** Add the `www` record at the registrar — see *Pointing `www`
@@ -359,9 +369,10 @@ Do not run `--expand` before the DNS record exists: the challenge fails, and a
 failed expansion can leave the already-working names pointing at the old
 certificate line.
 
-The `www` server block now serves the explainer at `/` (proxied to the app's
-`/welcome`), proxies `/static/` for the brand assets, and 301s every other path
-to `https://app.axiomanalytics.info` — `www` is not a site of its own.
+The `www` and bare-domain server blocks both serve the explainer at `/`
+(proxied to the app's `/welcome`), proxy `/static/` for the brand assets, and
+301 every other path to `https://app.axiomanalytics.info` — neither is a site
+of its own.
 
 `Strict-Transport-Security: max-age=31536000` is set on the HTTPS servers
 without `includeSubDomains` or `preload`. Those directives would apply to every
@@ -379,26 +390,25 @@ links into the dashboard on `app.axiomanalytics.info`.
 Like the holding page it is **self-contained** — inline styles, no dependency on
 `styles.css`, `app.js` or the analytics API — so it renders even while the
 dashboard is in maintenance mode. It is served at its own path rather than `/`,
-so it can be previewed directly. While the app is under development, `/` serves
-the development notice and the dashboard itself lives at `/dashboard`.
+so it can be previewed directly. nginx gives both front-door hosts their own
+root: `www.axiomanalytics.info/` and `axiomanalytics.info/` proxy to
+`/welcome`, while `app.axiomanalytics.info/` is the dashboard itself.
 
-### The main page while under development
+### The main page
 
-`/` currently serves `app/static/unavailable.html` — a self-contained "under
-development" notice with gear artwork — because the app is being rebuilt. The
-notice also acts as a landing page: three clickable cards pitch the service
-(analytics, data freshness, API) and link on to `/welcome` and `/docs`. The
-dashboard is retained at `/dashboard` (and in `index.html`), and the branded
-outage page (`app/static/maintenance.html`) is retained at `/unavailable` for
-future maintenance windows; `MAINTENANCE_MODE=1` still serves *that* page from
-`/` with a 503. When the build is finished, deleting the maintenance route in
-`app/main.py` restores the dashboard to `/`.
+`/` serves the dashboard (`app/static/index.html`) — the build notice that
+held the root while the app was being rebuilt is no longer served; the asset
+(`unavailable.html`) is retained. `/dashboard` answers the same file so links
+and bookmarks formed during the build still resolve, and the branded outage
+page (`app/static/maintenance.html`) stays at `/unavailable`.
+`MAINTENANCE_MODE=1` serves *that* page from `/` with a 503.
 
 ### Pointing `www` at the server (GoDaddy)
 
 DNS for `axiomanalytics.info` is managed at GoDaddy
-(`ns31.domaincontrol.com` / `ns32.domaincontrol.com`). `www` currently has no
-record at all, so nothing resolves for it. Add one:
+(`ns31.domaincontrol.com` / `ns32.domaincontrol.com`). `www` resolves through
+a `CNAME` to the bare domain (`app` likewise). If `www` ever loses its record,
+re-add one:
 
 1. Sign in to GoDaddy → **My Products** → `axiomanalytics.info` → **DNS**
    (or *Manage DNS*).
@@ -429,8 +439,9 @@ sudo systemctl reload nginx
 5. Verify:
 
 ```bash
-curl -sI https://www.axiomanalytics.info/ | head -1          # HTTP/2 200
+curl -s -o /dev/null -w '%{http_code}\n' https://www.axiomanalytics.info/  # 200
 curl -s  https://www.axiomanalytics.info/ | grep -c "What it measures"
+curl -s  https://axiomanalytics.info/     | grep -c "What it measures"
 ```
 
 GoDaddy forwarding must stay **off** for `www`: an enabled *Forwarding* rule
@@ -537,7 +548,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |
-| `GET /` | The development notice (`unavailable.html`) while the app is under development |
+| `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
@@ -606,8 +617,8 @@ the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest half hour, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
-the development notice and the retained pages at `/`, `/dashboard` and
-`/unavailable`,
+the pages and routes around them (`/` serving the dashboard, the retained
+`/dashboard` alias, `/unavailable` and `/welcome`),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, drawdown sign, strict JSON serialisability, and a degenerate

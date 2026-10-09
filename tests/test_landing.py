@@ -112,9 +112,11 @@ def test_welcome_stays_up_during_maintenance(client, maintenance):
     assert "What it measures" in r.text
 
 
-def test_root_serves_the_development_notice_not_the_explainer(client):
-    """The explainer lives at its own path; `/` is the development notice."""
+def test_root_serves_the_dashboard_not_the_explainer(client):
+    """The explainer lives at its own path; `/` is the dashboard."""
     r = client.get("/")
     assert r.status_code == 200
     assert "What it measures" not in r.text
-    assert "Under development" in r.text
+    assert 'src="/static/app.js"' in r.text
+    assert 'id="banner"' in r.text
+    assert "Under development" not in r.text

@@ -88,12 +88,13 @@ def test_page_is_always_reachable_for_preview(client):
     assert r.headers["cache-control"] == "no-cache, must-revalidate"
 
 
-def test_root_serves_the_development_notice_by_default(client):
-    """`/` no longer shows the dashboard - it shows the build notice."""
+def test_root_serves_the_dashboard_by_default(client):
+    """`/` is the dashboard; the outage page is maintenance-only."""
     r = client.get("/")
     assert r.status_code == 200
     assert "Temporarily unavailable" not in r.text
-    assert "Under development" in r.text
+    assert "Under development" not in r.text
+    assert 'id="banner"' in r.text
 
 
 def test_root_serves_the_page_with_503_in_maintenance(client, maintenance):

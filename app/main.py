@@ -245,12 +245,11 @@ def unavailable() -> Any:
 
 @app.get("/dashboard")
 def dashboard() -> Any:
-    """The dashboard itself, kept reachable while `/` shows the build notice.
+    """The dashboard itself, retained at its own path.
 
-    The main page is the development notice for now; the dashboard still lives
-    at this path (and in `index.html`) so it can be previewed during the work
-    and restored to `/` by deleting the maintenance route when the build is
-    finished.
+    `/` serves this page now (the build notice held the root while the app was
+    being rebuilt and is gone), but the path is kept so links and bookmarks
+    formed during that period still resolve. It is the same file as `/`.
     """
     return FileResponse(
         STATIC_DIR / "index.html",
@@ -276,14 +275,15 @@ def welcome() -> Any:
 
 @app.get("/")
 def index() -> Any:
-    """The development notice, or the outage page while maintenance mode is on.
+    """The dashboard, or the outage page while maintenance mode is on.
 
-    The main page is replaced by `unavailable.html` - "under development",
-    with the gear artwork - while the app is being built, so `/` no longer
-    serves the dashboard (it is still reachable at `/dashboard`). MAINTENANCE_MODE
-    keeps its original meaning: a real outage serves `maintenance.html` with a
-    503 rather than 200, so proxies and uptime checks do not cache the outage
-    as healthy.
+    The dashboard is the main page at last: `app.axiomanalytics.info/` serves
+    it directly (`/dashboard` is only a retained alias). The bare domain and
+    `www` are front doors of their own - nginx routes their roots to
+    `/welcome`, the explainer - so this route never has to guess which page a
+    hostname came for. MAINTENANCE_MODE keeps its original meaning: a real
+    outage serves `maintenance.html` with a 503 rather than 200, so proxies and
+    uptime checks do not cache the outage as healthy.
     """
     if get_settings().maintenance:
         return FileResponse(
@@ -292,7 +292,7 @@ def index() -> Any:
             headers={"Cache-Control": "no-cache, must-revalidate"},
         )
     return FileResponse(
-        STATIC_DIR / "unavailable.html",
+        STATIC_DIR / "index.html",
         headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
