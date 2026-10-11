@@ -7,6 +7,64 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 **Notes:** so the checklist itself stays scannable.
 
 ---
+---
+
+## 2026-10-11 - POC marks the busiest price bin, not whatever `poc_*` holds (dev)
+
+Scope: the volume-profile panel marked a bar that was not the tallest one, and
+the *Point of control* row showed a value that was not the busiest price. Two
+argmaxes over the same bins were allowed to disagree: `metrics_5m`'s `poc_*`
+column and the ladder the chart actually draws.
+
+### Backend
+- [x] `app/metrics.py`: `volume_profile` takes the POC from the **busiest bin of
+      the materialised ladder** (`argmax(volume)`, returning that bin's price)
+      instead of trusting the stored `poc_*` as a price. The stored point is now
+      only the fallback for a ladder where no bin traded (total volume 0) - a
+      value that is not the busiest bin's price can no longer be marked up as it.
+      The value area still runs off the same index through `analytics.value_area`.
+
+### Docs
+- [x] `docs/metrics_5m.md` Stage 4: `poc = arg_max(vol, center)` - the criterion
+      comes first, so the old `arg_max(center, vol)` was returning the bin's
+      **volume** (max price -> its volume), i.e. precisely the "POC is not the
+      busiest price bin" symptom. Commented in the KQL so the order is not
+      "tidied" back.
+- [x] `docs/metrics_5m.md` Stage 3: the same argument-order slip in `open`/`close`
+      - `arg_min(mid, timestamp)` / `arg_max(mid, timestamp)` return a *datetime*
+      in a `real` column; corrected to `arg_min(timestamp, mid)` /
+      `arg_max(timestamp, mid)` and the definition table with them.
+- [x] Stage 4 prose and the *Design notes* bullet now state that `poc_*` is the
+      centre price of the busiest bin and that the read path re-derives it from
+      the ladder, so the two can never disagree about the marked bar.
+
+### Tests
+- [x] `tests/test_metrics.py`: `test_the_table_s_own_poc_is_used_and_falls_back_to_the_busiest_bin`
+      replaced by `test_the_poc_is_the_busiest_bin_whatever_the_stored_column_says`
+      - a stored point naming the busiest bin, a different bin, a *volume* (the
+      swapped-`arg_max` output) and `None` all resolve to the busiest price, and
+      that price is asserted to be the bin with the largest volume.
+- [x] `tests/test_metrics.py`: `test_a_ladder_that_traded_nothing_falls_back_to_the_stored_point`
+      pins the one case where the stored point is still what gets marked.
+
+### Verification
+- [x] `pytest` - 386 passed
+- [x] End-to-end through `metrics.report` with a stored `poc_1h = 20.0` (a volume)
+      on a ladder whose busiest bin is `1.0855 vol 20`: the payload reports
+      `poc = 1.0855`, the marked bar is the tallest, bins still run
+      price-descending.
+- [x] `node --check app/static/app.js` clean (UI untouched)
+
+**Notes:**
+- The UI marks the POC bar with `b.price === volume_profile.poc`, so the reader
+  must hand back exactly a bin price - it does, because the value comes straight
+  from the ladder bin rather than from the stored column.
+- The `metrics_5m` table still needs rebuilding for `poc_*` (and `open_*`/
+  `close_*`) to be correct in the table itself; the read path no longer depends
+  on it for the chart marker.
+
+---
+
 
 ## 2026-10-11 - Fixed 4-window control aligned to `metrics_5m` (dev)
 

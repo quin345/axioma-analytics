@@ -111,6 +111,15 @@ def volume_profile(ladder: list[dict], poc: Any = None) -> dict:
     unchanged. The value area runs through `analytics.value_area`, the single
     implementation both paths share, so a profile read from the table and one
     binned in pandas cannot disagree about where the value area sits.
+
+    The point of control is the **busiest bin of this ladder**. The panel draws
+    the ladder and marks its POC bin amber by matching that bin's price, so a
+    point that is not the tallest bar would be marked up as one. `metrics_5m`
+    also ships a `poc_*` column, but it is a second, independent argmax over the
+    same bins and the two can disagree - historically the KQL's `arg_max`
+    arguments were swapped, which put a *volume* in that column and marked the
+    wrong bar. The ladder is therefore the source of truth; the stored point is
+    only what a ladder that traded nothing falls back to.
     """
     if not ladder:
         return {"bins": [], "poc": None, "value_area": None, "high_volume_nodes": []}
@@ -118,15 +127,17 @@ def volume_profile(ladder: list[dict], poc: Any = None) -> dict:
     vols = [b["volume"] for b in ladder]
     total = float(sum(vols))
     if total <= 0:
+        # No bin has volume, so there is no busiest one to mark; the table's own
+        # point, if it shipped one, is all there is to point at.
         return {"bins": list(reversed(ladder)), "poc": _f(poc),
                 "value_area": None, "high_volume_nodes": []}
 
-    # The table carries its own POC, but fall back to the busiest bin when it is
-    # absent: it is the same argmax, and a null would blank the panel.
-    point = _f(poc)
-    if point is None:
-        point = float(ladder[int(np.argmax(vols))]["price"])
     poc_i = int(np.argmax(vols))
+    point = float(ladder[poc_i]["price"])
+    stored = _f(poc)
+    if stored is not None and stored != point:
+        log.debug("metrics_5m poc %s does not name the busiest bin (%s); "
+                  "marking the ladder's own.", stored, point)
 
     cutoff = float(np.percentile(vols, 80))
     nodes = [

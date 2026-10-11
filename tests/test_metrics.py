@@ -257,9 +257,40 @@ def test_the_profile_is_inverted_for_the_ladder_view():
     assert prices == sorted(prices, reverse=True)
 
 
-def test_the_table_s_own_poc_is_used_and_falls_back_to_the_busiest_bin():
-    assert metrics.volume_profile(_ladder(), poc=1.0860)["poc"] == 1.0860
-    assert metrics.volume_profile(_ladder(), poc=None)["poc"] == pytest.approx(1.0855)
+def test_the_poc_is_the_busiest_bin_whatever_the_stored_column_says():
+    """The panel draws the ladder and marks the POC bin by matching its price, so
+    the marked bar *must* be the tallest one. `metrics_5m`'s own `poc_*` column is
+    a second argmax over the same bins and can disagree - a swapped `arg_max` in
+    the KQL put the bin's *volume* there, which marked a bar that was not the
+    busiest price. The ladder wins; the stored point is only a fallback for a
+    ladder that traded nothing."""
+    ladder = _ladder()                            # volumes [10, 20, 15, 8, 6]
+    busiest = max(ladder, key=lambda b: b["volume"])
+    assert busiest["price"] == pytest.approx(1.0855)
+
+    # A stored point that names the busiest bin, one that names a different bin,
+    # one that is the bin's volume rather than its price, and no point at all all
+    # resolve to the same, correct, price.
+    for stored in (busiest["price"], 1.0860, busiest["volume"], None):
+        point = metrics.volume_profile(ladder, poc=stored)["poc"]
+        assert point == pytest.approx(1.0855)
+
+    # That price is a real bin, and it is the one carrying the most volume.
+    marked = [b for b in ladder if b["price"] == pytest.approx(1.0855)]
+    assert marked and marked[0]["volume"] == busiest["volume"]
+    assert marked[0]["volume"] == max(b["volume"] for b in ladder)
+
+
+def test_a_ladder_that_traded_nothing_falls_back_to_the_stored_point():
+    """No bin has volume, so there is no busiest bin to mark; the table's own
+    point is the only thing there is to point at."""
+    flat = [{"price": 1.0850 + i * 0.0005, "volume": 0.0, "ticks": 0} for i in range(3)]
+
+    profile = metrics.volume_profile(flat, poc=1.0855)
+
+    assert profile["poc"] == 1.0855
+    assert profile["value_area"] is None
+    assert len(profile["bins"]) == 3
 
 
 def test_an_empty_ladder_is_an_empty_panel_rather_than_an_error():

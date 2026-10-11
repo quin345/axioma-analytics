@@ -57,10 +57,10 @@ dist_1h  … dist_4h             : dynamic   // return-distribution histogram (n
 | Metric | Type | Definition (over the window ending at `as_of`) | `analytics.py` analogue |
 |---|---|---|---|
 | `ticks` | long | tick count | `summary.ticks` |
-| `open` | real | first mid by time (`arg_min(mid, timestamp)`) | `summary.open` |
+| `open` | real | first mid by time (`arg_min(timestamp, mid)`) | `summary.open` |
 | `high` | real | `max(mid)` | `summary.high` |
 | `low` | real | `min(mid)` | `summary.low` |
-| `close` | real | last mid by time (`arg_max(mid, timestamp)`) | `summary.close` |
+| `close` | real | last mid by time (`arg_max(timestamp, mid)`) | `summary.close` |
 | `vwap` | real | `sum(mid*volume)/sum(volume)` | `summary.vwap` |
 | `total_volume` | real | `sum(volume)` | `summary.total_volume` |
 | `realized_vol_bps` | real | `sqrt(Σ ret² / duration_s) × 10000` | `summary.realized_vol_bps` |
@@ -171,10 +171,15 @@ let SCALARS =
     JOINED
     | summarize
         ticks           = count(),
-        open            = arg_min(mid, timestamp),
+        // `arg_min/arg_max(ExprToMinimize/Maximize, ExprToReturn, ...)`: the
+        // *criterion comes first*. `arg_min(timestamp, mid)` is then "the mid at
+        // the earliest tick" - the open - and `arg_max(timestamp, mid)` is the
+        // close. Handing them `(mid, timestamp)` instead returns a *datetime* in
+        // a `real` column, which is the same argument-order slip as the POC below.
+        open            = arg_min(timestamp, mid),
         high            = max(mid),
         low             = min(mid),
-        close           = arg_max(mid, timestamp),
+        close           = arg_max(timestamp, mid),
         vwap            = iif(sum(volume) > 0, sum(mid * volume) / sum(volume), avg(mid)),
         total_volume    = sum(volume),
         avg_spread_bps  = avg(spread_bps),
@@ -227,6 +232,13 @@ The volume-at-price ladder is a `dynamic` array per window. Build it on the same
 (70 %) and high-volume nodes are a light pass over this already-materialised
 ladder — see *Design notes*.
 
+`poc_*` is the **centre price of the bin holding the most volume**, i.e.
+`arg_max(vol, center)` — criterion first. The app marks that bin on the profile
+chart, so a `poc_*` that is not the busiest price bin (a volume, say, from
+swapped arguments) marks the wrong bar; the read path in `app/metrics.py`
+therefore takes the busiest bin of the ladder and keeps the stored column as a
+cross-check, not as the marker.
+
 ```kql
 let LADDER =
     JOINED
@@ -243,7 +255,11 @@ let LADDER =
       by symbolId, as_of, win, idx
     | order by idx asc
     | summarize ladder = make_list(pack("price", center, "volume", vol, "ticks", cnt)),
-                poc    = arg_max(center, vol)
+                // `arg_max(ExprToMaximize, ExprToReturn)`: maximize the *volume*
+                // of the bin and return its *centre price*. Swapping these two
+                // put a volume in the `poc_*` column, i.e. a point of control
+                // that was not the busiest price bin.
+                poc    = arg_max(vol, center)
       by symbolId, as_of, win
     // spread the four ladders into vap_1h … vap_4h (nested dynamic columns)
     | summarize vap_1h = take_anyif(ladder, win == "1h"), vap_2h = take_anyif(ladder, win == "2h"),
@@ -373,9 +389,11 @@ what the table covers.
 - **Value area (70 %) and high-volume nodes** are a sequential greedy expansion
   over the ladder — awkward in pure KQL. The ladder is fully materialised in
   `vap_*`, so compute these from the cached array in memory (a sort over ~40
-  bins), which is **not** a table re-scan. POC is already in KQL (`arg_max`). If
-  you insist on doing it in KQL, it needs an `mv-apply` running-accumulation pass
-  over the price-sorted ladder.
+  bins), which is **not** a table re-scan. POC is already in KQL
+  (`arg_max(vol, center)` — maximize volume, return the bin's centre price) and
+  the app re-derives it from the ladder anyway, so the two can never disagree
+  about which bar is marked. If you insist on doing the value area in KQL, it
+  needs an `mv-apply` running-accumulation pass over the price-sorted ladder.
 - **Mirrored / majority-crossed book.** `mid` and `abs(spread)` are swap-invariant,
   so this query does not need the per-frame mirror repair `frames.from_ticks` does;
   the directional signal stays the pipeline's own `imbalance`, which is
