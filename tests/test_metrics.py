@@ -292,7 +292,7 @@ def test_the_ladder_survives_a_parquet_round_trip():
 @pytest.fixture
 def store(monkeypatch):
     """An in-memory Redis, recording writes under the real key layout."""
-    data: dict = {"frames": {}, "written": []}
+    data: dict = {"frames": {}, "docs": {}, "written": [], "deleted": []}
 
     monkeypatch.setattr(cache, "get_frame",
                         lambda k, settings=None: data["frames"].get(k))
@@ -300,8 +300,19 @@ def store(monkeypatch):
                         lambda k, f, ttl, settings=None:
                         data["frames"].__setitem__(k, f)
                         or data["written"].append((k, ttl)) or True)
+    monkeypatch.setattr(cache, "get_json",
+                        lambda k, settings=None: data["docs"].get(k))
+    monkeypatch.setattr(cache, "set_json",
+                        lambda k, v, ttl, settings=None:
+                        data["docs"].__setitem__(k, v)
+                        or data["written"].append((k, ttl)) or True)
+    monkeypatch.setattr(cache, "delete",
+                        lambda settings=None, *keys:
+                        data["deleted"].extend(keys)
+                        or [data["docs"].pop(k, None) for k in keys])
     monkeypatch.setattr(cache, "keys",
-                        lambda settings=None, *parts: sorted(data["frames"]))
+                        lambda settings=None, *parts: sorted(
+                            list(data["frames"]) + list(data["docs"])))
     return data
 
 
@@ -348,6 +359,73 @@ def test_the_metrics_keys_are_namespaced_by_the_metrics_table(settings):
         "axioma:ctrader_dom:metrics_5m:metrics:41"
     assert metrics.metrics_key(None, settings) == \
         "axioma:ctrader_dom:metrics_5m:metrics:all"
+
+
+# --------------------------------------------------------------------------
+# The built report cache
+# --------------------------------------------------------------------------
+
+def test_the_first_report_builds_and_caches_the_bundle(settings, store, fake_kql):
+    first = metrics.report("1", settings=settings)
+
+    rk = metrics.report_key("1", first["meta"]["as_of"], settings)
+    assert store["docs"][rk]["windows"] == first["windows"]
+    assert store["docs"][rk]["volume_profiles"] == first["volume_profiles"]
+
+
+def test_a_repeat_report_is_a_json_read_not_a_rebuild(settings, store, fake_kql,
+                                                      monkeypatch):
+    """Same symbol, same stop: the windows and profiles come back from Redis."""
+    first = metrics.report("1", window_minutes=60, settings=settings)
+    builds = {"n": 0}
+    real_payload, real_profile = metrics.window_payload, metrics.volume_profile
+    monkeypatch.setattr(metrics, "window_payload",
+                        lambda *a, **k: builds.__setitem__("n", builds["n"] + 1)
+                        or real_payload(*a, **k))
+    monkeypatch.setattr(metrics, "volume_profile",
+                        lambda *a, **k: builds.__setitem__("n", builds["n"] + 1)
+                        or real_profile(*a, **k))
+
+    second = metrics.report("1", window_minutes=240, settings=settings)
+
+    assert builds["n"] == 0
+    assert second["windows"] == first["windows"]
+    assert second["volume_profiles"] == first["volume_profiles"]
+    # Per-request fields still follow the request, not the stored copy.
+    assert second["summary"] == second["windows"]["240"]
+    assert second["requested_window_minutes"] == 240
+    assert second["selected_window_minutes"] == 240
+
+
+def test_two_instants_at_one_stop_share_a_report_entry(settings, store, fake_kql):
+    """The key is the resolved stop: either side of it hits the same bundle."""
+    metrics.report("1", as_of="2026-10-10T09:21:00Z", settings=settings)
+
+    body = metrics.report("1", as_of="2026-10-10T09:23:00Z", settings=settings)
+
+    assert body["meta"]["as_of"] == "2026-10-10T09:20:00+00:00"
+    assert body["meta"]["requested_as_of"] == "2026-10-10T09:23:00Z"
+    assert sum(k.count("report:") for k, _ in store["written"]) == 1
+
+
+def test_a_rewritten_grid_purges_the_symbol_s_reports(settings, store, fake_kql):
+    """Newest-row-wins can recompute a stop already built: stale bundles go."""
+    first = metrics.report("1", settings=settings)
+    rk = metrics.report_key("1", first["meta"]["as_of"], settings)
+    assert rk in store["docs"]
+
+    metrics.refresh_symbol("1", settings=settings)
+
+    assert rk not in store["docs"]
+    assert rk in store["deleted"]
+
+
+def test_report_entries_are_not_mistaken_for_cached_symbols(settings, store,
+                                                            fake_kql):
+    """The refresh set is grid entries only; report bundles hang a level deeper."""
+    metrics.report("1", settings=settings)
+
+    assert metrics.cached_symbols(settings) == ["1"]
     # The tick path keeps its own namespace.
     assert cache.key(settings, "ticks", "41") == "axioma:ctrader_dom:agg_dom:ticks:41"
 

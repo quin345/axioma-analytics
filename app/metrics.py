@@ -247,6 +247,25 @@ def requested_window(minutes: Any) -> int:
     return max(kql.WINDOW_SUFFIXES[0][1], want)
 
 
+def report_key(symbol: str | None, stop: object,
+               settings: Settings | None = None) -> str:
+    """The Redis key holding one symbol's built report bundle at one stop.
+
+    Keyed by the *resolved* stop, not the requested instant: two requests that
+    resolve to the same `as_of` row share one entry, while different stops never
+    collide. The grid is append-mostly, so a stop's row is near-immutable; when
+    the refresh cycle does rewrite a stop (`refresh_symbol`), it purges these
+    keys for that symbol rather than versioning them.
+    """
+    s = settings or get_settings()
+    try:
+        at = _as_utc(stop)
+        stamp = at.isoformat() if at is not None else str(stop)
+    except Exception:
+        stamp = str(stop)
+    return metrics_prefix(s) + ":report:" + ((symbol or "").strip() or "all") + ":" + stamp
+
+
 def report(symbol: str | None = None, *, window_minutes: int | None = None,
            as_of: object = None, settings: Settings | None = None) -> dict:
     """The full precomputed bundle for one symbol: every window at one stop.
@@ -255,6 +274,15 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
     row - so the UI can switch window without a request, exactly as it switches
     point in time. `window_minutes` only decides which one `summary` carries and
     what `selected_window_minutes` reports.
+
+    The built bundle is cached in Redis under `report_key` (one entry per
+    resolved stop), so a repeat request for the same symbol and stop is a JSON
+    read: no grid deserialise, no window/profile rebuild. The stop resolution
+    itself stays live - it is a row pick over the cached grid - but resolving
+    and then hitting the report entry is far cheaper than rebuilding all four
+    windows and four volume profiles. `requested_as_of`, `summary` and
+    `generated_at` differ per request, so they are stamped on after the cache
+    read rather than stored.
     """
     s = settings or get_settings()
     frame = load(symbol, settings=s)
@@ -276,13 +304,35 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
     suffix = kql.best_window(want)
     served = next(span for suf, span in kql.WINDOW_SUFFIXES if suf == suffix)
 
+    stops_list = stops(frame)
+    rk = report_key(symbol, at, s)
+    try:
+        stored = cache.get_json(rk, s)
+    except Exception:
+        stored = None
+    if isinstance(stored, dict) and stored.get("windows") and stored.get("volume_profiles"):
+        return clean({
+            **stored,
+            "summary": stored["windows"].get(str(served), stored.get("summary")),
+            "selected_window_minutes": served,
+            "requested_window_minutes": want,
+            "stops": stops_list,
+            "meta": {
+                **(stored.get("meta") or {}),
+                "as_of": at.isoformat() if at is not None else None,
+                "requested_as_of": str(as_of) if as_of is not None else None,
+                "stops_available": len(stops_list),
+                "generated_at": pd.Timestamp.utcnow().isoformat(),
+            },
+        })
+
     windows = {str(span): window_payload(row, suf) for suf, span in kql.WINDOW_SUFFIXES}
     profiles = {
         str(span): volume_profile(_ladder(row.get(f"vap_{suf}")), row.get(f"poc_{suf}"))
         for suf, span in kql.WINDOW_SUFFIXES
     }
 
-    return clean({
+    bundle = clean({
         "summary": windows[str(served)],
         "windows": windows,
         "volume_profiles": profiles,
@@ -290,16 +340,21 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
         "requested_window_minutes": want,
         "window_choices_minutes": [span for _, span in kql.WINDOW_SUFFIXES],
         "value_area_share": VALUE_AREA_SHARE,
-        "stops": stops(frame),
+        "stops": stops_list,
         "meta": {
             "symbol": str(row.get("symbolId", "")).strip() or (symbol or ""),
             "as_of": at.isoformat() if at is not None else None,
             "requested_as_of": str(as_of) if as_of is not None else None,
-            "stops_available": len(stops(frame)),
+            "stops_available": len(stops_list),
             "source": s.metrics_table,
             "generated_at": pd.Timestamp.utcnow().isoformat(),
         },
     })
+    try:
+        cache.set_json(rk, bundle, s.cache_ttl_seconds, s)
+    except Exception:
+        pass
+    return bundle
 
 
 # --------------------------------------------------------------------------
@@ -348,10 +403,14 @@ def cached_symbols(settings: Settings | None = None) -> list[str]:
     """
     s = settings or get_settings()
     marker = metrics_prefix(s) + ":"
+    # The grid entries live directly under the prefix (`metrics:<symbol>`); the
+    # built report bundles hang one level deeper (`metrics:report:<symbol>:...`)
+    # and must not be mistaken for cached symbols by the refresh cycle.
     return sorted(
         k[len(marker):]
         for k in cache.keys(s, s.kql_database, s.metrics_table, "metrics")
         if k.startswith(marker) and len(k) > len(marker)
+        and not k[len(marker):].startswith("report:")
     )
 
 
@@ -400,5 +459,30 @@ def refresh_symbol(symbol: str | None = None,
     grid = slide(cached if cached is not None else pd.DataFrame(), added, s.max_ticks)
     if not grid.empty:
         cache.set_frame(ck, grid, s.cache_ttl_seconds, s)
+        # A rewritten grid may have recomputed a stop this report cache already
+        # built: drop this symbol's report entries so the next request rebuilds
+        # from the fresh row rather than serving the stale bundle.
+        purge_reports(symbol, s)
     return grid
+
+
+def report_prefix(symbol: str | None = None,
+                  settings: Settings | None = None) -> str:
+    """The Redis key prefix holding one symbol's built report bundles."""
+    s = settings or get_settings()
+    return metrics_prefix(s) + ":report:" + (((symbol or "").strip() or "all") + ":")
+
+
+def purge_reports(symbol: str | None = None,
+                  settings: Settings | None = None) -> None:
+    """Drop one symbol's built report bundles after its grid was rewritten."""
+    s = settings or get_settings()
+    try:
+        stale = [k for k in cache.keys(s, s.kql_database, s.metrics_table,
+                                       "metrics", "report")
+                 if k.startswith(report_prefix(symbol, s))]
+    except Exception:
+        return
+    if stale:
+        cache.delete(s, *stale)
 
