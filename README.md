@@ -78,14 +78,18 @@ narrow the window, never widen it, and never trigger a second KQL read.
 
 Eight hours is what the dashboard's point-in-time controls need. The *Point in
 time* field spans four hours (`TIMELINE_MINUTES`) in five-minute steps
-(`TIMELINE_STEP_MINUTES`), and at each point on it an aggregate *Window* of 5
-to 240 minutes (`WINDOW_MIN_MINUTES` / `WINDOW_MAX_MINUTES`) may be chosen. The
-earliest point taken back by the widest window therefore reaches exactly
-4 h + 4 h, so every combination the controls offer is served from the cache.
-`/api/health` publishes all four values and the window ceiling is capped by
-the cache, so a shorter cache narrows the control instead of offering history
-it cannot fill. Moving the point in time or changing the window is a free,
-in-memory narrowing of the cached copy.
+(`TIMELINE_STEP_MINUTES`), and at each point on it an aggregate *Window* is
+chosen from a small fixed set — **1 h, 2 h, 3 h or 4 h**
+(`WINDOW_CHOICES_MINUTES`, 60/120/180/240). These mirror the four trailing
+windows the precomputed `metrics_5m` KQL table ships for every
+`(symbolId, as_of)` stop, so the control offers only what the table always
+precomputes. The earliest point taken back by the widest window therefore
+reaches exactly 4 h + 4 h, so every combination the controls offer is served
+from the cache. `/api/health` publishes the set as `window_choices_minutes`,
+and any choice wider than the cache is dropped rather than offered, so a
+shorter cache narrows the control instead of promising history it cannot fill.
+Moving the point in time or changing the window is a free, in-memory narrowing
+of the cached copy.
 
 ### Keeping the window current
 
@@ -114,7 +118,7 @@ its data while no ticks arrive.
 |---|---|---|
 | Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute aggregate window. |
 | Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
-| Window | `WINDOW_MIN_MINUTES="5"`, `WINDOW_MAX_MINUTES="240"` | The aggregate window offered at each point in time. The ceiling is capped by the cache. |
+| Window | `WINDOW_CHOICES_MINUTES="60,120,180,240"` | The fixed aggregate-window choices offered at each point in time (1 h / 2 h / 3 h / 4 h), mirroring the `metrics_5m` trailing windows. Choices wider than the cache are dropped. |
 | Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
 | TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 | Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
@@ -551,7 +555,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_choices_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full analytics bundle |

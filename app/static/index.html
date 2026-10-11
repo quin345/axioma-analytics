@@ -94,11 +94,13 @@
     </span>
     <span id="asOfRange" class="tlout tlrange"></span>
   </label>
-  <!-- Aggregate window: the analysis window ending at the chosen point, in
-       minutes. Run from 5 to the widest the cache holds. -->
+  <!-- Aggregate window: the trailing window the analysis runs over, ending at
+       the chosen point. The offered choices are the fixed windows the
+       precomputed `metrics_5m` table ships - 1 h / 2 h / 3 h / 4 h - filled
+       from `/api/health`. -->
   <label>Window
     <select id="windowMinutes"
-            title="Aggregation window ending at the chosen point in time: 5 to 240 minutes."></select>
+            title="Aggregation window ending at the chosen point in time: 1, 2, 3 or 4 hours."></select>
   </label>
   <label>Max ticks
     <input id="limit" type="number" value="50000" min="100" max="500000" step="5000" />

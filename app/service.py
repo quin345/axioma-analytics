@@ -82,10 +82,11 @@ class Status:
     window_minutes: int | None = None
     #: The point-in-time controls, echoed with the window so the UI can build
     #: them from the API: a `timeline_minutes` long timeline in
-    #: `timeline_step_minutes` steps, and aggregate-window choices from
-    #: `window_min_minutes` up to `window_max_minutes`.
+    #: `timeline_step_minutes` steps, and the fixed aggregate-window choices
+    #: (`window_choices_minutes`, the four `metrics_5m` windows 60/120/180/240).
     timeline_minutes: int | None = None
     timeline_step_minutes: int | None = None
+    window_choices_minutes: list[int] | None = None
     window_min_minutes: int | None = None
     window_max_minutes: int | None = None
 
@@ -139,6 +140,7 @@ def status(*, refresh: bool = False) -> Status:
         window_minutes=s.cache_lookback_minutes,
         timeline_minutes=max(1, s.timeline_minutes),
         timeline_step_minutes=max(1, s.timeline_step_minutes),
+        window_choices_minutes=list(s.window_choices),
         window_min_minutes=max(1, s.window_min_minutes),
         window_max_minutes=s.max_window_minutes,
     )

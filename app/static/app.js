@@ -479,24 +479,41 @@ function asOfIso() {
 
 /**
  * The aggregate window: how many minutes the analysis runs for, ending at the
- * chosen point in time. Every step from the minimum up to the maximum the API
- * publishes, built from the API so it can never offer more history than the
- * cache holds - a window change is always a free, in-memory narrowing.
+ * chosen point in time. The offered set is the fixed choices `/api/health`
+ * publishes (`window_choices_minutes`), which mirror the four trailing windows
+ * the precomputed `metrics_5m` table always ships - 1 h / 2 h / 3 h / 4 h - so
+ * the control can never offer more history than the table precomputes, and a
+ * window change is always a free, in-memory narrowing. When the API has not
+ * published the fixed set (an older cached payload), fall back to building the
+ * choices from the legacy `window_min_minutes`..`window_max_minutes` bounds.
  */
 function fillWindows(h) {
   const sel = $("windowMinutes");
   if (!sel) return;
-  const step = Math.max(1, Number(h && h.timeline_step_minutes) || 5);
-  const min = Math.max(1, Number(h && h.window_min_minutes) || 5);
-  const max = Math.max(min,
-    Number(h && h.window_max_minutes) || Number(h && h.lookback_minutes) || 240);
-  const choices = [];
-  for (let m = min; m <= max; m += step) choices.push(m);
-  if (choices[choices.length - 1] !== max) choices.push(max);
+  const choices = Array.isArray(h && h.window_choices_minutes)
+    ? h.window_choices_minutes
+        .map((m) => Number(m))
+        .filter((m) => Number.isFinite(m) && m > 0)
+    : [];
+  let opts = choices;
+  if (!opts.length) {
+    // Legacy fallback: every step from the minimum up to the maximum the API
+    // publishes, so it can never offer more history than the cache holds.
+    const step = Math.max(1, Number(h && h.timeline_step_minutes) || 5);
+    const min = Math.max(1, Number(h && h.window_min_minutes) || 5);
+    const max = Math.max(min,
+      Number(h && h.window_max_minutes) || Number(h && h.lookback_minutes) || 240);
+    opts = [];
+    for (let m = min; m <= max; m += step) opts.push(m);
+    if (opts[opts.length - 1] !== max) opts.push(max);
+  }
+  opts = [...new Set(opts)].sort((a, b) => a - b);
   const keep = Number(val("windowMinutes", 60));
-  sel.innerHTML = choices
+  sel.innerHTML = opts
     .map((m) => `<option value="${m}">${esc(durationLabel(m))}</option>`).join("");
-  sel.value = String(choices.includes(keep) ? keep : (choices.includes(60) ? 60 : max));
+  // Keep the current choice if it is still offered, else default to 1 h (60),
+  // else the widest on offer.
+  sel.value = String(opts.includes(keep) ? keep : (opts.includes(60) ? 60 : opts[opts.length - 1]));
 }
 
 

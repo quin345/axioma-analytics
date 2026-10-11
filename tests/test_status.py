@@ -125,7 +125,8 @@ def test_the_point_in_time_controls_are_echoed_on_the_probe(monkeypatch):
     st = service.status(refresh=True)
 
     assert (st.timeline_minutes, st.timeline_step_minutes) == (240, 5)
-    assert (st.window_min_minutes, st.window_max_minutes) == (5, 240)
+    assert st.window_choices_minutes == [60, 120, 180, 240]
+    assert (st.window_min_minutes, st.window_max_minutes) == (60, 240)
 
 
 def test_the_window_ceiling_follows_a_shorter_cache(monkeypatch):

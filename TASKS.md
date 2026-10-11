@@ -8,6 +8,50 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 
 ---
 
+## 2026-10-11 - Fixed 4-window control aligned to `metrics_5m` (dev)
+
+Scope: reduce the aggregate *Window* control from the 5–240 min slider to the
+four fixed trailing windows the precomputed `metrics_5m` KQL table ships
+(1 h / 2 h / 3 h / 4 h), keeping `/api/health` as the single source of the
+offered set. The pandas read path is unchanged — the `metrics_5m` table is
+still being built, so the app keeps recomputing in memory; only the *control*
+and its contract move now.
+
+### Backend
+- [x] `app/config.py`: `WINDOW_MIN_MINUTES`/`WINDOW_MAX_MINUTES` (5/240) are
+      replaced as the driver of the control by `WINDOW_CHOICES_MINUTES`
+      (`60,120,180,240`), parsed/de-duped/sorted by a new `_env_int_list`; a
+      `window_choices` property caps the choices at the cache and never returns
+      empty. The legacy min/max stay (now 60/240) so an older cached health
+      payload still renders a sensible control.
+- [x] `app/service.py`: `Status.window_choices_minutes` echoes `window_choices`
+- [x] `app/main.py`: `/api/health` publishes `window_choices_minutes`
+
+### UI
+- [x] `app/static/app.js`: `fillWindows()` builds `#windowMinutes` from
+      `window_choices_minutes` (four fixed options), falling back to the legacy
+      min..max slider only when the field is absent; defaults to 1 h
+- [x] `app/static/index.html`: *Window* label/title now "1, 2, 3 or 4 hours"
+
+### Docs & tests
+- [x] `.env.example`, `README.md`, this file updated
+- [x] `tests/test_config.py`: window choices default/override/normalise,
+      cache-capping and never-empty; isolation set covers the new env keys
+- [x] `tests/test_status.py`, `tests/test_analytics_api.py`: health echoes
+      `window_choices_minutes == [60,120,180,240]`
+
+### Verification
+- [x] `pytest` - 327 passed; `node --check app/static/app.js` clean
+
+**Notes:**
+- The `metrics_5m` table (per `docs/metrics_5m.md`) is the source-of-truth for
+  the four windows; the control now offers exactly what it precomputes.
+- When the table lands, the read path (`app/refresh.py` / `app/service.py`)
+  flips from "cache raw ticks, recompute" to "cache the finished metrics, look
+  up" — that is a separate change and needs the table first.
+
+---
+
 ## 2026-10-09 - Point-in-time field, aggregate window, 8 h cache, descending ladder (dev)
 
 ### Backend

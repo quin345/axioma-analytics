@@ -89,7 +89,10 @@ def test_health_publishes_the_point_in_time_controls(client):
     # Four hours of timeline plus the widest (240 min) window = 8 hours.
     assert body["lookback_minutes"] == 480
     assert (body["timeline_minutes"], body["timeline_step_minutes"]) == (240, 5)
-    assert (body["window_min_minutes"], body["window_max_minutes"]) == (5, 240)
+    # The window is a small fixed set mirroring the four trailing windows the
+    # precomputed `metrics_5m` table ships: 1 h / 2 h / 3 h / 4 h.
+    assert body["window_choices_minutes"] == [60, 120, 180, 240]
+    assert (body["window_min_minutes"], body["window_max_minutes"]) == (60, 240)
     assert body["timeline_minutes"] + body["window_max_minutes"] == body["lookback_minutes"]
 
 

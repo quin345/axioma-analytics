@@ -21,6 +21,8 @@ _ENV_KEYS = (
     "REDIS_HOST", "REDIS_PORT", "REDIS_SSL", "REDIS_DB", "REDIS_TIMEOUT",
     "REDIS_KEY_PREFIX", "REDIS_TTL_SECONDS", "CACHE_LOOKBACK_HOURS",
     "CACHE_REFRESH_MINUTES",
+    "TIMELINE_MINUTES", "TIMELINE_STEP_MINUTES",
+    "WINDOW_CHOICES_MINUTES", "WINDOW_MIN_MINUTES", "WINDOW_MAX_MINUTES",
     "FABRIC_TENANT_ID", "FABRIC_CLIENT_ID", "FABRIC_CLIENT_SECRET",
     "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
     "MAINTENANCE_MODE",
@@ -156,7 +158,36 @@ def test_the_widest_window_is_clamped_to_the_cache(monkeypatch):
 def test_the_point_in_time_controls_default() -> None:
     s = Settings()
     assert (s.timeline_minutes, s.timeline_step_minutes) == (240, 5)
-    assert (s.window_min_minutes, s.window_max_minutes) == (5, 240)
+    # The aggregate window is a small fixed set that mirrors the four trailing
+    # windows the precomputed `metrics_5m` table ships: 1 h / 2 h / 3 h / 4 h.
+    assert s.window_choices == (60, 120, 180, 240)
+    assert (s.window_min_minutes, s.window_max_minutes) == (60, 240)
+
+
+def test_the_window_choices_are_overridable_and_normalised(monkeypatch):
+    """`WINDOW_CHOICES_MINUTES` is de-duped and sorted, so a stray config value
+    cannot leave the UI with duplicate or out-of-order options."""
+    monkeypatch.setenv("WINDOW_CHOICES_MINUTES", "240, 60, 60, 180, 120, bad")
+    assert Settings().window_choices == (60, 120, 180, 240)
+
+
+def test_the_window_choices_fall_back_to_the_default_when_unparseable(monkeypatch):
+    monkeypatch.setenv("WINDOW_CHOICES_MINUTES", "not-numbers")
+    assert Settings().window_choices == (60, 120, 180, 240)
+
+
+def test_a_window_choice_wider_than_the_cache_is_dropped(monkeypatch):
+    """A fixed choice the cache cannot serve is dropped, not offered."""
+    s = Settings(cache_lookback_hours=3)  # 180 minutes
+    assert s.window_choices == (60, 120, 180)
+    assert all(m <= s.cache_lookback_minutes for m in s.window_choices)
+
+
+def test_the_window_choices_are_never_empty():
+    """If every choice is wider than the cache, the cache window itself is
+    offered so the control always has a usable value."""
+    s = Settings(cache_lookback_hours=1)  # 60 minutes
+    assert s.window_choices == (60,)
 
 
 def test_the_point_in_time_controls_are_overridable(monkeypatch):

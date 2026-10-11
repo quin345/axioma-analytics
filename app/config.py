@@ -18,10 +18,12 @@ serves is never more than half an hour behind the feed and a symbol's cache
 entry never holds more than eight hours of rows.
 
 Eight hours is the sum the aggregate-window controls need: the timeline the user
-picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the window
-at that point may be `WINDOW_MAX_MINUTES` (240) more, so the earliest point
-with the widest window reaches exactly eight hours back. Anything shorter and
-the oldest selectable combination would fall outside the cache.
+picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the widest
+window at that point is 240 minutes more, so the earliest point with the widest
+window reaches exactly eight hours back. Anything shorter and the oldest
+selectable combination would fall outside the cache. The window itself is one of
+a small fixed set (`WINDOW_CHOICES_MINUTES`, 60/120/180/240) that mirrors the
+four trailing windows the precomputed `metrics_5m` table always ships.
 
 There is no environment selector, no catalog discovery and no synthetic
 fallback - the configuration is just the endpoints, the Entra ID identity and
@@ -71,6 +73,31 @@ def _env_bool(*names: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.lower() in _TRUTHY
+
+
+def _env_int_list(*names: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    """A comma/space separated integer list from `names`, else `default`.
+
+    Duplicate, out-of-order and non-numeric entries are tolerated: the values
+    are de-duped and sorted ascending, so a stray config value cannot leave the
+    UI with two identical options or with a wider window offered after a
+    narrower one.
+    """
+    raw = _env(*names)
+    if not raw:
+        return tuple(default)
+    seen: set[int] = set()
+    for part in raw.replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            continue
+        if n > 0:
+            seen.add(n)
+    return tuple(sorted(seen)) if seen else tuple(default)
 
 
 def _display_timezone(raw: str | None) -> str:
@@ -157,10 +184,21 @@ class Settings:
     timeline_step_minutes: int = field(
         default_factory=lambda: _env_int("TIMELINE_STEP_MINUTES", default=5)
     )
-    #: The aggregate-window choices offered at a point, in minutes. The widest
-    #: plus the timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
+    #: The fixed aggregate-window choices offered at a point, in minutes. These
+    #: mirror the four trailing windows `metrics_5m` precomputes for every
+    #: `(symbolId, as_of)` stop - 1 h / 2 h / 3 h / 4 h - so the UI offers only
+    #: what the precomputed table always ships. The widest (240) plus the
+    #: timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
+    #: `window_min_minutes` / `window_max_minutes` are the legacy continuous
+    #: bounds, kept only so an older cached `/api/health` payload still renders
+    #: a sensible control; the UI prefers `window_choices` when present.
+    window_choices_minutes: tuple[int, ...] = field(
+        default_factory=lambda: _env_int_list(
+            "WINDOW_CHOICES_MINUTES", default=(60, 120, 180, 240)
+        )
+    )
     window_min_minutes: int = field(
-        default_factory=lambda: _env_int("WINDOW_MIN_MINUTES", default=5)
+        default_factory=lambda: _env_int("WINDOW_MIN_MINUTES", default=60)
     )
     window_max_minutes: int = field(
         default_factory=lambda: _env_int("WINDOW_MAX_MINUTES", default=240)
@@ -232,6 +270,20 @@ class Settings:
         """
         lo = max(1, self.window_min_minutes)
         return max(lo, min(self.window_max_minutes, self.cache_lookback_minutes))
+
+    @property
+    def window_choices(self) -> tuple[int, ...]:
+        """The fixed aggregate-window choices the UI offers, in minutes.
+
+        `window_choices_minutes` (the four `metrics_5m` windows: 1 h / 2 h /
+        3 h / 4 h) capped by the cache window, so a shorter cache drops a
+        choice it cannot serve rather than offering history it does not hold.
+        Never empty: if every choice is wider than the cache, the cache window
+        itself is offered so the control always has a usable value.
+        """
+        cap = self.cache_lookback_minutes
+        choices = tuple(m for m in self.window_choices_minutes if m <= cap)
+        return choices or (cap,)
 
     @property
     def cache_refresh_seconds(self) -> int:

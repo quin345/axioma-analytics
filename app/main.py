@@ -93,9 +93,11 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         # The point-in-time controls, published rather than hard-coded so a
         # shorter cache window or a different grid reaches the UI unchanged:
         # a `timeline_minutes` long timeline in `timeline_step_minutes` steps,
-        # and the aggregate window offered at each of its points.
+        # and the fixed aggregate-window choices (the four `metrics_5m`
+        # windows, 1 h / 2 h / 3 h / 4 h) offered at each of its points.
         "timeline_minutes": st.timeline_minutes,
         "timeline_step_minutes": st.timeline_step_minutes,
+        "window_choices_minutes": st.window_choices_minutes,
         "window_min_minutes": st.window_min_minutes,
         "window_max_minutes": st.window_max_minutes,
         # The aggregate window the analysis runs over, bounded by what Redis
