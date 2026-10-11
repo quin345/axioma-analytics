@@ -320,22 +320,42 @@ a scheduled refresh (Fabric notebook / eventstream / update policy) that runs
 No code change is required to *produce* this — but the read path flips from "cache
 raw ticks, recompute" to "cache the finished metrics, look up":
 
-1. **Refresh job** (`app/refresh.py`, on `CACHE_REFRESH_MINUTES`): run
-   `Metrics5m()` and write the result per symbol into Redis, replacing today's
-   `axioma:ticks:<symbol>` Parquet blob with an `axioma:metrics:<symbol>` blob
-   (49 `as_of` rows × ~60 columns). Same TTL (`REDIS_TTL_SECONDS=450`), same
-   clock cadence (5-minute slots, 15 s past the mark). A cache miss still falls back to running `Metrics5m()` directly,
-   preserving the existing "KQL failure sets `connected:false`, cache failure does
-   not" contract in `app/service.py`.
-2. **`/api/analytics`** (`app/service.py`): read the cached `metrics_5m` frame for
-   the symbol, pick the requested `as_of` row and the requested window column set
-   (`_1h/_2h/_3h/_4h`). The nested `vap_*` ladder is already in the blob, so the
-   volume-profile panel needs **no** KQL call and no re-binning.
-3. **Window control** (`app/static/index.html`): the 5–240 min slider collapses to
-   the four fixed choices 60/120/180/240. `window_min_minutes` / `window_max_minutes`
-   and the `/api/health` echoes stay the single source of the offered set;
-   `metrics_5m` always ships all four. The point-in-time field is unchanged (5-min
-   grid, 4 h).
+1. **Refresh job** (`app/refresh.py`, on `CACHE_REFRESH_MINUTES`): the cycle reads
+   `metrics_5m` and slides the grid per symbol into Redis — `metrics.refresh_symbol`,
+   called from the cache cycle in `app/service.py` and gated on `METRICS_SOURCE`.
+   It lands under `<prefix>:<database>:metrics_5m:metrics:<symbol>`, keyed apart
+   from the raw `agg_dom` ticks: the two hold different shapes under the same
+   symbol, so one key namespace for both would let a stale tick frame be read back
+   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (5-minute
+   slots, 15 s past the mark). A cache miss still falls back to reading
+   `metrics_5m` directly, preserving the existing "KQL failure sets
+   `connected:false`, cache failure does not" contract in `app/service.py`.
+2. **`/api/metrics`** (`app/main.py` → `app/metrics.py`): read the cached grid for
+   the symbol, pick the row for the requested `as_of` and the column set for the
+   requested window (`_1h/_2h/_3h/_4h`). One build produces the whole bundle — all
+   four windows and their `vap_*` ladders — and it is cached in turn under
+   `...:metrics_5m:metrics:report:<symbol>:<as_of>`, so switching window, or an
+   instant that resolves to the same stop, costs no rebuild. The ladder is already
+   in the blob, so the volume-profile panel needs **no** KQL call and no
+   re-binning. An `as_of` is resolved to the stop it falls inside rather than
+   refused, and an absent one means the newest stop.
+3. **`/api/analytics`** (`app/service.py`) stays on the raw tick path: the
+   tick-derived panels — OHLCV bars, the tick tape, the episode calendar, the
+   microstructure and distribution details — still come from `agg_dom`, because
+   they are not in the precomputed table.
+4. **The dashboard** (`app/static/app.js`) asks for both in one `analyse()` call,
+   for the same symbol, window and point in time, then lays the metrics bundle
+   over the report: its `summary` and its
+   `volume_profiles[selected_window_minutes]` replace the tick-derived ones under
+   the same key names, so the headline tiles and the volume-profile panel read
+   `metrics_5m` while the panels only the tick path can fill keep their values.
+   The point-in-time selector is anchored on `/api/health`'s
+   `metrics_latest_as_of`, so its default and its latest bound are the newest stop
+   the grid ships.
+5. **Window control** (`app/static/index.html`): the offered set collapses to the
+   four fixed choices 60/120/180/240, filled from `/api/health` so the control
+   cannot offer a span the table does not ship; `metrics_5m` always carries all
+   four. The point-in-time field is unchanged (5-min grid, 4 h).
 
 This keeps the existing guarantee intact: a page load never triggers a KQL scan,
 and the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly

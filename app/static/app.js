@@ -245,12 +245,14 @@ async function loadHealth() {
   // The cadence strip: "Data refreshes every 5 minutes", mirrored from the API.
   set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
-  // The timeline is anchored on the newest row the feed has, so a symbol switch
-  // (which can change that row) re-anchors it; `buildTimeline` keeps whatever
-  // point the user picked rather than sliding it.
+  // The timeline is anchored on the newest `metrics_5m` stop - the point the
+  // headline metrics are served from - so the selector's latest bound is the
+  // last precomputed timestamp, not merely the last raw tick. It falls back to
+  // the newest tick when the grid is empty or the probe predates it, so the
+  // control still lands on something usable rather than an empty range.
   // The field may sit after the report, so anchor it on the newest data and
   // rebuild the earliest/latest bounds before renderFreshness paints the badge.
-  buildTimeline(h.latest_tick || undefined);
+  buildTimeline(h.metrics_latest_as_of || h.latest_tick || undefined);
   renderFreshness();
   return h;
 }
@@ -368,7 +370,9 @@ async function fillTimeframes(h) {
  * That is what keeps the oldest stop with the widest window inside the cached
  * window: span (4 h) + window (4 h) = the 8 hours Redis holds, exactly. The
  * chosen point is kept as an absolute instant, so refilling the controls or
- * newer data arriving does not silently move what the user selected.
+ * newer data arriving does not silently move a point the user picked; while the
+ * point still sits on the newest stop it follows the feed instead, which is how
+ * the control's default stays the latest `metrics_5m` timestamp.
  */
 const timeline = { span: 240, step: 5, earliest: null, latest: null };
 window.__asOf = null;        // chosen point in time, epoch ms
@@ -406,11 +410,14 @@ function buildTimeline(fromIso) {
 
   // The input is a HH:MM wall-clock time, so intersect the typed slot with the
   // 4-hour window and keep the stop grid: the field can never show a point the
-  // analysis does not honour. An empty field, or a first paint, follows the
-  // newest stop instead of inventing a midnight slot.
+  // analysis does not honour. A point the user moved off the newest stop stays
+  // put when newer data arrives; one still sitting on it follows the feed,
+  // which is what makes the selector's default the *latest* `metrics_5m`
+  // timestamp rather than whichever one happened to be newest at page load.
   const input = $("asOf");
   const typed = input ? String(input.value || "").trim() : "";
-  if (typed) {
+  const follows = window.__asOfLatest !== false;
+  if (typed && !follows) {
     // The typed HH:MM is a wall-clock time in the display zone: resolve it
     // against that zone's calendar day rather than UTC's.
     const { y, mo, d } = zoneDate(anchor);
@@ -424,6 +431,15 @@ function buildTimeline(fromIso) {
     window.__asOf = point;
     window.__asOfLatest = point === timeline.latest;
     input.value = fmt.hm(new Date(point).toISOString());
+  } else {
+    // Nothing chosen yet - a first paint - or the chosen point is still the
+    // newest stop. Pin the control to that stop, which for the `metrics_5m`
+    // path is the last precomputed timestamp, so the field shows the point the
+    // headline metrics were served for instead of sitting empty while the API
+    // silently resolves the newest row.
+    window.__asOf = timeline.latest;
+    window.__asOfLatest = true;
+    if (input) input.value = fmt.hm(new Date(timeline.latest).toISOString());
   }
   renderAsOf();
 }
@@ -1378,26 +1394,78 @@ function syncCalendarDetail() {
 
 /* ---------------- orchestration ---------------- */
 
+/**
+ * Run one analysis. Two reads go out together:
+ *
+ * - `/api/analytics` - the tick-derived panels: OHLCV bars, tick tape, the
+ *   episode calendar and the microstructure/distribution details.
+ * - `/api/metrics` - every headline metric and the volume profile, read from
+ *   the precomputed `metrics_5m` grid (a Redis lookup, not a re-scan).
+ *
+ * Both are asked for the same symbol, window span and point in time. The
+ * metrics bundle is then laid over the report: the two agree on the key names
+ * (`ticks`, OHLC, `vwap`, `change_pct`, `total_volume`, `realized_vol_bps`,
+ * `avg_spread`, `annualised_vol_pct`) and on the volume-profile shape, so the
+ * dashboard reads `metrics_5m` without any panel knowing which source it got.
+ * Keys the table does not carry (durations, percentiles, trade counts) keep
+ * their tick-derived values.
+ *
+ * When the metrics grid cannot be read the tick-derived summary stands in and
+ * the banner says so, rather than blanking a page whose other panels are fine.
+ */
 async function analyse() {
   const btn = $("run");
   if (btn) btn.disabled = true;
   setLoading(true);
   try {
+    // The chosen point in time. Absent until the timeline is built, which both
+    // APIs read as "the newest row" / "the newest stop".
+    const point = asOfIso();
+    // How wide the aggregate window runs ending at the chosen point; the API
+    // clamps it to the cached window anyway, so a stale page or a
+    // hand-edited URL still returns data rather than a 422.
+    const windowMinutes = val("windowMinutes", 60) || 60;
     const p = new URLSearchParams({
       symbol: val("symbol"),
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
-      // How wide the aggregate window runs ending at the chosen point; the API
-      // clamps it to the cached window anyway, so a stale page or a
-      // hand-edited URL still returns data rather than a 422.
-      window_minutes: val("windowMinutes", 60) || 60,
-      // The chosen point in time. Absent until the timeline is built, which the
-      // API reads as "up to the newest row".
-      ...(asOfIso() ? { as_of: asOfIso() } : {}),
+      window_minutes: windowMinutes,
+      ...(point ? { as_of: point } : {}),
     });
-    const r = await api(`/api/analytics?${p}`);
+    // The metrics read needs only what identifies one row of the grid: the
+    // symbol, the span the `metrics_5m` table ships a column set for, and the
+    // point in time.
+    const mp = new URLSearchParams({
+      symbol: val("symbol"),
+      window_minutes: windowMinutes,
+      ...(point ? { as_of: point } : {}),
+    });
+    // The metrics bundle failing must not take the tick panels down with it, so
+    // it is caught and reported while the report still renders.
+    let metricsFailed = null;
+    const [r, m] = await Promise.all([
+      api(`/api/analytics?${p}`),
+      api(`/api/metrics?${mp}`).catch((err) => { metricsFailed = err; return null; }),
+    ]);
     window.__lastReport = r;
+    window.__metrics = m;
+    if (m) {
+      // `metrics_5m` is the source of truth for the metrics it carries.
+      const s5 = m.summary || {};
+      r.summary = { ...r.summary, ...s5 };
+      // Displacement has to track the overlaid change: the absolute move is not
+      // a `metrics_5m` column, so derive it from the stop the table served
+      // rather than leave the tick path's slightly different figure beside it.
+      if (s5.open != null && s5.close != null) r.summary.change = s5.close - s5.open;
+      // The profile for the span actually served - a span the table does not
+      // ship is answered with the widest one no wider than the ask.
+      const profile = (m.volume_profiles || {})[String(m.selected_window_minutes)];
+      if (profile) r.volume_profile = profile;
+      r.metrics_source = (m.meta || {}).source || null;
+    } else if (metricsFailed) {
+      banner([`Headline metrics could not be read from metrics_5m: ${metricsFailed.message}`]);
+    }
     renderKpis(r.summary, r.microstructure);
     renderCharts(r);
     renderTicks(r.ticks);

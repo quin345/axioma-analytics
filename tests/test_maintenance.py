@@ -339,3 +339,50 @@ def test_the_script_never_declares_a_helper_twice():
 
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert dupes == [], f"app.js declares these functions more than once: {dupes}"
+
+
+# ----------------------------------------------------------------------
+# The metrics source
+# ----------------------------------------------------------------------
+
+def test_the_dashboard_serves_its_metrics_from_the_metrics_5m_api():
+    """The headline tiles and the volume-profile panel read the precomputed
+    `metrics_5m` grid through `/api/metrics`, not the aggregate-DOM report.
+
+    Both endpoints are green and the table has backed the lookup API since it
+    shipped, but the script kept driving every panel from `/api/analytics` - so
+    the dashboard showed tick-derived numbers and `/api/metrics` was dead
+    weight. Pin the wiring, and pin that the tick-only panels still come from
+    the report: the two reads have to go out together.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
+
+    # The precomputed grid is the source of the metrics it carries.
+    assert "api(`/api/metrics?${mp}`)" in body
+    assert "r.summary = { ...r.summary, ...s5 }" in body
+    # The profile for the served span replaces the tick-binned one, same shape.
+    assert "m.volume_profiles" in body
+    assert "r.volume_profile = profile" in body
+    # The tick-derived panels still come from the report, in the same call.
+    assert "api(`/api/analytics?${p}`)" in body
+    assert "Promise.all" in body
+
+
+def test_the_point_in_time_defaults_to_the_newest_metrics_stop():
+    """The selector's latest bound - and the first paint - are the newest
+    `metrics_5m` stop, so the headline numbers and the chosen point agree.
+
+    The timeline is anchored on `/api/health`'s `metrics_latest_as_of` rather
+    than the newest raw tick: a tick ahead of the grid would otherwise offer a
+    point the metrics lookup cannot answer. An empty field pins to that stop
+    instead of sitting blank while the API quietly resolves the newest row.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "buildTimeline(h.metrics_latest_as_of || h.latest_tick || undefined);" in js
+    assert "window.__asOf = timeline.latest;" in js
+    # The field shows the pinned stop, not an empty control.
+    assert "input.value = fmt.hm(new Date(timeline.latest).toISOString());" in js
+    # A point the user moved off the newest stop is kept; one still on it follows.
+    assert "window.__asOfLatest !== false" in js

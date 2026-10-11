@@ -315,8 +315,8 @@ It redirects HTTP to HTTPS (with the ACME challenge path carved out so
 
 | Location | Why it differs |
 |---|---|
-| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off. A cold analytics request may still be scanning KQL and returns large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, and buffering would hold big payloads in nginx memory. |
-| `/static/` | Short `expires`, so unversioned filenames still revalidate. |
+| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off, and `add_header Cache-Control "no-store"`. A cold analytics request may still be scanning KQL and returns large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, buffering would hold big payloads in nginx memory, and the payload is recomputed every 5 minutes, so it must never be served from a stale cache. |
+| `/static/` | `expires -1` (`Cache-Control: no-cache`), so the browser revalidates on every load. The app already sends `no-cache, must-revalidate`; a *positive* `expires` here would overwrite it and pin `app.js`/`styles.css` in the browser — after a deploy that pairs a stale `app.js` with the fresh `index.html`, which renders controls the script cannot bind. ETag/Last-Modified turn the revalidation into a cheap `304`. |
 | `/` | Dashboard and everything else. |
 
 The bare-domain and `www` blocks are front doors, not sites of their own:
@@ -563,7 +563,8 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_choices_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
-| `GET /api/analytics` | Full analytics bundle |
+| `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
+| `GET /api/metrics` | The precomputed `metrics_5m` bundle: every headline metric and the volume profile for the symbol's chosen (default: newest) `as_of` stop, served from Redis |
 | `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
@@ -589,6 +590,25 @@ symbol's `asset_class`.
 ```bash
 # The last hour, ending two hours ago.
 curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-09T02:20:00Z'
+```
+
+`/api/metrics` parameters: `symbol`, `window_minutes`, `as_of`. The dashboard
+reads this for its headline tiles and the volume-profile panel, and
+`/api/analytics` for the panels only the tick path can fill; both are asked for
+the same symbol, window and point in time.
+
+Its `window_minutes` is snapped *down* to one of the four spans the precomputed
+table ships (60/120/180/240), and the payload reports the snap rather than hiding
+it: `requested_window_minutes` vs `selected_window_minutes`, with `summary` equal
+to `windows[selected_window_minutes]`. All four windows come back together, so
+changing span costs no request. `as_of` resolves to the stop it falls inside
+rather than failing, and omitted means the newest stop. `meta` names the source
+table (`metrics_5m`) and the stop it read, and an empty table is a `502` naming
+the table — the metrics job not having run is not a feed outage.
+
+```bash
+# Every window at the newest stop; the 90-minute ask is answered with the 60-minute one.
+curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'
 ```
 
 ---
@@ -658,6 +678,7 @@ both stubbed, and the cycle is driven with a stub instead of the network.
 | Cached ticks look stale after a pipeline backfill | The cycle slides each entry incrementally, so rows older than the cached newest row are only picked up by a full read. Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`) and the next cycle re-reads the whole window; the TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |
 | Health's `cache_refreshed_at` is not advancing | The cycle is failing or switched off (`CACHE_REFRESH_MINUTES=0`). Check `journalctl -u axioma.service` for `Cache refresh cycle failed`; the dashboard still works, every request just falls through to KQL. |
 | Every request is slow again | The cache is empty or unreachable, so each read costs a KQL scan. Check `cache_connected` and whether the symbols are cached (`cached_symbols`). |
+| The site still looks outdated (old UI) right after a deploy | The browser is serving a cached `/static/` asset. Confirm nginx returns `Cache-Control: no-cache` (not a positive `expires`) for `/static/`: the app sends `no-cache, must-revalidate` and nginx must not overwrite it, or `app.js` lingers until the `expires` window passes and pairs with the new `index.html`. A hard reload bypasses it once. |
 | `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |
 | `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |
