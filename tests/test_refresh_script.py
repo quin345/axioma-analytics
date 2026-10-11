@@ -26,7 +26,7 @@ _SUMMARY = {
     "symbols": 1,
     "rows": 240,
     "cache_window_minutes": 240,
-    "interval_minutes": 30,
+    "interval_minutes": 5,
     "errors": [],
 }
 
@@ -54,7 +54,7 @@ def test_a_configured_run_prints_a_summary_and_succeeds(script, configured, caps
 
     out = capsys.readouterr().out
     assert "Refreshed 1 symbol(s) over 4 h, 240 row(s)" in out
-    assert "next cycle in 30 min" in out
+    assert "next cycle in 5 min" in out
 
 
 def test_the_json_flag_prints_the_summary(script, configured, capsys, monkeypatch):

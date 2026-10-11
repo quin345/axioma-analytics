@@ -172,10 +172,10 @@ def test_the_header_says_last_update_not_latest_tick(client):
     assert 'id="lastTick"' in header and "Last update" in header
     assert "Latest tick" not in header
     # The alignment is stated in the tooltip, so it is not a surprise.
-    assert "30-minute refresh step" in header
-    # The cadence strip leads with the 30-minute grid, not 45.
-    assert "Data refreshes every 30 minutes" in page
-    assert "Data refreshes every 45 minutes" not in page
+    assert "5-minute refresh step" in header
+    # The cadence strip leads with the 5-minute grid, not 30.
+    assert "Data refreshes every 5 minutes" in page
+    assert "Data refreshes every 30 minutes" not in page
 
 
 def test_every_control_the_script_reads_exists_in_the_page():

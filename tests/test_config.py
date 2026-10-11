@@ -21,7 +21,7 @@ _ENV_KEYS = (
     "KQL_LAG_MINUTES", "SYMBOL_TABLE", "DEFAULT_SYMBOL", "MAX_TICKS",
     "REDIS_HOST", "REDIS_PORT", "REDIS_SSL", "REDIS_DB", "REDIS_TIMEOUT",
     "REDIS_KEY_PREFIX", "REDIS_TTL_SECONDS", "CACHE_LOOKBACK_HOURS",
-    "CACHE_REFRESH_MINUTES",
+    "CACHE_REFRESH_MINUTES", "CACHE_REFRESH_OFFSET_SECONDS",
     "TIMELINE_MINUTES", "TIMELINE_STEP_MINUTES",
     "WINDOW_CHOICES_MINUTES", "WINDOW_MIN_MINUTES", "WINDOW_MAX_MINUTES",
     "FABRIC_TENANT_ID", "FABRIC_CLIENT_ID", "FABRIC_CLIENT_SECRET",
@@ -258,14 +258,24 @@ def test_cache_window_is_never_degenerate(monkeypatch):
 
 
 def test_cache_ttl_covers_one_ingestion_interval():
-    """45 minutes: long enough to be useful, short enough not to outlive data."""
-    assert Settings().cache_ttl_seconds == 2700
+    """450 s (7.5 min): 1.5 refresh cycles, so one miss still leaves data."""
+    assert Settings().cache_ttl_seconds == 450
 
 
-def test_the_refresh_cycle_runs_every_half_hour():
+def test_the_refresh_cycle_runs_every_five_minutes():
     s = Settings()
-    assert s.cache_refresh_minutes == 30
-    assert s.cache_refresh_seconds == 1800
+    assert s.cache_refresh_minutes == 5
+    assert s.cache_refresh_seconds == 300
+
+
+def test_the_refresh_cycle_fires_just_past_the_mark():
+    s = Settings()
+    assert s.cache_refresh_offset_seconds == 15
+
+
+def test_the_refresh_offset_is_overridable(monkeypatch):
+    monkeypatch.setenv("CACHE_REFRESH_OFFSET_SECONDS", "30")
+    assert Settings().cache_refresh_offset_seconds == 30
 
 
 def test_the_refresh_cycle_is_overridable(monkeypatch):
@@ -280,7 +290,7 @@ def test_the_refresh_cycle_can_be_switched_off(monkeypatch):
 
 
 def test_the_ttl_outlives_a_refresh_cycle():
-    """A missed cycle must not empty the cache: 2700 s covers 1.5 cycles."""
+    """A missed cycle must not empty the cache: 450 s covers 1.5 cycles."""
     s = Settings()
     assert s.cache_ttl_seconds > s.cache_refresh_seconds
     assert s.cache_ttl_seconds >= s.cache_refresh_seconds * 1.5

@@ -78,14 +78,14 @@ const fmt = {
     if (!p) return String(iso);
     return `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
   },
-  /** The update time on the 30-minute refresh grid: 14:47:12 -> 14:30:00.
+  /** The update time on the 5-minute refresh grid: 14:47:12 -> 14:45:00.
    * Floored, never rounded up, so "Last update" cannot sit in the future. */
-  halfhour: (iso) => {
+  fivemin: (iso) => {
     if (!iso) return "\u2013";
     const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit",
                                hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     if (!p) return String(iso);
-    const mm = Number(p.minute) < 30 ? "00" : "30";
+    const mm = String(Math.floor(Number(p.minute) / 5) * 5).padStart(2, "0");
     return `${p.year}-${p.month}-${p.day} ${p.hour}:${mm}`;
   },
   /** "HH:MM:SS" in the display zone, for the clock-grid badges. */
@@ -238,10 +238,11 @@ async function loadHealth() {
   // KQL query, which is a warning rather than a failure.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
   // The controls are configured from the API so they can never drift from what
-  // the service actually offers. The refresh cycle runs on the :00/:30 clock
-  // grid, so 30 minutes gives 05:00, 05:30, ...
-  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 30;
-  // The cadence strip: "Data refreshes every 30 minutes", mirrored from the API.
+  // the service actually offers. The refresh cycle runs just past the 5-minute
+  // clock marks (+15 s), so 05:00:15, 05:05:15, ...
+  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 5;
+  REFRESH_OFFSET_SECONDS = Number(h.cache_refresh_offset_seconds) || 0;
+  // The cadence strip: "Data refreshes every 5 minutes", mirrored from the API.
   set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
   // The timeline is anchored on the newest row the feed has, so a symbol switch
@@ -546,7 +547,10 @@ function renderKpis(s, m) {
 /* ---------------- data freshness ---------------- */
 
 /** Ingest cadence for the aggregate DOM table, in minutes. */
-let REFRESH_MINUTES = 30;
+let REFRESH_MINUTES = 5;
+
+/** Delay past each clock mark before the cycle fires, in seconds. */
+let REFRESH_OFFSET_SECONDS = 15;
 
 /** Full timestamp in the display zone: "2026-10-05 11:46:10". */
 function stamp(iso) {
@@ -568,20 +572,23 @@ function age(ms) {
 }
 
 /**
- * Wall-clock time the next ingest is expected: the first clock mark the
- * cycle runs on (:00/:30 for a 30 minute interval) strictly after now, in
+ * Wall-clock time the next ingest is expected: the first clock slot the
+ * cycle runs on (5-minute marks plus the offset, e.g. :00:15, :05:15)
+ * strictly after now, in
  * local time. The cycle is scheduled against the local wall clock, so this
  * mirrors that; two refreshes separated by the full interval can never be
- * missed, and the badge never hints at a mark that has already passed.
+ * missed, and the badge never hints at a slot that has already passed.
  */
-function nextRefresh(intervalMinutes) {
+function nextRefresh(intervalMinutes, offsetSeconds) {
   const interval = Math.max(1, Number(intervalMinutes) || REFRESH_MINUTES) * 60_000;
+  const offset = ((Number(offsetSeconds ?? REFRESH_OFFSET_SECONDS) || 0) * 1000) % interval;
   const now = new Date();
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const elapsed = now.getTime() - midnight.getTime();
-  // The cycle lands on the next full interval mark, never one exactly at now:
-  // waiting a full interval avoids double-firing and keeps the grid aligned.
-  const slot = Math.floor(elapsed / interval) * interval + interval;
+  const elapsed = now.getTime() - midnight.getTime() - offset;
+  // The cycle lands on the next full interval slot plus the offset, never one
+  // exactly at now: waiting a full interval avoids double-firing and keeps
+  // the grid aligned.
+  const slot = Math.floor(elapsed / interval) * interval + interval + offset;
   return new Date(midnight.getTime() + slot);
 }
 
@@ -622,13 +629,13 @@ function renderFreshness(report) {
       ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
 
   // Next refresh: the next clock slot the ingest cycle runs on, strictly after
-  // now - minutes past the hour are snapped to :00/:30 regardless of the feed.
-  const next = nextRefresh(REFRESH_MINUTES);
+  // now - 5-minute marks plus the offset (e.g. :05:15) regardless of the feed.
+  const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
   set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
-    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, on the :00/:30 refresh slots.`;
+    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, just past the 5-minute marks.`;
   }
 }
 

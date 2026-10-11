@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Re-read the fixed cache window once, from a timer instead of the app.
 
-The app refreshes its own cache every `CACHE_REFRESH_MINUTES` (30 by default)
+The app refreshes its own cache every `CACHE_REFRESH_MINUTES` (5 by default,
+just past the mark - :00:15, :05:15, ... - via `CACHE_REFRESH_OFFSET_SECONDS`)
 from a background task, so there is normally nothing to run here. This script
 does the same single cycle out of process, for operators who would rather keep
 the KQL work out of the web process:
@@ -9,13 +10,16 @@ the KQL work out of the web process:
     python scripts/refresh_cache.py
     python scripts/refresh_cache.py --json | python3 -m json.tool
 
-Typical cron entry (every 30 minutes, log to the journal):
+Typical systemd timer (every 5 minutes, 15 s past the mark, log to the
+journal) - the delay lets the upstream feed settle past the mark so the read
+never races immature data:
 
-    */30 * * * * /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
+    OnCalendar=*:0/5:15
+
+Or a cron entry firing just past each 5-minute mark:
+
+    1-59/5 * * * * sleep 14; /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
         >> /var/log/axioma-refresh.log 2>&1
-
-`*/30` fires on the same wall-clock marks as the in-process cycle (:00 and
-:30), so the two schedules line up rather than drift against each other.
 
 Or a systemd timer on the `axioma.service` host (see README, *Deployment*).
 Only run it that way with `CACHE_REFRESH_MINUTES=0` in `.env`, otherwise both the

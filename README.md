@@ -11,8 +11,10 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
 (`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
 (Entra ID, no access key) so a dashboard request never re-scans the table, and
-that four-hour window is slid forward every 30 minutes on the clock (:00 and
-:30) — the earliest half hour is purged, the newest half hour is read.
+that four-hour window is slid forward every 5 minutes just past the clock mark
+(:00:15, :05:15, …) — the earliest slice is purged, the newest slice is read.
+The 15 s delay lets the upstream feed settle past the mark so the read never
+races immature data.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -41,9 +43,10 @@ SYMBOL_TABLE="symbols_icmarkets"
 # Redis cache (Entra ID; there is no access key).
 REDIS_HOST="<name>.<region>.redis.azure.net"
 REDIS_PORT="10000"
-REDIS_TTL_SECONDS="2700"
+REDIS_TTL_SECONDS="450"
 CACHE_LOOKBACK_HOURS="4"
-CACHE_REFRESH_MINUTES="30"
+CACHE_REFRESH_MINUTES="5"
+CACHE_REFRESH_OFFSET_SECONDS="15"
 
 # Authentication - see the table below.
 FABRIC_MANAGED_IDENTITY="true"
@@ -94,20 +97,22 @@ of the cached copy.
 ### Keeping the window current
 
 A cache is only useful if it is fresh, so the app slides the fixed window on a
-schedule: **every `CACHE_REFRESH_MINUTES` (30 by default), on the clock marks
-(:00 and :30 — 1:30, 2:00, 2:30, …)** a background task advances each cached
+schedule: **every `CACHE_REFRESH_MINUTES` (5 by default), just past the
+5-minute clock marks (:00:15, :05:15, … — the 15 s
+`CACHE_REFRESH_OFFSET_SECONDS` delay lets the upstream feed settle so the read
+never races immature data, e.g. 4:45:15)** a background task advances each cached
 symbol's window. The cycle is scheduled against the wall clock rather than the
-process start time, so restarts do not shift it and it lines up with a
-`*/30` cron entry running the one-shot script. What the dashboard serves is
-therefore at most half an hour behind the feed, and anything inside the window
+process start time, so restarts do not shift it and a systemd timer
+(`OnCalendar=*:0/5:15`) lines up with it. What the dashboard serves is
+therefore at most a few minutes behind the feed, and anything inside the window
 still costs no query at all.
 
 Each cycle slides rather than re-reads:
 
 * **the new slice** — only rows newer than the symbol's newest cached row are
-  fetched from KQL (roughly the last 30 minutes), and
+  fetched from KQL (roughly the last 5 minutes), and
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
-  are dropped, which on a 30-minute cycle is exactly the earliest half hour.
+  are dropped, which on a 5-minute cycle is exactly the earliest slice.
 
 A cache entry therefore never holds more than eight hours of a symbol, and the
 KQL read per cycle covers only the interval, not the whole window. The purge is
@@ -119,8 +124,8 @@ its data while no ticks arrive.
 | Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute aggregate window. |
 | Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
 | Window | `WINDOW_CHOICES_MINUTES="60,120,180,240"` | The fixed aggregate-window choices offered at each point in time (1 h / 2 h / 3 h / 4 h), mirroring the `metrics_5m` trailing windows. Choices wider than the cache are dropped. |
-| Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
-| TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+| Refresh | `CACHE_REFRESH_MINUTES="5"`, `CACHE_REFRESH_OFFSET_SECONDS="15"` | The maximum age of what a page load shows, just past the 5-minute marks (e.g. 4:45:15). Set `0` to switch the cycle off and cache lazily, on demand. |
+| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 | Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
 
 The first cycle runs immediately, so a restart warms the cache instead of
@@ -289,12 +294,12 @@ what the in-process cycle does, and exits non-zero when the endpoint is
 unreachable so a timer surfaces it:
 
 ```bash
-*/30 * * * * /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
+1-59/5 * * * * sleep 14; /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
     >> /var/log/axioma-refresh.log 2>&1
 ```
 
 ```ini
-# /etc/systemd/system/axioma-refresh.service   (+ .timer, OnCalendar=*:0/30)
+# /etc/systemd/system/axioma-refresh.service   (+ .timer, OnCalendar=*:0/5:15)
 [Service]
 Type=oneshot
 User=azureuser
@@ -343,8 +348,8 @@ came back from KQL and the instrument names came from the same KQL database.
 `cache_connected` reports the Redis cache separately — it decides whether a
 request costs a KQL query, but a cache failure is never an outage, because
 reads fall through to KQL. `cache_refreshed_at` (with `cached_symbols`) is the
-age of what the cache is serving: on a healthy 30-minute cycle it moves every
-half hour, and `cache_refresh_minutes` is the interval it is aiming for.
+age of what the cache is serving: on a healthy 5-minute cycle it moves every
+few minutes, and `cache_refresh_minutes` is the interval it is aiming for.
 
 ### Deploying an update
 
@@ -628,9 +633,9 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
-the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
+the refresh cycle (clock-aligned 5-minute slots with a 15 s offset, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
-earliest half hour, the default symbol warmed, a failing symbol keeping its
+earliest slice, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
 the pages and routes around them (`/` serving the dashboard, the retained
 `/dashboard` alias, `/unavailable` and `/welcome`),

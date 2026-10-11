@@ -437,10 +437,10 @@ def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
     # Both cached symbols were re-read and re-written, under the TTL - ticks
     # first, then the precomputed grid the cycle pushes alongside them.
     assert redis["written"] == [
-        ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
-        ("axioma:ctrader_dom:agg_dom:ticks:2", 2700),
-        ("axioma:ctrader_dom:metrics_5m:metrics:1", 2700),
-        ("axioma:ctrader_dom:metrics_5m:metrics:2", 2700),
+        ("axioma:ctrader_dom:agg_dom:ticks:1", 450),
+        ("axioma:ctrader_dom:agg_dom:ticks:2", 450),
+        ("axioma:ctrader_dom:metrics_5m:metrics:1", 450),
+        ("axioma:ctrader_dom:metrics_5m:metrics:2", 450),
     ]
     assert kql_rows["load_raw"] == before + 2
     # A warm symbol is fetched only from its newest cached row - never over
@@ -532,7 +532,7 @@ def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
     assert summary["rows"] == 240
     assert summary["purged"] == 0            # nothing had aged out yet
     assert summary["cache_window_minutes"] == 240
-    assert summary["interval_minutes"] == 30
+    assert summary["interval_minutes"] == 5
     assert summary["errors"] == []
     assert summary["finished_at"] >= summary["started_at"]
     assert service.last_refresh() == summary
@@ -570,8 +570,8 @@ def test_a_cached_symbol_is_refreshed_once(redis, kql_rows, catalogue):
 
     service.refresh_cache()
 
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700),
-                                ("axioma:ctrader_dom:metrics_5m:metrics:41", 2700)]
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 450),
+                                ("axioma:ctrader_dom:metrics_5m:metrics:41", 450)]
 
 
 def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
@@ -580,8 +580,8 @@ def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
 
     service.refresh_cache()
 
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:all", 2700),
-                                ("axioma:ctrader_dom:metrics_5m:metrics:all", 2700)]
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:all", 450),
+                                ("axioma:ctrader_dom:metrics_5m:metrics:all", 450)]
     assert kql_rows["symbol"] is None
 
 
@@ -599,9 +599,9 @@ def test_a_failing_symbol_keeps_its_previous_entry(redis, kql_rows, catalogue):
     # The failed tick window is not re-written, but its metrics grid - read
     # through a separate path - still refreshes alongside the good symbol.
     assert redis["written"] == [
-        ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
-        ("axioma:ctrader_dom:metrics_5m:metrics:1", 2700),
-        ("axioma:ctrader_dom:metrics_5m:metrics:2", 2700),
+        ("axioma:ctrader_dom:agg_dom:ticks:1", 450),
+        ("axioma:ctrader_dom:metrics_5m:metrics:1", 450),
+        ("axioma:ctrader_dom:metrics_5m:metrics:2", 450),
     ]
     assert "axioma:ctrader_dom:agg_dom:ticks:2" in redis["frames"]
 

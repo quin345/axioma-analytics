@@ -110,6 +110,7 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         # The cycle that keeps that window current: how often it runs, when it
         # last finished and how many symbols it replaced.
         "cache_refresh_minutes": s.cache_refresh_minutes,
+        "cache_refresh_offset_seconds": s.cache_refresh_offset_seconds,
         "cache_refreshed_at": last.get("finished_at"),
         "cached_symbols": last.get("symbols"),
         # The precomputed grid pushed to Redis alongside the ticks, and the

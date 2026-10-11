@@ -17,10 +17,11 @@ The app reads **one** source: the production Fabric **KQL** database
 Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
 the dashboard reads KQL once per window rather than on every request. The cache
 window is fixed at `CACHE_LOOKBACK_HOURS` (8 by default); the UI may narrow it
-but never widen it. A background cycle (`CACHE_REFRESH_MINUTES`, 30 by default)
-slides that window on the clock - at the half-hour marks, :00 and :30 - purging
-the earliest half hour and reading only the newest, so what the dashboard
-serves is never more than half an hour behind the feed and a symbol's cache
+but never widen it. A background cycle (`CACHE_REFRESH_MINUTES`, 5 by default)
+slides that window on the clock - just past the 5-minute marks (:00:15,
+:05:15, ...) - purging the earliest slice and reading only the newest, so what
+the dashboard serves is never more than a few minutes behind the feed and a
+symbol's cache
 entry never holds more than eight hours of rows.
 
 Eight hours is the sum the aggregate-window controls need: the timeline the user
@@ -180,22 +181,31 @@ class Settings:
     cache_key_prefix: str = field(
         default_factory=lambda: _env("REDIS_KEY_PREFIX", default="axioma") or "axioma"
     )
-    #: Lifetime of a cached KQL result. 45 minutes covers one ingestion
-    #: interval, so the cache never outlives the data it mirrors.
-    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=2700))
+    #: Lifetime of a cached KQL result. 450 s (7.5 min) covers 1.5 refresh
+    #: cycles, so one missed cycle still leaves the cache populated.
+    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=450))
     #: The fixed window the cache holds and the UI may only narrow. Eight hours
     #: = a four-hour point-in-time timeline plus the widest (240 minute)
     #: aggregate window from its earliest point, so every combination the
     #: controls offer is served from the cache.
     cache_lookback_hours: int = field(default_factory=lambda: _env_int("CACHE_LOOKBACK_HOURS", default=8))
-    #: How often the background cycle slides that window from KQL: on the
-    #: clock marks (:00 and :30 for 30), the earliest interval is purged and
-    #: only the newest interval is read. 30 minutes is the maximum age of what
-    #: the dashboard serves, and `cache_ttl_seconds` runs 1.5 cycles ahead of
-    #: it so a single missed cycle still leaves the cache populated. 0 switches
-    #: the cycle off and returns to lazy, on-demand caching.
+    #: How often the background cycle slides that window from KQL: every 5
+    #: minutes on the clock marks plus a short offset (:00:15, :05:15, ...),
+    #: the earliest interval is purged and only the newest interval is read.
+    #: 5 minutes is the maximum age of what the dashboard serves, and
+    #: `cache_ttl_seconds` runs 1.5 cycles ahead of it so a single missed
+    #: cycle still leaves the cache populated. 0 switches the cycle off and
+    #: returns to lazy, on-demand caching.
     cache_refresh_minutes: int = field(
-        default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=30)
+        default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=5)
+    )
+    #: Delay past each 5-minute clock mark before the cycle fires, so the
+    #: upstream feed has settled and the read does not race immature data.
+    #: 15 s puts the runs at :00:15, :05:15, ... (e.g. 4:45:15).
+    cache_refresh_offset_seconds: float = field(
+        default_factory=lambda: _env_int(
+            "CACHE_REFRESH_OFFSET_SECONDS", default=15
+        )
     )
 
     # --- Aggregate window ---------------------------------------------------

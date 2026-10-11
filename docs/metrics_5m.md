@@ -323,8 +323,8 @@ raw ticks, recompute" to "cache the finished metrics, look up":
 1. **Refresh job** (`app/refresh.py`, on `CACHE_REFRESH_MINUTES`): run
    `Metrics5m()` and write the result per symbol into Redis, replacing today's
    `axioma:ticks:<symbol>` Parquet blob with an `axioma:metrics:<symbol>` blob
-   (49 `as_of` rows × ~60 columns). Same TTL (`REDIS_TTL_SECONDS=2700`), same
-   clock cadence. A cache miss still falls back to running `Metrics5m()` directly,
+   (49 `as_of` rows × ~60 columns). Same TTL (`REDIS_TTL_SECONDS=450`), same
+   clock cadence (5-minute slots, 15 s past the mark). A cache miss still falls back to running `Metrics5m()` directly,
    preserving the existing "KQL failure sets `connected:false`, cache failure does
    not" contract in `app/service.py`.
 2. **`/api/analytics`** (`app/service.py`): read the cached `metrics_5m` frame for
