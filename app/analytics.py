@@ -547,12 +547,21 @@ def _variance_ratio(x: np.ndarray, max_lag: int = 20) -> list[dict]:
     return out
 
 
-def hourly_profile(df: pd.DataFrame) -> dict:
-    """Activity and directional bias by hour of day (UTC)."""
+def hourly_profile(df: pd.DataFrame, *, tz: str = "UTC") -> dict:
+    """Activity and directional bias by hour of day, bucketed in ``tz``.
+
+    ``tz`` is any IANA zone name (or anything pandas accepts for a conversion);
+    the hours are wall-clock hours in that zone, so the daily shape reads as the
+    local session rather than UTC. The zone is echoed back as ``timezone`` so the
+    caller can label the buckets. UTC by default.
+    """
     if df.empty:
-        return {"hourly": []}
+        return {"hourly": [], "timezone": tz}
+    ts = df["ts"]
+    if getattr(ts.dt, "tz", None) is None:  # defensive: callers pass tz-aware ts
+        ts = ts.dt.tz_localize("UTC")
     d = df.copy()
-    d["hour"] = d["ts"].dt.hour
+    d["hour"] = ts.dt.tz_convert(tz).dt.hour
     out = []
     for hour, chunk in d.groupby("hour"):
         rets = chunk["mid"].pct_change().dropna()
@@ -564,7 +573,7 @@ def hourly_profile(df: pd.DataFrame) -> dict:
             "volatility_bps": _f(rets.std() * 10_000 if len(rets) > 1 else None),
             "avg_spread_bps": _f(chunk["spread_bps"].mean()),
         })
-    return {"hourly": sorted(out, key=lambda r: r["hour"])}
+    return {"hourly": sorted(out, key=lambda r: r["hour"]), "timezone": tz}
 
 
 def tick_table(df: pd.DataFrame, *, limit: int = 200) -> list[dict]:
@@ -618,8 +627,12 @@ def book_depth(df: pd.DataFrame, *, bins: int = 25) -> dict:
     }
 
 
-def build_report(df: pd.DataFrame, *, timeframe: str = "1m", window: int = 50, bins: int = 60) -> dict:
-    """One-stop bundle of every analytics block for the dashboard."""
+def build_report(df: pd.DataFrame, *, timeframe: str = "1m", window: int = 50, bins: int = 60, tz: str = "UTC") -> dict:
+    """One-stop bundle of every analytics block for the dashboard.
+
+    ``tz`` is the IANA zone the hourly profile buckets by; see
+    :func:`hourly_profile`.
+    """
     d = enrich(prepare(df))
     return clean({
         "summary": summary(d),
@@ -630,7 +643,7 @@ def build_report(df: pd.DataFrame, *, timeframe: str = "1m", window: int = 50, b
         "distribution": return_distribution(d, bins=min(bins, 40)),
         "drawdown": drawdown(d),
         "behaviour": behaviour(d),
-        "hourly": hourly_profile(d),
+        "hourly": hourly_profile(d, tz=tz),
         "depth": book_depth(d),
         "ticks": tick_table(d, limit=250),
         "timeframes": list(TIMEFRAMES.keys()),

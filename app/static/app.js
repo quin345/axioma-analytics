@@ -4,6 +4,55 @@
 const $ = (id) => document.getElementById(id);
 const charts = {};
 
+/* ---- display time zone --------------------------------------------------
+ * Every wall-clock time on the page is rendered in one IANA zone, published
+ * by /api/health as `display_timezone`. Until the first health answer lands
+ * we fall back to UTC, which is what the ISO strings we hold already are. The
+ * formatters below read it at call time, so assigning DISPLAY_TZ re-labels the
+ * clock, the time badges and the hourly profile without a re-render. */
+let DISPLAY_TZ = "UTC";
+
+/** Short zone abbreviation ("EDT", "UTC"), for the badges next to a time. */
+function tzAbbr() {
+  return new Intl.DateTimeFormat("en-US", { timeZone: DISPLAY_TZ, timeZoneName: "short" })
+    .formatToParts(new Date())
+    .find((p) => p.type === "timeZoneName")?.value || DISPLAY_TZ;
+}
+
+/** The wall-clock parts of one instant in the display zone, all strings. */
+function zoneParts(iso, opts) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-US", Object.assign({ timeZone: DISPLAY_TZ }, opts))
+    .formatToParts(d);
+  const o = {};
+  for (const x of parts) if (x.type !== "literal") o[x.type] = x.value;
+  return o;
+}
+
+/** A local calendar date (y/mo/d, the zone's wall clock) for a given instant. */
+function zoneDate(iso) {
+  const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit" }) || {};
+  return { y: Number(p.year || 0), mo: Number(p.month || 1) - 1, d: Number(p.day || 1) };
+}
+
+/** The UTC instant of a wall-clock time (y/mo/d h:mi) in the display zone. */
+function wallToInstant(y, mo, d, h, mi) {
+  let t = Date.UTC(y, mo, d, h, mi);
+  // Resolve the zone offset at that local time; two passes converge across DST.
+  for (let i = 0; i < 2; i++) {
+    const p = zoneParts(t, { year: "numeric", month: "2-digit", day: "2-digit",
+                             hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+    if (!p) break;
+    const asIf = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day),
+                          Number(p.hour), Number(p.minute));
+    const delta = Date.UTC(y, mo, d, h, mi) - asIf;
+    if (!delta) break;
+    t += delta;
+  }
+  return t;
+}
+
 /** Escape text before interpolating into innerHTML (table/column names are data). */
 function esc(v) {
   return String(v ?? "").replace(/[&<>"']/g, (c) => (
@@ -24,26 +73,27 @@ const fmt = {
   },
   time: (iso) => {
     if (!iso) return "\u2013";
-    const d = new Date(iso);
-    // toISOString() throws RangeError on an unparseable date.
-    if (Number.isNaN(d.getTime())) return String(iso);
-    return d.toISOString().replace("T", " ").slice(5, 19);
+    const p = zoneParts(iso, { month: "2-digit", day: "2-digit", hour: "2-digit",
+                               minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+    if (!p) return String(iso);
+    return `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
   },
   /** The update time on the 30-minute refresh grid: 14:47:12 -> 14:30:00.
    * Floored, never rounded up, so "Last update" cannot sit in the future. */
   halfhour: (iso) => {
     if (!iso) return "\u2013";
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return String(iso);
-    d.setUTCMinutes(d.getUTCMinutes() < 30 ? 0 : 30, 0, 0);
-    return d.toISOString().replace("T", " ").slice(0, 16);
+    const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit",
+                               hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+    if (!p) return String(iso);
+    const mm = Number(p.minute) < 30 ? "00" : "30";
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${mm}`;
   },
-  /** UTC "HH:MM:SS" from an ISO instant for the clock-grid badges. */
+  /** "HH:MM:SS" in the display zone, for the clock-grid badges. */
   hm: (iso) => {
     if (!iso) return "\u2013";
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return String(iso);
-    return d.toISOString().replace("T", " ").slice(11, 19);
+    const p = zoneParts(iso, { hour: "2-digit", minute: "2-digit", second: "2-digit",
+                               hourCycle: "h23" });
+    return p ? `${p.hour}:${p.minute}:${p.second}` : String(iso);
   },
   /** Full timestamp with millis: "10-06 22:09:14.747". Tick metrics can
    * repeat the same quote many times a second, so second precision made every
@@ -52,7 +102,10 @@ const fmt = {
     if (!iso) return "\u2013";
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return String(iso);
-    return d.toISOString().replace("T", " ").slice(5, 23);
+    const p = zoneParts(iso, { month: "2-digit", day: "2-digit", hour: "2-digit",
+                               minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+    const ms = String(d.getMilliseconds()).padStart(3, "0");
+    return p ? `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}.${ms}` : String(iso);
   },
   num: (v) => {
     if (v === null || v === undefined || Number.isNaN(Number(v))) return "\u2013";
@@ -159,6 +212,12 @@ async function loadHealth() {
   // Kept for the expanded Instrument-coverage card, which reads feed totals
   // that /api/analytics does not return.
   window.__health = h;
+  // The IANA zone every wall-clock time on the page is rendered in, published
+  // by /api/health so one setting drives the clock, the time badges and the
+  // hourly profile. UTC until the first answer keeps the pre-load paint sane.
+  DISPLAY_TZ = h.display_timezone || "UTC";
+  const hh = $("hourlyHeading");
+  if (hh) hh.textContent = `Activity by hour (${tzAbbr()})`;
   const dot = $("connDot");
   if (h.connected) {
     dot.className = "dot ok";
@@ -351,11 +410,12 @@ function buildTimeline(fromIso) {
   const input = $("asOf");
   const typed = input ? String(input.value || "").trim() : "";
   if (typed) {
-    const anchorDate = new Date(anchor);
+    // The typed HH:MM is a wall-clock time in the display zone: resolve it
+    // against that zone's calendar day rather than UTC's.
+    const { y, mo, d } = zoneDate(anchor);
     const hh = Math.min(23, Number(input.value.split(":")[0] || "0"));
     const mm = Math.min(59, Number(input.value.split(":")[1] || "0"));
-    const cand = Date.UTC(anchorDate.getUTCFullYear(), anchorDate.getUTCMonth(),
-                           anchorDate.getUTCDate(), hh, mm);
+    const cand = wallToInstant(y, mo, d, hh, mm);
     if (cand > timeline.latest + 12 * 3600000) cand -= 86400000;  // same slot, yesterday
     else if (cand < timeline.earliest - 12 * 3600000) cand += 86400000;
     let point = Math.min(timeline.latest, Math.max(timeline.earliest, cand));
@@ -379,12 +439,12 @@ function renderAsOf() {
     return;
   }
   const back = Math.round((timeline.latest - point) / 60000);
-  // The label carries the full UTC stamp (the window can straddle midnight),
+  // The label carries the full display-zone stamp (the window can straddle midnight),
   // plus how far behind the newest stop the point sits.
-  out.textContent = `${fmt.time(new Date(point).toISOString())} UTC`
+  out.textContent = `${fmt.time(new Date(point).toISOString())} ${tzAbbr()}`
     + (back > 0 ? ` · ${backLabel(back)}` : " · latest");
   // The window the field may range inside, so a time field always stays inside.
-  rng.textContent = `${fmt.time(new Date(timeline.earliest).toISOString())} – ${fmt.time(new Date(timeline.latest).toISOString())} UTC`;
+  rng.textContent = `${fmt.time(new Date(timeline.earliest).toISOString())} – ${fmt.time(new Date(timeline.latest).toISOString())} ${tzAbbr()}`;
 }
 
 /** Type a time on the 5-minute grid: parse, snap to the step and clamp to the
@@ -400,8 +460,8 @@ function onAsOfInput() {
   if (!m) return;
   const hh = Math.min(23, Number(m[1]));
   const mm = Math.min(59, Number(m[2]));
-  const base = new Date(timeline.latest);
-  let cand = Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate(), hh, mm);
+  const { y, mo, d } = zoneDate(timeline.latest);
+  let cand = wallToInstant(y, mo, d, hh, mm);
   if (cand > timeline.latest + 12 * 3600000) cand -= 86400000;   // same slot, yesterday
   else if (cand < timeline.earliest - 12 * 3600000) cand += 86400000;
   let point = Math.min(timeline.latest, Math.max(timeline.earliest, cand));
@@ -471,12 +531,12 @@ function renderKpis(s, m) {
 /** Ingest cadence for the aggregate DOM table, in minutes. */
 let REFRESH_MINUTES = 30;
 
-/** Full UTC stamp: "2026-10-05 11:46:10". */
+/** Full timestamp in the display zone: "2026-10-05 11:46:10". */
 function stamp(iso) {
   if (!iso) return "\u2013";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toISOString().replace("T", " ").slice(0, 19);
+  const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit",
+                             hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return p ? `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}` : String(iso);
 }
 
 /** "4m 12s" / "2h 05m" - how long ago something happened, to the second. */
@@ -533,7 +593,7 @@ function renderFreshness(report) {
 
   // Only touch className when a class is supplied (see set() above).
   set("lastTick",
-      feed ? `Last update ${fmt.hm(feed)} UTC` : "Last update unavailable");
+      feed ? `Last update ${fmt.hm(feed)} ${tzAbbr()}` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
@@ -541,8 +601,8 @@ function renderFreshness(report) {
   // The strip reports the loaded window; without a report there is nothing new
   // to say, so a health refresh leaves what the last analysis wrote alone.
   if (!report) return;
-  const stampText = fmt.hm(windowLatest);
-  set("fbLastTick", stampText, ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
+  set("fbLastTick", `${fmt.hm(windowLatest)} ${tzAbbr()}`,
+      ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
 
   // Next refresh: the next clock slot the ingest cycle runs on, strictly after
   // now - minutes past the hour are snapped to :00/:30 regardless of the feed.
@@ -551,7 +611,7 @@ function renderFreshness(report) {
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
-    badge.title = `Data last updated ${fmt.hm(feed)} UTC. Next ingest expected ${fmt.hm(next.toISOString())} UTC, on the :00/:30 refresh slots.`;
+    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, on the :00/:30 refresh slots.`;
   }
 }
 
@@ -737,7 +797,7 @@ const sp = r.microstructure.spread || [];
     const hours = (r.hourly || {}).hourly || [];
     if (!hours.length) return "No hourly data";
     const top = hours.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0))[0];
-    return `Busiest ${String(top.hour).padStart(2, "0")}:00 UTC \u00b7 ${fmt.int(top.ticks)} ticks`;
+    return `Busiest ${String(top.hour).padStart(2, "0")}:00 ${tzAbbr()} \u00b7 ${fmt.int(top.ticks)} ticks`;
   })());
   setNote("ticks", (() => {
     const n = (r.ticks || []).length;
@@ -998,6 +1058,7 @@ const DETAILS = {
   hour: (r) => {
     const hr = (r.hourly || {}).hourly || [];
     if (!hr.length) return block("", "No hourly breakdown available for this window.", null);
+    const zone = (r.hourly || {}).timezone || DISPLAY_TZ;
     const busiest = hr.slice().sort((a, b) => (b.ticks || 0) - (a.ticks || 0))[0];
     const mostVol = hr.slice().sort((a, b) => (b.volatility_bps ?? -1) - (a.volatility_bps ?? -1))[0];
     const quiet = hr.slice().sort((a, b) => (a.ticks || 0) - (b.ticks || 0))[0];
@@ -1005,7 +1066,7 @@ const DETAILS = {
     const rows = hr.map((h) => [hh(h.hour),
       `${fmt.int(h.ticks)} ticks \u00b7 ${fmt.n(h.volatility_bps, 2)} bps vol`]);
     return block("Daily shape",
-      "Activity and directional bias by hour of day, UTC. The busiest hour is when the " +
+      `Activity and directional bias by hour of day, ${zone}. The busiest hour is when the ` +
       "instrument is most worth trading; the quietest is when spreads usually widen.", [
         ["Busiest hour", `${hh(busiest.hour)} \u00b7 ${fmt.int(busiest.ticks)} ticks`],
         ["Quietest hour", `${hh(quiet.hour)} \u00b7 ${fmt.int(quiet.ticks)} ticks`],
@@ -1147,14 +1208,14 @@ function wireCards() {
 const MONTHS = ["January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"];
 
-/** UTC day key. Grouping is UTC throughout, to match the hourly profile. */
+/** Day key in the display zone, so the calendar groups by the same zone as the
+ * hourly profile and the two never disagree at a day boundary. */
 function dayKey(ts) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return null;
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const p = zoneParts(ts, { year: "numeric", month: "2-digit", day: "2-digit" });
+  return p ? `${p.year}-${p.month}-${p.day}` : null;
 }
 
-/** Collapse the OHLCV bars into one record per UTC day, for the calendar. */
+/** Collapse the OHLCV bars into one record per display-zone day, for the calendar. */
 function calendarDays(r) {
   const out = new Map();
   for (const b of (r.ohlcv || {}).bars || []) {
@@ -1172,7 +1233,8 @@ function calendarDays(r) {
     d.high = d.high === null || d.high === undefined ? b.h : Math.max(d.high, b.h);
     d.low = d.low === null || d.low === undefined ? b.l : Math.min(d.low, b.l);
     if (b.spread !== null && b.spread !== undefined) { d.spreadSum += b.spread; d.spreadN += 1; }
-    const h = new Date(b.t).getUTCHours();
+    const hp = zoneParts(b.t, { hour: "2-digit" });
+    const h = hp ? Number(hp.hour) : 0;
     d.hours.set(h, (d.hours.get(h) || 0) + (b.n || 0));
     out.set(key, d);
   }

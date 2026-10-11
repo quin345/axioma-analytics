@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from functools import lru_cache
 
 from dotenv import load_dotenv
@@ -39,6 +40,11 @@ load_dotenv()
 
 #: Affirmative spellings accepted for boolean flags.
 _TRUTHY = ("1", "true", "yes", "on")
+
+#: The zone the dashboard renders wall-clock times in. New York by default -
+#: the primary audience trades the US session - and any IANA name may be set
+#: with DISPLAY_TIMEZONE.
+_DEFAULT_DISPLAY_TIMEZONE = "America/New_York"
 
 
 def _env(*names: str, default: str | None = None) -> str | None:
@@ -65,6 +71,18 @@ def _env_bool(*names: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.lower() in _TRUTHY
+
+
+def _display_timezone(raw: str | None) -> str:
+    """A usable IANA zone name; New York when the value is missing or unknown."""
+    name = (raw or "").strip() or _DEFAULT_DISPLAY_TIMEZONE
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        # A typo, or a zone this tzdata build does not carry, must not crash
+        # the app or silently bucket hours by the wrong clock: fall back to NY.
+        return _DEFAULT_DISPLAY_TIMEZONE
+    return name
 
 
 @dataclass(frozen=True)
@@ -153,6 +171,14 @@ class Settings:
     #: Ticker pinned as the dashboard default (matched by symbolName, then id).
     default_symbol: str = field(
         default_factory=lambda: _env("DEFAULT_SYMBOL", default="XAUUSD") or "XAUUSD"
+    )
+
+    #: IANA timezone the dashboard renders wall-clock times in; the "activity by
+    #: hour" profile is bucketed by it, so hours read as the local session rather
+    #: than UTC. New York by default, overridable with DISPLAY_TIMEZONE; an
+    #: unknown zone falls back to New York.
+    display_timezone: str = field(
+        default_factory=lambda: _display_timezone(_env("DISPLAY_TIMEZONE"))
     )
 
     # --- Availability -------------------------------------------------------

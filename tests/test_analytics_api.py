@@ -158,3 +158,31 @@ def test_a_point_with_nothing_behind_it_is_reported(client):
 
     assert r.status_code == 502
     assert "ending at 2026-10-07T23:00:00Z" in r.json()["detail"]
+
+
+def test_health_publishes_the_display_timezone(client, monkeypatch):
+    """The dashboard formats every wall-clock time in this zone, so it must come
+    from the API rather than be assumed by the browser."""
+    monkeypatch.delenv("DISPLAY_TIMEZONE", raising=False)
+    config.get_settings.cache_clear()
+    r = client[0].get("/api/health")
+    assert r.status_code == 200
+    assert r.json()["display_timezone"] == "America/New_York"
+    config.get_settings.cache_clear()
+
+
+def test_the_report_buckets_the_hourly_profile_by_the_display_timezone(client, monkeypatch):
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "America/New_York")
+    config.get_settings.cache_clear()
+    try:
+        r = client[0].get("/api/analytics", params={"symbol": "1"})
+        assert r.status_code == 200
+        hourly = r.json()["hourly"]
+        assert hourly["timezone"] == "America/New_York"
+        # The synthetic feed runs 2026-10-08T00:00-03:59Z; in New York (EDT,
+        # UTC-4) that is 20:00-23:59, so no bucket may sit in the UTC 0-3 range.
+        hours = {b["hour"] for b in hourly["hourly"]}
+        assert hours
+        assert all(20 <= h <= 23 for h in hours)
+    finally:
+        config.get_settings.cache_clear()

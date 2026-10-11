@@ -116,6 +116,11 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "unclassified_count": unclassified,
         "asset_class_count": classes,
         "timeframes": list(analytics.TIMEFRAMES),
+        # The IANA zone the dashboard renders every wall-clock time in: the
+        # clock widget, the "last update"/"latest tick"/"next refresh" badges
+        # and the hourly activity profile. Published so one server setting
+        # drives the whole UI instead of the browser assuming UTC.
+        "display_timezone": s.display_timezone,
     }
 
 
@@ -192,6 +197,7 @@ def analytics_report(
     returns everything there is. That keeps a bookmarked URL or a stale tab
     working instead of returning a 422.
     """
+    s = get_settings()
     selection = window_minutes if window_minutes is not None else lookback_minutes
     requested = service.clamp_window(selection)
     try:
@@ -202,7 +208,9 @@ def analytics_report(
     if timeframe not in analytics.TIMEFRAMES:
         raise HTTPException(status_code=400, detail=f"Unknown timeframe '{timeframe}'.")
 
-    report = analytics.build_report(frame, timeframe=timeframe, window=window, bins=bins)
+    report = analytics.build_report(
+        frame, timeframe=timeframe, window=window, bins=bins, tz=s.display_timezone,
+    )
 
     inst = service.lookup(symbol) if symbol else None
     # The newest tick actually returned by this query, so the UI can show when

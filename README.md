@@ -52,6 +52,12 @@ MAX_TICKS="200000"
 
 # Ticker pinned as the dashboard default.
 DEFAULT_SYMBOL="XAUUSD"
+
+# IANA zone every wall-clock time on the dashboard is rendered in - the clock,
+# the time badges, the point-in-time field and the hourly profile. The data is
+# stored and served in UTC; this only changes the lens it is shown through, and
+# is published to the browser by /api/health.
+DISPLAY_TIMEZONE="America/New_York"
 ```
 
 `.env` is already git-ignored (see `.env.example` for the full template with
@@ -111,6 +117,7 @@ its data while no ticks arrive.
 | Window | `WINDOW_MIN_MINUTES="5"`, `WINDOW_MAX_MINUTES="240"` | The aggregate window offered at each point in time. The ceiling is capped by the cache. |
 | Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
 | TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+| Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
 
 The first cycle runs immediately, so a restart warms the cache instead of
 leaving the next visitor to pay for it: a symbol with **no** cached entry (cold
@@ -590,10 +597,14 @@ curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-
 | Book depth | bid/ask resting size, depth imbalance series, levels per side |
 | Drawdown | drawdown path, worst episodes with peak/trough/recovery |
 | Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios |
-| Hourly | activity, volume, return and volatility by hour (UTC) |
+| Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) |
 
 **Design notes**
 
+- Times: the raw feed is UTC, but the whole dashboard renders wall-clock values
+  in `DISPLAY_TIMEZONE` (`America/New_York` by default) - the clock, the time
+  badges, the *Point in time* field and the hourly profile. The zone is published
+  by `/api/health` and applied in the browser; an unknown zone falls back to UTC.
 - Order-flow imbalance uses signed volume (`volume × tick direction`). With no
   volume column it degrades to a tick-direction imbalance, so the panel always works.
 - Realised volatility is scaled by the observed tick rate, making it comparable

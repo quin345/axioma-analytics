@@ -24,6 +24,7 @@ _ENV_KEYS = (
     "FABRIC_TENANT_ID", "FABRIC_CLIENT_ID", "FABRIC_CLIENT_SECRET",
     "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
     "MAINTENANCE_MODE",
+    "DISPLAY_TIMEZONE",
 )
 
 
@@ -167,6 +168,25 @@ def test_the_point_in_time_controls_are_overridable(monkeypatch):
     assert (s.timeline_minutes, s.timeline_step_minutes) == (120, 10)
     assert (s.window_min_minutes, s.window_max_minutes) == (10, 60)
     assert s.max_window_minutes == 60
+
+
+# --- The display time zone ----------------------------------------------
+# One IANA zone drives every wall-clock time the dashboard shows: the clock
+# widget, the time badges and the hourly activity profile. It defaults to New
+# York and degrades to New York on a bad value, so a typo cannot stop booting.
+
+def test_display_timezone_defaults_to_new_york():
+    assert Settings().display_timezone == "America/New_York"
+
+
+def test_display_timezone_is_configurable(monkeypatch):
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "Europe/London")
+    assert Settings().display_timezone == "Europe/London"
+
+
+def test_an_unparseable_display_timezone_falls_back_to_new_york(monkeypatch):
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "Mars/Olympus")
+    assert Settings().display_timezone == "America/New_York"
 
 
 def test_cache_window_is_never_degenerate(monkeypatch):

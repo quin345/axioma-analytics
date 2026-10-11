@@ -176,3 +176,42 @@ def test_flat_series_does_not_crash():
                          "last": 1.0, "volume": 0.0})
     d = analytics.enrich(analytics.prepare(flat))
     json.dumps(analytics.build_report(d))
+
+
+# ---------- display time zone ----------
+# The hourly profile is the one output a zone changes: the same ticks land in
+# different hour buckets depending on the wall clock they are read against.
+
+def test_hourly_profile_buckets_in_the_display_timezone(frame):
+    ny = analytics.hourly_profile(frame, tz="America/New_York")
+    assert ny["timezone"] == "America/New_York"
+    ts = frame["ts"]
+    aware = ts if ts.dt.tz is not None else ts.dt.tz_localize("UTC")
+    want = sorted(aware.dt.tz_convert("America/New_York").dt.hour.unique().tolist())
+    got = sorted({b["hour"] for b in ny["hourly"]})
+    assert got == want
+
+
+def test_the_same_ticks_bucket_differently_by_zone(frame):
+    utc = analytics.hourly_profile(frame, tz="UTC")
+    ny = analytics.hourly_profile(frame, tz="America/New_York")
+    utc_hours = {b["hour"] for b in utc["hourly"]}
+    ny_hours = {b["hour"] for b in ny["hourly"]}
+    assert utc_hours != ny_hours
+    assert (utc["timezone"], ny["timezone"]) == ("UTC", "America/New_York")
+
+
+def test_hourly_profile_reports_its_zone_even_when_empty():
+    assert analytics.hourly_profile(pd.DataFrame(), tz="America/New_York") == {
+        "hourly": [], "timezone": "America/New_York",
+    }
+
+
+def test_build_report_buckets_the_hourly_profile_by_the_display_timezone(frame):
+    report = analytics.build_report(frame, tz="America/New_York")
+    assert report["hourly"]["timezone"] == "America/New_York"
+    ts = frame["ts"]
+    aware = ts if ts.dt.tz is not None else ts.dt.tz_localize("UTC")
+    want = sorted(aware.dt.tz_convert("America/New_York").dt.hour.unique().tolist())
+    got = sorted({b["hour"] for b in report["hourly"]["hourly"]})
+    assert got == want
