@@ -21,6 +21,9 @@ TIMEFRAMES: dict[str, str] = {
     "30m": "30min", "1h": "1h", "2h": "2h", "4h": "4h", "1d": "1D",
 }
 
+#: The share of a volume profile's volume the value area spans.
+VALUE_AREA_SHARE = 0.70
+
 
 def _f(x: Any, default: float | None = None) -> float | None:
     """JSON-safe float: NaN/Inf become None."""
@@ -310,18 +313,8 @@ def volume_profile(df: pd.DataFrame, *, bins: int = 60) -> dict:
     # Point of control = busiest price; value area = 70% of total volume.
     poc_i = int(np.argmax(vol.to_numpy()))
     total = float(vol.sum())
-    va_lo = va_hi = None
-    if total > 0:
-        lo_i = hi_i = poc_i
-        acc = float(vol.iloc[poc_i])
-        while acc < 0.70 * total and (lo_i > 0 or hi_i < len(vol) - 1):
-            down = float(vol.iloc[lo_i - 1]) if lo_i > 0 else -1.0
-            up = float(vol.iloc[hi_i + 1]) if hi_i < len(vol) - 1 else -1.0
-            if up >= down:
-                hi_i += 1; acc += up
-            else:
-                lo_i -= 1; acc += down
-        va_lo, va_hi = _f(labels[lo_i]), _f(labels[hi_i])
+    va = value_area(profile, poc_i) if total > 0 else None
+    va_lo, va_hi = va if va is not None else (None, None)
 
     # The ladder reads top-to-bottom from the highest price, so the bins are
     # returned in descending price order. Point-of-control, value area and the
@@ -335,6 +328,42 @@ def volume_profile(df: pd.DataFrame, *, bins: int = 60) -> dict:
             _high_volume_nodes(profile), key=lambda n: n["price"], reverse=True
         ),
     }
+
+
+def value_area(profile: list[dict], poc_index: int) -> tuple[float | None, float | None] | None:
+    """The 70 % value area around the point of control, as (low, high) prices.
+
+    Greedy expansion from the POC outwards: at each step the busier of the two
+    neighbouring bins is absorbed, until `VALUE_AREA_SHARE` of the volume is
+    covered or the ladder runs out. The bins must be in **ascending** price
+    order, so adjacency means anything - `volume_profile` inverts them only
+    after this has run.
+
+    Shared with `app.metrics`, which runs it over the ladder `metrics_5m`
+    already materialised. Doing it here rather than in KQL keeps the two paths
+    byte-identical: a profile read from the table and one binned in pandas must
+    report the same value area, or the panel would change shape with the data
+    source. That is a sort over ~40 bins, not a table re-scan.
+    """
+    if not profile or not 0 <= poc_index < len(profile):
+        return None
+    vols = [float(p["volume"]) for p in profile]
+    total = float(sum(vols))
+    if total <= 0:
+        return None
+
+    lo_i = hi_i = poc_index
+    acc = vols[poc_index]
+    while acc < VALUE_AREA_SHARE * total and (lo_i > 0 or hi_i < len(vols) - 1):
+        down = vols[lo_i - 1] if lo_i > 0 else -1.0
+        up = vols[hi_i + 1] if hi_i < len(vols) - 1 else -1.0
+        if up >= down:
+            hi_i += 1
+            acc += up
+        else:
+            lo_i -= 1
+            acc += down
+    return _f(profile[lo_i]["price"]), _f(profile[hi_i]["price"])
 
 
 def _high_volume_nodes(profile: list[dict], top: int = 5) -> list[dict]:

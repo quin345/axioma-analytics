@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
-from . import cache, kql
+from . import cache, kql, metrics
 from .assets import CLASS_LABELS, classify_asset_class, family_label, family_of, sort_key
 from .config import Settings, get_settings
 from .errors import DataSourceError
@@ -89,6 +89,12 @@ class Status:
     window_choices_minutes: list[int] | None = None
     window_min_minutes: int | None = None
     window_max_minutes: int | None = None
+    #: Whether the precomputed `metrics_5m` table backs the metrics read path.
+    metrics_5m: bool | None = None
+    #: Rows in the precomputed table, or ``None`` when it could not be read.
+    metrics_rows: int | None = None
+    #: Newest `as_of` stop in the precomputed table.
+    metrics_latest: str | None = None
 
 
 _status = Status()
@@ -143,17 +149,30 @@ def status(*, refresh: bool = False) -> Status:
         window_choices_minutes=list(s.window_choices),
         window_min_minutes=max(1, s.window_min_minutes),
         window_max_minutes=s.max_window_minutes,
+        metrics_5m=s.use_metrics_5m,
     )
     try:
         with kql.connect(s) as client:
             st.server_time = kql.server_time(client, s)
             st.row_count, st.latest = kql.tick_stats(client, s)
             st.dimension_rows = kql.symbol_count(client, s)
+            if s.use_metrics_5m:
+                st.metrics_rows, st.metrics_latest = kql.metrics_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
             st.hints = ["The KQL metrics table is empty. Run the ingest pipeline."]
         elif not st.dimension_rows:
             st.hints = ["The KQL instrument dimension is empty. Run the metadata notebook."]
+        elif s.use_metrics_5m and not st.metrics_rows:
+            # The headline metrics come from this table, so an empty one is a
+            # real gap even while the ticks are flowing - reported as a hint
+            # rather than an error, because the pandas path still works.
+            st.hints = [
+                "The precomputed metrics_5m table is empty. Run the Metrics5m "
+                "refresh, or set METRICS_SOURCE=ticks to recompute from agg_dom."
+            ]
+        elif s.use_metrics_5m and not st.metrics_latest:
+            st.hints = ["The precomputed metrics_5m table has no as_of stops yet."]
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
         st.hints = ["The KQL endpoint is unavailable. Check the configured identity."]
@@ -452,8 +471,10 @@ def refresh_cache(settings: Settings | None = None) -> dict:
 
     * the instrument catalogue, so the selectors and the health counts see new
       instruments and fresh tick counts, and
-    * the window for every symbol already in the cache, plus the configured
-      default ticker, so the first paint after a restart is warm.
+    * the window for every symbol already in the cache, plus its precomputed
+      `metrics_5m` grid - whatever data is there, no default warming. A cold
+      cache stays empty until a request lazily loads it, so the cycle never
+      invents targets of its own.
 
     A symbol already cached is refreshed **incrementally**: only the rows newer
     than its newest cached row are read from KQL, the earliest rows that have
@@ -461,8 +482,8 @@ def refresh_cache(settings: Settings | None = None) -> dict:
     written back (`_slide_window`). A symbol with no entry (cold start, TTL
     expiry) is read over the whole window instead. A symbol whose read fails
     keeps its previous entry rather than being evicted: the cycle is an
-    optimisation, and a partial failure must not throw away data that is
-    merely older. Returns a JSON-able summary, which ``/api/health`` publishes.
+    optimisation, and a partial failure must not throw away data that is merely
+    older. Returns a JSON-able summary, which ``/api/health`` publishes.
     """
     global _last_refresh
     s = settings or get_settings()
@@ -475,15 +496,6 @@ def refresh_cache(settings: Settings | None = None) -> dict:
         errors.append(f"catalogue: {exc}")
 
     targets = set(cached_symbols(s))
-    try:
-        default_id = default_symbol_id(only_traded=True)
-    except DataSourceError as exc:
-        # The catalogue is what names the default ticker; when it cannot be
-        # read, the cached symbols are still worth refreshing.
-        errors.append(f"default symbol: {exc}")
-        default_id = None
-    if default_id:
-        targets.add(default_id)
 
     refreshed = rows = purged = 0
     for name in sorted(targets):
@@ -521,6 +533,22 @@ def refresh_cache(settings: Settings | None = None) -> dict:
             refreshed += 1
             rows += int(len(raw))
 
+    metrics_symbols = metric_rows = 0
+    if s.use_metrics_5m:
+        # Same target set as the ticks: the symbols the dashboard is actually
+        # serving. A metrics read that fails leaves the previous grid in place,
+        # exactly as a failed tick read does.
+        for name in sorted(targets):
+            symbol = None if name == "all" else name
+            try:
+                grid = metrics.refresh_symbol(symbol, s)
+            except DataSourceError as exc:
+                errors.append(f"metrics {name}: {exc}")
+                continue
+            if not grid.empty:
+                metrics_symbols += 1
+                metric_rows += int(len(grid))
+
     finished = pd.Timestamp.utcnow()
     _last_refresh = {
         "started_at": started.isoformat(),
@@ -529,6 +557,10 @@ def refresh_cache(settings: Settings | None = None) -> dict:
         "symbols": refreshed,
         "rows": rows,
         "purged": purged,
+        # The precomputed grid pushed alongside the ticks: how many symbols and
+        # how many `as_of` stops are now cached for `/api/metrics`.
+        "metrics_symbols": metrics_symbols,
+        "metrics_rows": metric_rows,
         # The cache window being refreshed (480 by default). Named apart from
         # the health payload's `window_minutes`, which is the *aggregate* window
         # the analysis runs over and is capped by this one.
@@ -639,19 +671,21 @@ def load_ticks_cached(symbol: str | None, limit: int | None = None,
 
 
 def reset() -> None:
-    """Drop every cached fragment (catalogue, ticks, health probe).
+    """Drop every cached fragment (catalogue, ticks, metrics, health probe).
 
-    Redis holds the bulk of it, so the per-symbol tick keys and the catalogue
-    key are deleted too; otherwise a refresh would rebuild them and still read
-    the stale copy back. The refresh stamp goes with them: with an empty cache
-    there is nothing the last cycle can vouch for.
+    Redis holds the bulk of it, so the per-symbol tick keys, the per-symbol
+    precomputed grids and the catalogue key are deleted too; otherwise a refresh
+    would rebuild them and still read the stale copy back. The refresh stamp goes
+    with them: with an empty cache there is nothing the last cycle can vouch for.
     """
     global _instruments, _status, _last_refresh
     s = get_settings()
     cache.delete(s, cache.key(s, "catalogue"))
     for inst in (_instruments or {}):
         cache.delete(s, cache.key(s, "ticks", inst))
+        cache.delete(s, metrics.metrics_key(inst, s))
     cache.delete(s, cache.key(s, "ticks", "all"))
+    cache.delete(s, metrics.metrics_key(None, s))
     _instruments = None
     _last_refresh = None
     _status = Status()

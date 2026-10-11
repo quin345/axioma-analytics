@@ -17,6 +17,7 @@ from app.config import Settings
 #: defaults rather than about whatever this machine's ``.env`` happens to set.
 _ENV_KEYS = (
     "KQL_ENDPOINT_PROD", "KQL_ENDPOINT", "KQL_DATABASE", "KQL_TABLE",
+    "METRICS_TABLE", "METRICS_SOURCE",
     "KQL_LAG_MINUTES", "SYMBOL_TABLE", "DEFAULT_SYMBOL", "MAX_TICKS",
     "REDIS_HOST", "REDIS_PORT", "REDIS_SSL", "REDIS_DB", "REDIS_TIMEOUT",
     "REDIS_KEY_PREFIX", "REDIS_TTL_SECONDS", "CACHE_LOOKBACK_HOURS",
@@ -51,6 +52,37 @@ def test_defaults_point_at_the_kql_database():
 def test_defaults_point_at_the_kql_dimension():
     """The instrument dimension lives in the same KQL database, not in SQL."""
     assert Settings().symbol_table == "symbols_icmarkets"
+
+
+def test_defaults_point_at_the_precomputed_metrics_table():
+    """The headline metrics are served from this table, so its name has to be
+    configurable without a deploy - the metrics repo owns it, not this app."""
+    assert Settings().metrics_table == "metrics_5m"
+
+
+def test_the_metrics_source_defaults_to_the_precomputed_table():
+    s = Settings()
+
+    assert s.metrics_source == "metrics_5m"
+    assert s.use_metrics_5m is True
+
+
+def test_the_metrics_source_can_fall_back_to_the_tick_path(monkeypatch):
+    """A rollback switch: a stalled or half-appended `metrics_5m` must not leave
+    the dashboard with no headline metrics at all."""
+    monkeypatch.setenv("METRICS_SOURCE", "ticks")
+    assert Settings().use_metrics_5m is False
+
+    monkeypatch.setenv("METRICS_SOURCE", "Metrics_5M")     # case-insensitive
+    assert Settings().use_metrics_5m is True
+
+
+def test_an_unrecognised_metrics_source_is_the_tick_path(monkeypatch):
+    """An unknown value means the operator meant to opt out; guessing the table
+    would be the worse failure."""
+    monkeypatch.setenv("METRICS_SOURCE", "warehouse")
+    assert Settings().metrics_source == "warehouse"
+    assert Settings().use_metrics_5m is False
 
 
 def test_default_symbol_is_gold():

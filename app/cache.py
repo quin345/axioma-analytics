@@ -154,10 +154,17 @@ def ping(settings: Settings | None = None) -> bool:
         return False
 
 
-def key(settings: Settings | None = None, *parts: object) -> str:
-    """Namespaced cache key: prefix, KQL object, then the query's parameters."""
+def key(settings: Settings | None = None, *parts: object, object_name: str | None = None) -> str:
+    """Namespaced cache key: prefix, KQL object, then the query's parameters.
+
+    `object_name` overrides the KQL table the entry belongs to, so the
+    precomputed `metrics_5m` grid is keyed apart from the raw `agg_dom` ticks:
+    the two hold different shapes under the same symbol, and one key namespace
+    for both would let a stale tick frame be read back as metrics. It defaults
+    to the tick table, which is what every existing caller wants.
+    """
     s = settings or get_settings()
-    return ":".join([s.cache_key_prefix, s.kql_database, s.kql_table,
+    return ":".join([s.cache_key_prefix, s.kql_database, object_name or s.kql_table,
                      *(str(p) for p in parts)])
 
 

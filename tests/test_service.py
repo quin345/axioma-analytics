@@ -7,13 +7,47 @@ cache outage degrades to KQL rather than to an error.
 """
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from app import service
+from app import kql, service
 from app.config import Settings
 from app.errors import DataSourceError
+
+
+def _grid(periods: int = 5, symbol: str = "1") -> pd.DataFrame:
+    """A `metrics_5m` grid: `periods` 5-minute stops, every window present.
+
+    The shape the precomputed table actually ships - one row per `as_of` stop
+    with each metric as `<name>_<suffix>` across the four trailing windows - so
+    the cycle's metrics push can be asserted without a KQL table.
+    """
+    rows = []
+    for i, at in enumerate(pd.date_range("2026-10-08T00:00", periods=periods,
+                                         freq="5min", tz="UTC")):
+        row = {"symbolId": symbol, "as_of": at.to_pydatetime()}
+        for suffix, _ in kql.WINDOW_SUFFIXES:
+            row[f"ticks_{suffix}"] = 100 + i
+            row[f"open_{suffix}"] = 1.0850
+            row[f"close_{suffix}"] = 1.0855
+            row[f"high_{suffix}"] = 1.0860
+            row[f"low_{suffix}"] = 1.0845
+            row[f"vwap_{suffix}"] = 1.0852
+            row[f"change_pct_{suffix}"] = 0.046
+            row[f"total_volume_{suffix}"] = 1234.5
+            row[f"realized_vol_bps_{suffix}"] = 12.5
+            row[f"avg_spread_bps_{suffix}"] = 1.5
+            row[f"ofi_imbalance_{suffix}"] = 0.25
+            row[f"vap_{suffix}"] = [
+                {"price": 1.0850 + n * 0.001, "volume": 10.0 - n, "ticks": 3}
+                for n in range(5)
+            ]
+            row[f"poc_{suffix}"] = 1.0850
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 @pytest.fixture
@@ -196,7 +230,8 @@ def kql_rows(monkeypatch) -> dict:
     raises, so the refresh cycle can be shown leaving a good entry in place
     when one fetch goes wrong.
     """
-    calls: dict = {"load_raw": 0, "fail_on": set(), "starts": [], "lookbacks": []}
+    calls: dict = {"load_raw": 0, "fail_on": set(), "starts": [], "lookbacks": [],
+                   "metrics": 0}
 
     def load_raw(symbol=None, *, limit=None, lookback_minutes=None,
                  start=None, end=None):
@@ -213,8 +248,29 @@ def kql_rows(monkeypatch) -> dict:
             return frame.loc[ts >= pd.Timestamp(start)].reset_index(drop=True)
         return frame
 
+    def connect(settings=None):
+        """A KQL connection for the metrics read the cycle now makes."""
+        yield object()
+
+    def fetch_metrics(client, *, symbol=None, start=None, settings=None):
+        """The precomputed grid, sliced from `start` the way the real read is.
+
+        Stubbed at the KQL layer rather than at `metrics.refresh_symbol`, so the
+        cycle's own push - the cache write, the merge, the summary counts - is
+        the real code, not a fake that has to duplicate it to stay in sync.
+        """
+        calls["metrics"] += 1
+        grid = _grid()
+        if start is not None:
+            keep = [pd.Timestamp(st, tz="UTC") >= pd.Timestamp(start)
+                    for st in grid["as_of"]]
+            return grid.loc[keep].reset_index(drop=True)
+        return grid
+
     calls["frame"] = _window(240)
     monkeypatch.setattr(service, "load_raw", load_raw)
+    monkeypatch.setattr(kql, "connect", contextlib.contextmanager(connect))
+    monkeypatch.setattr(kql, "fetch_metrics", fetch_metrics)
     return calls
 
 
@@ -322,6 +378,10 @@ def test_reset_drops_the_catalogue_and_every_symbol_key(monkeypatch, redis):
         "axioma:ctrader_dom:agg_dom:catalogue",
         "axioma:ctrader_dom:agg_dom:ticks:1",
         "axioma:ctrader_dom:agg_dom:ticks:all",
+        # The precomputed grid rides along with the ticks: a reset that left it
+        # behind would have a stale metrics copy served after a fresh read.
+        "axioma:ctrader_dom:metrics_5m:metrics:1",
+        "axioma:ctrader_dom:metrics_5m:metrics:all",
     ]
     assert service._instruments is None
 
@@ -345,8 +405,7 @@ def test_reset_also_forgets_the_refresh_stamp(monkeypatch, redis):
 def catalogue(monkeypatch):
     """A catalogue builder; the default ticker is present but untraded.
 
-    Untraded by default so the cycle refreshes exactly what is cached - the
-    tests that care about the default being warmed ask for `catalogue(ticks=24)`.
+    Untraded by default so the cycle refreshes exactly what is cached.
     """
     def build(ticks: int = 0) -> dict:
         rows = {"41": service.Instrument("41", "XAUUSD", "Gold vs US Dollar", "metal", ticks)}
@@ -375,10 +434,13 @@ def test_the_cycle_slides_every_cached_symbol(redis, kql_rows, catalogue):
 
     service.refresh_cache()
 
-    # Both cached symbols were re-read and re-written, under the TTL.
+    # Both cached symbols were re-read and re-written, under the TTL - ticks
+    # first, then the precomputed grid the cycle pushes alongside them.
     assert redis["written"] == [
         ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
         ("axioma:ctrader_dom:agg_dom:ticks:2", 2700),
+        ("axioma:ctrader_dom:metrics_5m:metrics:1", 2700),
+        ("axioma:ctrader_dom:metrics_5m:metrics:2", 2700),
     ]
     assert kql_rows["load_raw"] == before + 2
     # A warm symbol is fetched only from its newest cached row - never over
@@ -429,7 +491,13 @@ def test_the_slide_keeps_the_newer_copy_of_an_overlapping_row(redis, kql_rows, c
 def test_a_cold_symbol_in_the_cycle_reads_the_whole_window(redis, kql_rows, catalogue):
     """No cached entry to slide from - a restart still reads all four hours."""
     catalogue(ticks=24)
-    assert service.cached_symbols() == []
+    service.load_ticks_cached("41", limit=100000, window_minutes=60)
+    # Evict the entry's rows but keep the key listed: the cycle sees a target
+    # with nothing usable and falls back to the full-window read.
+    redis["frames"]["axioma:ctrader_dom:agg_dom:ticks:41"] = _window(0)
+    redis["written"].clear()
+    kql_rows["starts"].clear()
+    kql_rows["lookbacks"].clear()
 
     service.refresh_cache()
 
@@ -470,19 +538,12 @@ def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
     assert service.last_refresh() == summary
 
 
-def test_the_cycle_warms_the_default_symbol_when_the_cache_is_empty(redis, kql_rows, catalogue):
-    """A restart with an empty cache still leaves the first paint fast."""
+def test_the_cycle_with_an_empty_cache_refreshes_nothing(redis, kql_rows, catalogue):
+    """The cycle works whatever data it has: nothing cached means nothing read.
+
+    No default warming - a cold cache stays empty until a request lazily loads
+    it, so the run only rebuilds the catalogue."""
     catalogue(ticks=24)
-    assert service.cached_symbols() == []
-
-    summary = service.refresh_cache()
-
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700)]
-    assert summary["symbols"] == 1
-
-
-def test_the_default_symbol_is_not_warmed_when_it_has_no_ticks(redis, kql_rows, catalogue):
-    """An untraded default would cache an empty frame and break the first paint."""
     assert service.cached_symbols() == []
 
     summary = service.refresh_cache()
@@ -491,15 +552,26 @@ def test_the_default_symbol_is_not_warmed_when_it_has_no_ticks(redis, kql_rows, 
     assert summary["symbols"] == 0
 
 
-def test_the_cycle_never_refreshes_the_same_symbol_twice(redis, kql_rows, catalogue):
-    """The default ticker is already cached here, so it is read once, not twice."""
+def test_an_empty_cache_stays_empty_when_the_default_is_untraded(redis, kql_rows, catalogue):
+    """An untraded default changes nothing: the cycle had no targets either way."""
+    assert service.cached_symbols() == []
+
+    summary = service.refresh_cache()
+
+    assert redis["written"] == []
+    assert summary["symbols"] == 0
+
+
+def test_a_cached_symbol_is_refreshed_once(redis, kql_rows, catalogue):
+    """A cached symbol is read once, not twice - there is no second target set."""
     catalogue(ticks=24)
     service.load_ticks_cached("41", limit=100000, window_minutes=60)
     redis["written"].clear()
 
     service.refresh_cache()
 
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700)]
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:41", 2700),
+                                ("axioma:ctrader_dom:metrics_5m:metrics:41", 2700)]
 
 
 def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
@@ -508,7 +580,8 @@ def test_the_cycle_keeps_the_symbol_less_entry(redis, kql_rows, catalogue):
 
     service.refresh_cache()
 
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:all", 2700)]
+    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:all", 2700),
+                                ("axioma:ctrader_dom:metrics_5m:metrics:all", 2700)]
     assert kql_rows["symbol"] is None
 
 
@@ -523,7 +596,13 @@ def test_a_failing_symbol_keeps_its_previous_entry(redis, kql_rows, catalogue):
 
     assert summary["symbols"] == 1
     assert summary["errors"] == ["2: No usable aggregate rows for 2."]
-    assert redis["written"] == [("axioma:ctrader_dom:agg_dom:ticks:1", 2700)]
+    # The failed tick window is not re-written, but its metrics grid - read
+    # through a separate path - still refreshes alongside the good symbol.
+    assert redis["written"] == [
+        ("axioma:ctrader_dom:agg_dom:ticks:1", 2700),
+        ("axioma:ctrader_dom:metrics_5m:metrics:1", 2700),
+        ("axioma:ctrader_dom:metrics_5m:metrics:2", 2700),
+    ]
     assert "axioma:ctrader_dom:agg_dom:ticks:2" in redis["frames"]
 
 
@@ -543,7 +622,6 @@ def test_a_failed_catalogue_still_refreshes_the_ticks(monkeypatch, redis, kql_ro
     assert summary["symbols"] == 1
     assert summary["errors"] == [
         "catalogue: KQL query failed: Forbidden (403-Forbidden)",
-        "default symbol: KQL query failed: Forbidden (403-Forbidden)",
     ]
 
 
@@ -557,4 +635,66 @@ def test_a_cache_that_cannot_be_listed_refreshes_nothing(monkeypatch, kql_rows, 
 
     assert summary["symbols"] == 0
     assert summary["errors"] == []
+
+
+
+# ----------------------------------------------------------------------
+# The metrics push
+# ----------------------------------------------------------------------
+
+def test_the_cycle_pushes_the_precomputed_grid_to_redis(redis, kql_rows, catalogue):
+    """The headline metrics are served from Redis, so the cycle - not the page
+    load - is what puts them there."""
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    redis["written"].clear()
+
+    summary = service.refresh_cache()
+
+    assert kql_rows["metrics"] == 1                 # one grid read per symbol
+    assert summary["metrics_symbols"] == 1
+    assert summary["metrics_rows"] == 5
+    key = "axioma:ctrader_dom:metrics_5m:metrics:1"
+    assert key in redis["frames"]
+    assert len(redis["frames"][key]) == 5
+
+
+def test_the_metrics_push_is_switched_off_with_the_source(redis, kql_rows,
+                                                          catalogue, monkeypatch,
+                                                          settings):
+    """A stalled or half-appended table must not leave the cycle pushing a grid
+    the operator cannot trust."""
+    off = Settings(kql_host="https://kql.example.invalid", kql_database="ctrader_dom",
+                   kql_table="agg_dom", redis_host="cache.example.invalid",
+                   cache_lookback_hours=4, max_ticks=10000,
+                   _metrics_source="ticks")
+    monkeypatch.setattr(service, "get_settings", lambda: off)
+    try:
+        summary = service.refresh_cache()
+    finally:
+        monkeypatch.setattr(service, "get_settings", lambda: settings)
+
+    assert kql_rows["metrics"] == 0
+    assert summary["metrics_symbols"] == 0
+    assert summary["metrics_rows"] == 0
+
+
+def test_a_metrics_read_that_fails_is_reported_and_keeps_the_old_grid(
+        redis, kql_rows, catalogue, monkeypatch):
+    """A partial failure must not evict a grid that is merely older - the same
+    contract the tick window follows."""
+    service.load_ticks_cached("1", limit=100000, window_minutes=60)
+    service.refresh_cache()  # pushes the grid; the tick read alone does not
+    key = "axioma:ctrader_dom:metrics_5m:metrics:1"
+    assert key in redis["frames"]
+    before = redis["frames"][key]
+
+    def boom(symbol=None, settings=None):
+        raise DataSourceError("KQL query failed: Forbidden (403-Forbidden)")
+
+    monkeypatch.setattr(service.metrics, "refresh_symbol", boom)
+
+    summary = service.refresh_cache()
+
+    assert any("metrics 1: " in e for e in summary["errors"])
+    assert redis["frames"][key] is before            # untouched, not evicted
 

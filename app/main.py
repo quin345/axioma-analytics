@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, refresh, service
+from . import analytics, metrics, refresh, service
 from .assets import CLASS_LABELS
 from .config import get_settings
 from .errors import DataSourceError
@@ -112,6 +112,16 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "cache_refresh_minutes": s.cache_refresh_minutes,
         "cache_refreshed_at": last.get("finished_at"),
         "cached_symbols": last.get("symbols"),
+        # The precomputed grid pushed to Redis alongside the ticks, and the
+        # freshness of the table it came from: the headline metrics are served
+        # from here, so a stalled metrics job is visible in health rather than
+        # showing up as a panel of nulls.
+        "metrics_5m": st.metrics_5m,
+        "metrics_table": s.metrics_table if st.metrics_5m else None,
+        "metrics_stops": st.metrics_rows,
+        "metrics_latest_as_of": st.metrics_latest,
+        "cached_metrics_symbols": last.get("metrics_symbols"),
+        "cached_metrics_rows": last.get("metrics_rows"),
         "has_data": bool(traded),
         "symbol_count": traded,
         "classified_count": classified,
@@ -166,6 +176,45 @@ def symbols(
         "total": len(flat),
         "default_symbol": service.default_symbol_id(only_traded=only_traded),
     }
+
+
+@app.get("/api/metrics")
+def metrics_report(
+    symbol: str | None = Query(None, description="Symbol id; omit for every instrument"),
+    window_minutes: int | None = Query(
+        None, ge=1,
+        description=(
+            "Which trailing window to report: 60, 120, 180 or 240 minutes. A "
+            "value the table does not precompute is served with the widest one "
+            "it does that is no wider, and the resolution is reported."
+        ),
+    ),
+    as_of: str | None = Query(
+        None,
+        description=(
+            "Point in time to report, ISO 8601. Omitted - or ahead of the data - "
+            "means the newest stop; anything older resolves to the newest stop at "
+            "or before it."
+        ),
+    ),
+) -> dict:
+    """Precomputed window metrics for one symbol, as a Redis lookup.
+
+    Every metric here is already aggregated in `metrics_5m` over the four fixed
+    trailing windows, so this endpoint neither scans `agg_dom` nor re-derives
+    anything in pandas: it picks the row for the chosen point in time and the
+    column set for the chosen window out of the grid the refresh cycle pushed to
+    Redis. All four windows come back together, because they are four column sets
+    on one row - the UI can switch window without a request.
+
+    The point in time is clamped rather than rejected, for the same reason as
+    `/api/analytics`: the grid is a discrete set of stops, so a bookmarked URL or
+    a stale tab resolves to the nearest usable stop instead of failing.
+    """
+    try:
+        return metrics.report(symbol, window_minutes=window_minutes, as_of=as_of)
+    except DataSourceError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/analytics")

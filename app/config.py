@@ -6,6 +6,12 @@ The app reads **one** source: the production Fabric **KQL** database
 * ``dom_stream_raw`` / ``dom_book_flat`` - the raw and flattened DOM feed
   (ingested, not queried directly by the dashboard),
 * ``agg_dom`` - the per-tick aggregate order-book metrics the analytics read,
+* ``metrics_5m`` - the precomputed window metrics: one row per
+  ``(symbolId, as_of)`` stop with every metric already aggregated over the four
+  fixed 1 h / 2 h / 3 h / 4 h trailing windows (`docs/metrics_5m.md`). This is
+  what the headline metrics are served from - pushed to Redis by the refresh
+  cycle and read back as a lookup, so a dashboard request never re-scans
+  `agg_dom` nor re-derives anything in pandas.
 * ``symbols_icmarkets`` - the icmarkets instrument dimension.
 
 Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
@@ -139,6 +145,22 @@ class Settings:
     #: The icmarkets instrument dimension, in the same KQL database.
     symbol_table: str = field(
         default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
+    )
+    #: The precomputed window metrics: one row per `(symbolId, as_of)` stop with
+    #: every metric already aggregated over the four fixed trailing windows
+    #: (1 h / 2 h / 3 h / 4 h). Built by `Metrics5m()` in the metrics repo on the
+    #: same cadence as the cache - see `docs/metrics_5m.md`, which is the
+    #: source-of-truth for its columns. This is what `/api/metrics` reads, and
+    #: what the refresh cycle pushes to Redis: the point of the table is that a
+    #: dashboard request becomes a lookup of pre-aggregated columns instead of a
+    #: re-scan of `agg_dom` and a re-derive in pandas.
+    metrics_table: str = field(
+        default_factory=lambda: _env("METRICS_TABLE", default="metrics_5m") or "metrics_5m"
+    )
+    #: `metrics_5m` (default) reads the precomputed table; `ticks` falls back to
+    #: recomputing the metrics from `agg_dom`. See `metrics_source`.
+    _metrics_source: str | None = field(
+        default_factory=lambda: _env("METRICS_SOURCE", default="metrics_5m")
     )
     #: Buffer applied to the KQL time filter so a tick written just before the
     #: window opens is still returned.
@@ -284,6 +306,23 @@ class Settings:
         cap = self.cache_lookback_minutes
         choices = tuple(m for m in self.window_choices_minutes if m <= cap)
         return choices or (cap,)
+
+    @property
+    def metrics_source(self) -> str:
+        """Where `/api/metrics` reads from: the precomputed table or the ticks.
+
+        A rollback switch, not a data-source selector: the tick path is kept
+        because `metrics_5m` is rebuilt by a separate scheduled job and a
+        stalled or half-appended table would otherwise leave the dashboard with
+        no headline metrics at all. Set `METRICS_SOURCE=ticks` to fall back to
+        the pandas recompute without a deploy.
+        """
+        return (self._metrics_source or "").strip().lower() or "metrics_5m"
+
+    @property
+    def use_metrics_5m(self) -> bool:
+        """True when the precomputed table backs the metrics read path."""
+        return self.metrics_source == "metrics_5m"
 
     @property
     def cache_refresh_seconds(self) -> int:
