@@ -617,21 +617,26 @@ function renderFreshness(report) {
 
   // Only touch className when a class is supplied (see set() above).
   set("lastTick",
-      feed ? `Last update ${fmt.hm(feed)} ${tzAbbr()}` : "Last update unavailable");
+      feed ? `Last update ${fmt.fivemin(feed)} ${tzAbbr()}` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
 
   // The strip reports the loaded window; without a report there is nothing new
-  // to say, so a health refresh leaves what the last analysis wrote alone.
+  // to say about the window itself, but the cycle stamps (next refresh, cache
+  // write) are about the feed and must move on a health-only poll too -
+  // otherwise an open tab never shows the 5-minute updates.
+  const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
+  set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
+  // Proof the Redis cache is moving: when the refresh cycle last finished,
+  // floored to the 5-minute grid it runs on (e.g. 14:47:12 -> 14:45).
+  const cacheStamp = h.cache_refreshed_at || null;
+  set("fbCache", cacheStamp ? `${fmt.fivemin(cacheStamp)} ${tzAbbr()}` : "\u2013",
+      cacheStamp ? "ok" : "");
   if (!report) return;
   set("fbLastTick", `${fmt.hm(windowLatest)} ${tzAbbr()}`,
       ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
 
-  // Next refresh: the next clock slot the ingest cycle runs on, strictly after
-  // now - 5-minute marks plus the offset (e.g. :05:15) regardless of the feed.
-  const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
-  set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
@@ -1392,6 +1397,7 @@ async function analyse() {
       ...(asOfIso() ? { as_of: asOfIso() } : {}),
     });
     const r = await api(`/api/analytics?${p}`);
+    window.__lastReport = r;
     renderKpis(r.summary, r.microstructure);
     renderCharts(r);
     renderTicks(r.ticks);
@@ -1477,4 +1483,24 @@ on("calToday", "click", () => {
 document.addEventListener("DOMContentLoaded", () => {
   wireCards();
   init();
+  // Re-read /api/health every minute so an open tab picks up each 5-minute
+  // refresh cycle: the header "Last update", the "Next refresh" and
+  // "Cache updated" stamps all move without a manual reload. Health-only:
+  // the loaded charts are left alone until the user re-runs.
+  setInterval(async () => {
+    try {
+      const h = window.__health || {};
+      const prevCache = h.cache_refreshed_at || null;
+      const prevTick = h.latest_tick || null;
+      const fresh = await loadHealth();
+      renderFreshness(null);
+      // The cache just turned over: pull the new window automatically so the
+      // charts follow the feed instead of sitting on the old one.
+      if (fresh.cache_refreshed_at && fresh.cache_refreshed_at !== prevCache) {
+        await analyse();
+      } else if (fresh.latest_tick && fresh.latest_tick !== prevTick) {
+        renderFreshness(window.__lastReport || null);
+      }
+    } catch (err) { bannerErr(err.message); }
+  }, 60_000);
 });
