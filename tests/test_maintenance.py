@@ -360,13 +360,35 @@ def test_the_dashboard_serves_its_metrics_from_the_metrics_5m_api():
 
     # The precomputed grid is the source of the metrics it carries.
     assert "api(`/api/metrics?${mp}`)" in body
-    assert "r.summary = { ...r.summary, ...s5 }" in body
+    # The overlay is key-by-key and skips nulls. A blanket spread would let a
+    # metric the table does not ship overwrite a tick-derived figure with null
+    # and blank the tile - which is exactly how the OHLC columns disappearing
+    # from the schema emptied "Last" and "High / Low".
+    assert "r.summary = { ...r.summary, ...s5 }" not in body
+    assert "if (v !== null && v !== undefined) r.summary[k] = v;" in body
     # The profile for the served span replaces the tick-binned one, same shape.
     assert "m.volume_profiles" in body
     assert "r.volume_profile = profile" in body
     # The tick-derived panels still come from the report, in the same call.
     assert "api(`/api/analytics?${p}`)" in body
     assert "Promise.all" in body
+
+
+def test_a_metrics_null_cannot_blank_a_tick_derived_tile():
+    """The overlay must be a merge that only carries what the table shipped.
+
+    `metrics_5m` and `/api/analytics` answer different questions and their
+    schemas have drifted before (OHLC was dropped from the table), so the two
+    bundles are combined with `Object.entries` + a null guard rather than a
+    spread. This pins the shape of that merge.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
+
+    assert "for (const [k, v] of Object.entries(s5))" in body
+    # A null from the table means "nothing for this window", never "zero", so it
+    # must leave the tick-derived value in place.
+    assert "if (v !== null && v !== undefined) r.summary[k] = v;" in body
 
 
 def test_the_point_in_time_defaults_to_the_newest_metrics_stop():

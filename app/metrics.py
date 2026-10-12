@@ -40,12 +40,16 @@ log = logging.getLogger(__name__)
 #: The scalar metrics a window payload carries, in display order. Each is read
 #: from the `<metric>_<suffix>` column of `metrics_5m` and renamed to the key the
 #: dashboard already reads, so the panel's rendering is unchanged by the move.
+#:
+#: OHLC is deliberately absent: `metrics_5m` does not ship `open/high/low/close`
+#: columns - the session extremes come from `/api/analytics`, which computes them
+#: from the tick stream. Listing a column the table lacks would read as `null`
+#: and, because the metrics bundle is overlaid on the tick-derived summary,
+#: *blank* the "Last" and "High / Low" tiles that `/api/analytics` fills
+#: correctly. The overlay in `app/static/app.js` also drops null keys for the
+#: same reason, so neither side can null out the other.
 SCALAR_FIELDS: tuple[tuple[str, str], ...] = (
     ("ticks", "ticks"),
-    ("open", "open"),
-    ("high", "high"),
-    ("low", "low"),
-    ("close", "close"),
     ("vwap", "vwap"),
     ("change_pct", "change_pct"),
     ("total_volume", "total_volume"),

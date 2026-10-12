@@ -23,13 +23,10 @@ def _grid(periods: int = 5) -> pd.DataFrame:
     rows = []
     for i, at in enumerate(pd.date_range("2026-10-10T09:00", periods=periods,
                                          freq="5min", tz="UTC")):
-        row = {"symbolId": "1", "as_of": at.to_pydatetime()}
+        row = {"symbolId": "1", "as_of": at.to_pydatetime(),
+               "computed_at": at.to_pydatetime()}
         for suffix, _ in kql.WINDOW_SUFFIXES:
             row[f"ticks_{suffix}"] = 100 + i
-            row[f"open_{suffix}"] = 1.0850
-            row[f"close_{suffix}"] = 1.0855
-            row[f"high_{suffix}"] = 1.0860
-            row[f"low_{suffix}"] = 1.0845
             row[f"vwap_{suffix}"] = 1.0852
             row[f"change_pct_{suffix}"] = 0.046
             row[f"total_volume_{suffix}"] = 1234.5

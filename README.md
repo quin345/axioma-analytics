@@ -606,6 +606,12 @@ rather than failing, and omitted means the newest stop. `meta` names the source
 table (`metrics_5m`) and the stop it read, and an empty table is a `502` naming
 the table — the metrics job not having run is not a feed outage.
 
+The table carries no OHLC columns, so the **Last** and **High / Low** tiles come
+from `/api/analytics`. The dashboard overlays only the keys the table actually
+shipped (`metrics_5m` is authoritative for those, the tick path for the rest), so
+neither source can blank the other's numbers — see *Reading OHLC* in
+`docs/metrics_5m.md`.
+
 ```bash
 # Every window at the newest stop; the 90-minute ask is answered with the 60-minute one.
 curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'

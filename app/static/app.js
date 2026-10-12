@@ -1453,7 +1453,16 @@ async function analyse() {
     if (m) {
       // `metrics_5m` is the source of truth for the metrics it carries.
       const s5 = m.summary || {};
-      r.summary = { ...r.summary, ...s5 };
+      // Only the keys the table actually shipped are overlaid. The two bundles
+      // answer different questions - the table is precomputed per 5-minute
+      // stop, the tick path is recomputed from every tick in the window - so a
+      // metric the table does not carry (OHLC is not in its schema) must leave
+      // the tick-derived figure alone rather than overwrite it with null and
+      // blank the tile. `clean()` already turns NaN/Inf into null, so a null
+      // here means "the table had nothing for this window", never "zero".
+      for (const [k, v] of Object.entries(s5)) {
+        if (v !== null && v !== undefined) r.summary[k] = v;
+      }
       // Displacement has to track the overlaid change: the absolute move is not
       // a `metrics_5m` column, so derive it from the stop the table served
       // rather than leave the tick path's slightly different figure beside it.

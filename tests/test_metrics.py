@@ -29,17 +29,19 @@ def settings() -> Settings:
 
 
 def _grid(periods: int = 5, symbol: str = "1", offset: int = 0) -> pd.DataFrame:
-    """A `metrics_5m` grid: `periods` 5-minute stops, every window present."""
+    """A `metrics_5m` grid: `periods` 5-minute stops, every window present.
+
+    Mirrors the table's real schema - see the note on `SCALAR_FIELDS`: the
+    windowed metrics it ships plus the `computed_at` stamp the refresh writes,
+    and deliberately **no** `open/high/low/close` columns.
+    """
     rows = []
     for i, at in enumerate(pd.date_range("2026-10-10T09:00", periods=periods,
                                          freq="5min", tz="UTC")):
-        row = {"symbolId": symbol, "as_of": at.to_pydatetime()}
+        row = {"symbolId": symbol, "as_of": at.to_pydatetime(),
+               "computed_at": at.to_pydatetime()}
         for suffix, _ in kql.WINDOW_SUFFIXES:
             row[f"ticks_{suffix}"] = 100 + i + offset
-            row[f"open_{suffix}"] = 1.0850
-            row[f"close_{suffix}"] = 1.0855
-            row[f"high_{suffix}"] = 1.0860
-            row[f"low_{suffix}"] = 1.0845
             row[f"vwap_{suffix}"] = 1.0852
             row[f"change_pct_{suffix}"] = 0.046
             row[f"total_volume_{suffix}"] = 1234.5
@@ -70,6 +72,10 @@ def test_the_window_columns_pin_the_four_trailing_windows():
     assert "ticks_1h" in cols and "ticks_4h" in cols
     assert "vap_2h" in cols and "poc_3h" in cols
     assert "open_5m" not in cols          # the slider is gone: only fixed windows
+    # OHLC is not in the table's schema: the tick path supplies it, and
+    # projecting it here would read back as null and blank the tiles.
+    for metric in ("open", "high", "low", "close"):
+        assert f"{metric}_1h" not in cols
 
 
 def test_a_window_the_table_ships_resolves_to_its_suffix():
@@ -156,13 +162,31 @@ def test_a_window_payload_keeps_the_keys_the_dashboard_reads():
     payload = metrics.window_payload(_grid().iloc[-1], "1h")
 
     assert payload["ticks"] == 104.0
-    assert payload["open"] == 1.085
+    assert payload["vwap"] == 1.0852
     assert payload["avg_spread"] == 1.5      # renamed from avg_spread_bps
     assert payload["ofi_imbalance"] == 0.25
     assert payload["realized_vol_bps"] == 12.5
     # Annualisation is applied on read, not stored in KQL.
     assert payload["annualised_vol_pct"] == pytest.approx(
         12.5 * float(np.sqrt(252 * 24 * 3600)) / 10_000 * 100)
+
+
+def test_the_payload_carries_no_ohlc_keys():
+    """`metrics_5m` does not ship OHLC, and the metrics bundle is overlaid on the
+    tick-derived summary - so emitting a null `high`/`low` would *overwrite* the
+    figures `/api/analytics` computed and blank the tiles.
+
+    The contract is enforced from both ends: the payload omits the keys entirely,
+    and the overlay in `app/static/app.js` skips nulls.
+    """
+    payload = metrics.window_payload(_grid().iloc[-1], "1h")
+
+    for key in ("open", "high", "low", "close"):
+        assert key not in payload
+    # Only columns the table actually declares are read, so a dropped column can
+    # never silently reappear in a payload as a null.
+    shipped = {*kql.WINDOW_METRICS, *kql.WINDOW_DERIVED}
+    assert all(col in shipped for col, _ in metrics.SCALAR_FIELDS)
 
 
 def test_each_window_reads_its_own_column_set():

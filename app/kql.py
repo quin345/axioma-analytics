@@ -55,8 +55,15 @@ WINDOW_SUFFIXES: tuple[tuple[str, int], ...] = (
 )
 
 #: The windowed scalar metrics, in the order `metrics_5m` materialises them.
+#:
+#: OHLC (`open`/`high`/`low`/`close`) is deliberately **not** here: the table the
+#: dashboard reads ships the tick-level bars and the session extremes through
+#: `/api/analytics` instead, so a window column for them was dropped from the
+#: schema. Declaring a column the table does not have would read as `null` and
+#: blank the tiles that `/api/analytics` fills correctly - see
+#: `metrics.SCALAR_FIELDS` and the overlay in `app/static/app.js`.
 WINDOW_METRICS = (
-    "ticks", "open", "high", "low", "close", "vwap", "total_volume",
+    "ticks", "vwap", "total_volume",
     "realized_vol_bps", "avg_spread_bps", "ofi_imbalance",
 )
 
@@ -243,9 +250,15 @@ def symbol_count(client: KustoClient, settings: Settings | None = None) -> int:
 # Precomputed window metrics (`metrics_5m`)
 # --------------------------------------------------------------------------
 
+#: The column the refresh stamps each row with, used to keep the newest version
+#: of a `(symbolId, as_of)` stop when the refresh appends rather than replaces.
+#: The table the dashboard reads writes `computed_at`; the older name is tried
+#: second so a table built to the previous contract still dedupes.
+METRICS_STAMPS: tuple[str, ...] = ("computed_at", "ingested_at")
+
 #: The table accumulates a version per `(symbolId, as_of)` every cycle, because
-#: the refresh appends rather than replacing. `arg_max(ingested_at, *)` keeps
-#: the newest row per stop, which is what makes "latest" well-defined - see the
+#: the refresh appends rather than replacing. `arg_max(<stamp>, *)` keeps the
+#: newest row per stop, which is what makes "latest" well-defined - see the
 #: *Dedup* note in `docs/metrics_5m.md`.
 _METRICS_ANCHOR = """
 declare query_parameters(sym:string = "");
@@ -255,26 +268,28 @@ declare query_parameters(sym:string = "");
 | summarize mx = max(as_of)
 """
 
-_METRICS_FETCH = """
-declare query_parameters(sym:string = "", start:datetime = datetime(null));
-{obj}
-| where isnotnull(symbolId) and isnotnull(as_of)
-{symbol_match}
-| where isnull(start) or as_of >= start
-| summarize arg_max(ingested_at, *) by symbolId, as_of
-| project-away ingested_at
-| order by symbolId asc, as_of asc
-"""
 
-_METRICS_FALLBACK = """
-declare query_parameters(sym:string = "", start:datetime = datetime(null));
-{obj}
-| where isnotnull(symbolId) and isnotnull(as_of)
-{symbol_match}
-| where isnull(start) or as_of >= start
-| order by symbolId asc, as_of asc
-"""
+def _metrics_fetch(obj: str, stamp: str | None) -> str:
+    """The grid read, optionally deduplicated on `stamp`.
 
+    `stamp=None` is the last resort: a table appended once per stop has nothing
+    to dedupe, so a plain ordered scan is the correct read rather than a failure.
+    """
+    head = (
+        'declare query_parameters(sym:string = "", start:datetime = datetime(null));\n'
+        f"{obj}\n"
+        "| where isnotnull(symbolId) and isnotnull(as_of)\n"
+        "{symbol_match}\n"
+        "| where isnull(start) or as_of >= start\n"
+    )
+    if not stamp:
+        return head + "| order by symbolId asc, as_of asc"
+    return (
+        head
+        + f"| summarize arg_max({stamp}, *) by symbolId, as_of\n"
+        + f"| project-away {stamp}\n"
+        + "| order by symbolId asc, as_of asc"
+    )
 
 def metrics_anchor(client: KustoClient, *, symbol: str | None = None,
                    settings: Settings | None = None) -> object:
@@ -307,26 +322,33 @@ def fetch_metrics(client: KustoClient, *, symbol: str | None = None,
     instead of re-reading the grid it already holds.
 
     The table is rebuilt by appending, so the newest row per `(symbolId,
-    as_of)` is kept. When the table carries no `ingested_at` to order by, the
-    read falls back to the plain ordered scan rather than failing: a table
-    appended once per stop has nothing to dedupe.
+    as_of)` is kept - which is why the read deduplicates on a stamp column
+    rather than assuming one row per stop. The stamp is discovered by trying
+    `METRICS_STAMPS` in order and falling back to the plain ordered scan: a
+    missing stamp is a schema difference, not an outage, and a table appended
+    once per stop has nothing to dedupe. Probing costs one extra query only
+    when a name is absent, so the steady state is a single read.
     """
     s = settings or get_settings()
     obj = table_ref(s.metrics_table)
     params: dict[str, Any] = {"sym": str(symbol).strip() if symbol else ""}
     if start:
         params["start"] = _kusto_datetime(start)
-    csl = _METRICS_FETCH.format(obj=obj, symbol_match=_SYMBOL_MATCH)
-    try:
-        return query(client, csl, params, settings=s)
-    except DataSourceError as exc:
-        # A missing `ingested_at` is a schema difference, not an outage; retry
-        # without the dedup rather than surfacing a hard error to the caller.
-        if "ingested_at" not in str(exc):
-            raise
-        log.info("metrics_5m has no ingested_at column; reading it undeduplicated.")
-        return query(client, _METRICS_FALLBACK.format(obj=obj, symbol_match=_SYMBOL_MATCH),
-                     params, settings=s)
+
+    for stamp in (*METRICS_STAMPS, None):
+        csl = _metrics_fetch(obj, stamp).format(symbol_match=_SYMBOL_MATCH)
+        try:
+            return query(client, csl, params, settings=s)
+        except DataSourceError as exc:
+            # An unknown column name is the only failure worth retrying: any
+            # other error (auth, throttle, a genuine outage) must surface.
+            if stamp is None or f"'{stamp}'" not in str(exc):
+                raise
+            log.info("metrics_5m has no %s column; trying the next dedup stamp.",
+                     stamp)
+    raise DataSourceError(
+        f"Could not read the precomputed metrics from {s.metrics_table}."
+    )
 
 
 def metrics_stats(client: KustoClient, settings: Settings | None = None) -> tuple[int, str | None]:

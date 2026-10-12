@@ -27,49 +27,50 @@ in pandas.
 | Grain | one row per `(symbolId, as_of)` | — |
 | Point-in-time grid | last **4 h** in **5-minute** steps (49 stops, `as_of` inclusive) | `TIMELINE_MINUTES=240`, `TIMELINE_STEP_MINUTES=5` |
 | Windows (fixed) | **60 / 120 / 180 / 240** minutes, each ending at `as_of` | replaces the old 5–240 min slider |
-| Scalar columns | **10 metrics × 4 windows = 40** columns (`<metric>_1h … <metric>_4h`) | `app/analytics.py` summary/OFI/spread/vol |
-| Nested columns | `dynamic` objects per window (`vap_1h…`, `dist_1h…`, …) | `volume_profile`, `return_distribution` |
+| Scalar columns | **6 metrics × 4 windows = 24** columns (`<metric>_1h … <metric>_4h`) | `app/analytics.py` summary/OFI/spread/vol |
+| Derived columns | `change_pct_1h … change_pct_4h` | `summary.change_pct` |
+| Nested columns | `dynamic`/`real` per window (`vap_1h…`, `poc_1h…`) | `volume_profile` |
 | Source table | `ctrader_dom.agg_dom` (per-tick derived order-book metrics) | `kql.KQL_TABLE` |
 | Scan span | **8 h** of ticks (4 h timeline + 4 h widest window) | `CACHE_LOOKBACK_HOURS=8` |
 | Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=30` |
+| Row stamp | `computed_at` (`ingested_at` is the legacy fallback) | `kql.METRICS_STAMPS` |
 
-Row shape (one 5-minute `as_of` stop for one symbol):
+> **OHLC is not in this table.** The `open`/`high`/`low`/`close` window columns
+> were dropped from the schema: the session extremes come from `/api/analytics`,
+> which recomputes them from the tick stream (`analytics.summary`). This is the
+> one thing the read path must get right — see *Reading OHLC* below.
+
+Row shape (one 5-minute `as_of` stop for one symbol), as verified with
+`getschema`:
 
 ```
 symbolId : long
 as_of    : datetime            // the point in time this row is "as of"
 ticks_1h … ticks_4h            : long      // 4 cols
-open_1h  … open_4h             : real      // 4
-high_1h  … high_4h             : real      // 4
-low_1h   … low_4h              : real      // 4
-close_1h … close_4h            : real      // 4
 vwap_1h  … vwap_4h             : real      // 4
 total_volume_1h … _4h          : real      // 4
 realized_vol_bps_1h … _4h      : real      // 4
 avg_spread_bps_1h … _4h        : real      // 4
-ofi_imbalance_1h … _4h         : real      // 4   -> 40 scalar columns
+ofi_imbalance_1h … _4h         : real      // 4   -> 24 scalar columns
+change_pct_1h … change_pct_4h  : real      // 4   -> derived
 vap_1h   … vap_4h              : dynamic   // volume-at-price ladder (nested)
-dist_1h  … dist_4h             : dynamic   // return-distribution histogram (nested)
+poc_1h   … poc_4h              : real      // 4   -> 32 windowed columns
+computed_at                    : datetime  // when this row was computed
 ```
 
-### The 10 windowed metrics
+### The 6 windowed metrics
 
 | Metric | Type | Definition (over the window ending at `as_of`) | `analytics.py` analogue |
 |---|---|---|---|
 | `ticks` | long | tick count | `summary.ticks` |
-| `open` | real | first mid by time (`arg_min(timestamp, mid)`) | `summary.open` |
-| `high` | real | `max(mid)` | `summary.high` |
-| `low` | real | `min(mid)` | `summary.low` |
-| `close` | real | last mid by time (`arg_max(timestamp, mid)`) | `summary.close` |
 | `vwap` | real | `sum(mid*volume)/sum(volume)` | `summary.vwap` |
 | `total_volume` | real | `sum(volume)` | `summary.total_volume` |
 | `realized_vol_bps` | real | `sqrt(Σ ret² / duration_s) × 10000` | `summary.realized_vol_bps` |
 | `avg_spread_bps` | real | `avg(spread_bps)` | `summary.avg_spread` |
 | `ofi_imbalance` | real | `sum(signed_volume)/sum(abs(signed_volume))` ∈ [-1,1] | `microstructure.order_flow` |
 
-`change_pct`, `tick_rate`, `median_spread`, `p95_spread`, `depth_imbalance` are
-trivial functions of the 40 columns above and are derived **after** the pivot (see
-*Derived columns*), so they cost nothing to add without another table scan.
+`change_pct` is a trivial function of the window's OHLC and is derived **after**
+the pivot, so it costs nothing to add without another table scan.
 ---
 
 ## The KQL
@@ -314,14 +315,21 @@ let Metrics5m() {
 accumulates versions. Either
 - `.set-or-append` only the newest slice and let the reader keep the latest per
   `as_of`, or
-- expose a deduplicating view the app reads:
+- expose a deduplicating view the app reads. The live table writes `computed_at`,
+  and the reader probes for it directly:
+
   ```kql
   .create function Metrics5mLatest() {
       metrics_5m
-      | summarize arg_max(ingested_at, *) by symbolId, as_of
+      | summarize arg_max(computed_at, *) by symbolId, as_of
   }
   ```
-  (add an `ingested_at` column in Stage 5 so "latest" is well-defined).
+
+  `kql.METRICS_STAMPS` names the stamps the app tries, in order
+  (`computed_at`, then the legacy `ingested_at`), and falls back to a plain
+  ordered scan when the table carries neither: a table appended once per stop has
+  nothing to dedupe. Only a *missing column* is retried — an auth or throttle
+  failure surfaces rather than being paid for three times over.
 
 A **materialized view** over `agg_dom` is *not* suitable here: the as-of self-join
 and `serialize`/window steps are outside the materialized-view operator subset. Use
@@ -372,6 +380,35 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    four fixed choices 60/120/180/240, filled from `/api/health` so the control
    cannot offer a span the table does not ship; `metrics_5m` always carries all
    four. The point-in-time field is unchanged (5-min grid, 4 h).
+
+### Reading OHLC — the one thing to get right
+
+`metrics_5m` carries no `open`/`high`/`low`/`close` columns. Those tiles are fed
+by `/api/analytics`, which recomputes them from the tick stream, and the metrics
+bundle is **overlaid** on that report — so the two schemas meet in the browser:
+
+```js
+// app/static/app.js, analyse()
+for (const [k, v] of Object.entries(s5)) {
+  if (v !== null && v !== undefined) r.summary[k] = v;
+}
+```
+
+The null guard is load-bearing, not defensive noise. A blanket spread
+(`r.summary = { ...r.summary, ...s5 }`) lets *any* metric the table does not ship
+overwrite the tick-derived figure with `null` — which is exactly how the OHLC
+columns disappearing from the table emptied the **Last** and **High / Low** tiles
+while every other headline number kept working. Two rules keep that closed:
+
+- **Never declare a column the table lacks.** `metrics.SCALAR_FIELDS` lists only
+  what `kql.WINDOW_METRICS` declares, so a dropped column cannot come back as a
+  null payload key.
+- **Never overlay a null.** `clean()` already turns NaN/Inf into `None`, so a
+  null in the bundle means "the table had nothing for this window" — never zero.
+
+Both are pinned by tests (`test_the_payload_carries_no_ohlc_keys`,
+`test_a_metrics_null_cannot_blank_a_tick_derived_tile`), because the failure is
+silent: the page renders, the tile is just blank.
 
 This keeps the existing guarantee intact: a page load never triggers a KQL scan,
 and the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly
