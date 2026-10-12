@@ -76,7 +76,9 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
   color:var(--accent);margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .stack{display:grid;gap:16px;grid-template-columns:1fr}
 
-.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;margin-bottom:26px}
+/* The KPI strip is one row: auto-flowing columns keeps every tile side by
+   side instead of wrapping to a second row when the count grows. */
+.kpis{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:12px;margin-bottom:26px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
 .kpi .label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
 .kpi .value{font-size:22px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums;
