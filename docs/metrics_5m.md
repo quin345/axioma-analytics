@@ -10,7 +10,7 @@
 Today `app/analytics.py` recomputes every metric in pandas on **every** request.
 `app/service.py` / `app/cache.py` only cache the **raw ticks** (`agg_dom` rows)
 in Redis, so the heavy work — OHLC, realised vol, order-flow, the volume-at-price
-ladder, drawdown, distributions — is redone each time a dashboard loads, even for
+ladder, price change, distributions — is redone each time a dashboard loads, even for
 the same point in time and window.
 
 `metrics_5m` moves that work **server-side and one time per window**: a KQL table

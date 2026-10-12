@@ -3,7 +3,7 @@
 Microstructure analytics over the **production aggregate DOM feed**. Every
 instrument is categorised by asset class using the pipeline's own
 classification, and the dashboard renders OHLCV bars, order-flow imbalance,
-spread evolution, volume-at-price, return distribution, drawdown,
+spread evolution, volume-at-price, return distribution, price change,
 autocorrelation and large-trade market impact.
 
 The app talks to exactly one source on the production Fabric estate: the **KQL**
@@ -630,7 +630,7 @@ curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'
 | Rolling | rolling annualised volatility, rolling spread, cumulative return |
 | Distribution | histogram, skew, excess kurtosis, Jarque-Bera, bullish ratio |
 | Book depth | bid/ask resting size, depth imbalance series, levels per side |
-| Drawdown | drawdown path, worst episodes with peak/trough/recovery |
+| Price change | percent change from a fixed reference (window start), path extremes |
 | Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios |
 | Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) |
 
@@ -667,8 +667,8 @@ the pages and routes around them (`/` serving the dashboard, the retained
 `/dashboard` alias, `/unavailable` and `/welcome`),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
-conservation, drawdown sign, strict JSON serialisability, and a degenerate
-flat-price series (guards against divide-by-zero).
+conservation, the price-change reference point, strict JSON serialisability, and
+a degenerate flat-price series (guards against divide-by-zero).
 
 Redis is not required to run the tests: the KQL layer and the Redis client are
 both stubbed, and the cycle is driven with a stub instead of the network.

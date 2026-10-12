@@ -116,16 +116,17 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
   margin:0 0 10px;font-weight:600}
 .card-detail h3 + h3{margin-top:18px}
 .card-detail p.explain{margin:0 0 14px;font-size:12.5px;line-height:1.6;color:var(--muted)}
-/* 300px minimum keeps wide values (drawdown episode timelines, hour-by-hour
-   rows) on one line in the full-width cards without crowding the narrow ones. */
+/* 300px minimum keeps wide values (a reference price beside its timestamp,
+   hour-by-hour rows) on one line in the full-width cards without crowding the
+   narrow ones. */
 .dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 22px;margin:0}
 .dl div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;
   border-bottom:1px solid rgba(35,45,66,.5);font-size:12.5px}
 .dl dt{color:var(--muted);white-space:nowrap;flex:0 0 auto}
 .dl dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;
-  /* A wide value (a drawdown episode timeline joins three timestamps with
-     arrows) cannot fit beside its label. Wrapping inside the value keeps the
-     row intact, where nowrap made it spill out of the card. */
+  /* A wide value (a reference price joined to its timestamp, say) cannot fit
+     beside its label. Wrapping inside the value keeps the row intact, where
+     nowrap made it spill out of the card. */
   white-space:normal;overflow-wrap:anywhere;line-height:1.45;
   /* Absorbs the slack so the value hugs the right edge, even when wrapped. */
   margin-left:auto}

@@ -9,6 +9,60 @@ Conventions: `- [ ]` open, `- [x]` done, `- [!]` blocked. Notes go under
 ---
 ---
 
+## 2026-10-12 - Drawdown card replaced by price change from a reference point
+
+Scope: the *Drawdown* card read the `mid` column and divided it by its own
+running peak (`mid.cummax()`), so every reading was forced to `<= 0` and the
+whole panel described loss from a high. It now reports a neutral percent change
+from one fixed reference - the first tick of the window.
+
+### Backend
+- [x] `app/analytics.py`: `drawdown()` replaced by `price_change()`. The
+      reference is `mid.iloc[0]` for the whole window, so the path starts at 0%
+      and runs either side of it; the baseline never moves, which makes two
+      windows comparable. Payload: `series[].pct`, `reference_ts`,
+      `reference_mid`, `change_pct`, `min_pct`/`max_pct` with the timestamp of
+      each extreme.
+- [x] A zero/missing opening mid yields `None`s instead of inf, so
+      `json.dumps(..., allow_nan=False)` still holds on a degenerate frame.
+- [x] `build_report` emits `"price_change"`; `_dd_episode()` (peak/trough/
+      recovery) deleted with the metric it served.
+- [x] `price_change.change_pct` is asserted equal to `summary.change_pct` - the
+      same two numbers, derived from the same `mid` column.
+
+### Frontend
+- [x] `app/static/index.html`: card `dd` -> `chg`, canvas `cDD` -> `cChg`, note
+      `dd-note` -> `chg-note`, title "Drawdown" -> "Price change vs. window start".
+- [x] `app/static/app.js`: the line chart now fills to the origin (`fill:
+      {target: "origin"}`) rather than down to a hard `y.max: 0`, and uses the
+      neutral accent blue instead of the loss-red; the note reads
+      "Change since window start +x.xx% * reference <time>".
+- [x] `DETAILS.chg` replaces `DETAILS.dd`: the prose states the fixed-baseline
+      rule, and the rows are reference price/time, change since reference, and
+      the window's high/low with their timestamps. No episode timeline.
+
+### Docs & tests
+- [x] `tests/test_analytics.py`: `test_drawdown_is_non_positive` replaced by
+      `test_price_change_is_anchored_on_the_window_start` (first point 0%, last
+      equals the reported change, values can go below 0), plus an empty-frame
+      case and a zero-reference case that pins the no-NaN guard.
+- [x] `README.md`, `docs/metrics_5m.md`, `landing.html`, `unavailable.html` and
+      the two `styles.css` comments reworded off drawdown; `tests/test_landing.py`
+      now expects "price change" in the explainer.
+
+### Verification
+- [x] `pytest` - 394 passed
+- [x] `node --check app/static/app.js` clean
+- [x] Live 3000-tick run: `change_pct -0.1730` matches `summary.change_pct`,
+      `reference_mid 1.08500002`, `series[0].pct == 0.0`, payload strict-JSON safe
+
+**Notes:**
+- The card keeps `span2`. The episode timeline that originally justified the
+  wide cell is gone, but the reference row (price beside a timestamp) and the
+  high/low rows still read better across two thirds of the row.
+
+---
+
 ## 2026-10-11 - POC marks the busiest price bin, not whatever `poc_*` holds (dev)
 
 Scope: the volume-profile panel marked a bar that was not the tallest one, and

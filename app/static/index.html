@@ -126,13 +126,13 @@
         <div class="card-detail" data-detail-for="price" hidden></div>
       </div>
 
-      <!-- Two thirds of the row below: the episode timeline joins three
-           timestamps with arrows, which overflows a single column. -->
-      <div class="card span2" data-card="dd">
-        <h2 class="card-title">Drawdown</h2>
-        <div class="chart"><canvas id="cDD"></canvas></div>
-        <p class="note" id="dd-note"></p>
-        <div class="card-detail" data-detail-for="dd" hidden></div>
+      <!-- Two thirds of the row below: the reference price and the path's
+           extremes read better across the wider card. -->
+      <div class="card span2" data-card="chg">
+        <h2 class="card-title">Price change vs. window start</h2>
+        <div class="chart"><canvas id="cChg"></canvas></div>
+        <p class="note" id="chg-note"></p>
+        <div class="card-detail" data-detail-for="chg" hidden></div>
       </div>
 
       <div class="card" data-card="hist">

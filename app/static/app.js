@@ -762,19 +762,18 @@ function renderCharts(r) {
                 y: { grid: { color: "rgba(35,45,66,.55)" } } } }),
   });
 
-  const dd = r.drawdown.series || [];
-  draw("cDD", {
+  const chg = r.price_change.series || [];
+  draw("cChg", {
     type: "line",
-    data: { labels: dd.map((p) => fmt.time(p.t)),
-      datasets: [{ data: dd.map((p) => p.dd), borderColor: "#ef4444", borderWidth: 1.3, pointRadius: 0, fill: true,
-        backgroundColor: "rgba(239,68,68,.14)" }] },
+    data: { labels: chg.map((p) => fmt.time(p.t)),
+      datasets: [{ data: chg.map((p) => p.pct), borderColor: "#4c9aff", borderWidth: 1.3, pointRadius: 0,
+        fill: { target: "origin" }, backgroundColor: "rgba(76,154,255,.14)" }] },
     options: baseOpts({ scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 5 } },
-      y: { max: 0, grid: { color: "rgba(35,45,66,.55)" }, ticks: { callback: (v) => `${fmt.n(v, 1)}%` } } } }),
+      y: { grid: { color: "rgba(35,45,66,.55)" }, ticks: { callback: (v) => `${fmt.n(v, 1)}%` } } } }),
   });
-  const ep = (r.drawdown.episodes || [])[0];
-  $("dd-note").textContent = r.drawdown.max_drawdown_pct === null ? "" :
-    `Max drawdown ${fmt.n(r.drawdown.max_drawdown_pct, 2)}%` +
-    (ep ? ` \u00b7 worst trough ${fmt.time(ep.trough_ts)}` : "");
+  $("chg-note").textContent = r.price_change.change_pct === null ? "" :
+    `Change since window start ${fmt.pct(r.price_change.change_pct, 2)}` +
+    (r.price_change.reference_ts ? ` \u00b7 reference ${fmt.time(r.price_change.reference_ts)}` : "");
 const sp = r.microstructure.spread || [];
   draw("cSpread", {
     type: "line",
@@ -1051,20 +1050,20 @@ const DETAILS = {
       ]);
   },
 
-  dd: (r) => {
-    const d = r.drawdown || {};
-    const eps = d.episodes || [];
-    const rows = eps.map((e, i) => [
-      `#${i + 1} \u00b7 ${fmt.pct(e.depth_pct, 2)}`,
-      `${fmt.time(e.peak_ts)} \u2192 ${fmt.time(e.trough_ts)}` +
-        (e.recovered_ts ? ` \u2192 ${fmt.time(e.recovered_ts)}` : " \u00b7 unrecovered"),
-    ]);
-    return block("Worst episodes",
-      "Drawdown is measured from the running peak. The deepest episodes are listed " +
-      "first; an unrecovered trough means the window ends below its prior high.", [
-        ["Max drawdown", fmt.pct(d.max_drawdown_pct, 2)],
-        ["Episodes", fmt.int(eps.length)],
-      ]) + (rows.length ? block("Episode timeline", null, rows) : "");
+  chg: (r) => {
+    const c = r.price_change || {};
+    const pts = c.series || [];
+    return block("Reference point",
+      "Every reading is the mid price's percent change from one fixed baseline: " +
+      "the first tick of the window, so the path starts at 0% and moves either " +
+      "side of it. Nothing is measured against a running high, so a recovery to " +
+      "the opening price reads as 0% however far the path wandered in between.", [
+        ["Reference", `${fmt.px(c.reference_mid)} \u00b7 ${esc(fmt.time(c.reference_ts))}`],
+        ["Change since reference", fmt.pct(c.change_pct, 2)],
+        ["Highest", `${fmt.pct(c.max_pct, 2)} \u00b7 ${esc(fmt.time(c.max_ts))}`],
+        ["Lowest", `${fmt.pct(c.min_pct, 2)} \u00b7 ${esc(fmt.time(c.min_ts))}`],
+        ["Points plotted", fmt.int(pts.length)],
+      ]);
   },
 
   spread: (r) => {
