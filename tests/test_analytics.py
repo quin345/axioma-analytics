@@ -180,6 +180,33 @@ def test_hourly_profile_covers_buckets(frame):
 
 # ---------- reporting ----------
 
+def test_summary_tiles_agree_with_each_other(frame):
+    """The KPI strip reads one summary, so its tiles cannot contradict.
+
+    Every tile is a different view of the same frame: `ticks`,
+    `ticks_per_minute` and `avg_interarrival_ms` are one count over one span,
+    and `change` / `change_pct` are one move in two units. Overlaying some of
+    them from `metrics_5m` - a *different* window, because the table snaps
+    `as_of` to its 5-minute stop - left the strip reporting 6,226 ticks beside
+    150.8/min (9,050/hour) and +0.14% beside an absolute 2.4300. Pin the
+    arithmetic so a split source cannot return.
+    """
+    s = analytics.summary(frame)
+    span_min = s["duration_seconds"] / 60
+
+    # One count, three views.
+    assert s["ticks_per_minute"] == pytest.approx(s["ticks"] / span_min, rel=1e-6)
+    # The mean gap spans n-1 intervals between n ticks, not n.
+    assert s["avg_interarrival_ms"] == pytest.approx(
+        s["duration_seconds"] * 1000 / (s["ticks"] - 1), rel=1e-6
+    )
+    # One move, two units: the percentage is the absolute over the open.
+    assert s["change"] == pytest.approx(s["close"] - s["open"], rel=1e-9)
+    assert s["change_pct"] == pytest.approx(s["change"] / s["open"] * 100, rel=1e-9)
+    # The extremes bracket the close the "Last" tile shows.
+    assert s["low"] <= s["close"] <= s["high"]
+
+
 def test_build_report_is_json_serialisable(frame):
     report = analytics.build_report(frame, timeframe="1m", window=25)
     json.dumps(report)  # must not raise

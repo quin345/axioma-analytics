@@ -1450,24 +1450,26 @@ async function analyse() {
     window.__lastReport = r;
     window.__metrics = m;
     if (m) {
-      // `metrics_5m` is the source of truth for the metrics it carries.
-      const s5 = m.summary || {};
-      // Only the keys the table actually shipped are overlaid. The two bundles
-      // answer different questions - the table is precomputed per 5-minute
-      // stop, the tick path is recomputed from every tick in the window - so a
-      // metric the table does not carry (OHLC is not in its schema) must leave
-      // the tick-derived figure alone rather than overwrite it with null and
-      // blank the tile. `clean()` already turns NaN/Inf into null, so a null
-      // here means "the table had nothing for this window", never "zero".
-      for (const [k, v] of Object.entries(s5)) {
-        if (v !== null && v !== undefined) r.summary[k] = v;
-      }
-      // Displacement has to track the overlaid change: the absolute move is not
-      // a `metrics_5m` column, so derive it from the stop the table served
-      // rather than leave the tick path's slightly different figure beside it.
-      if (s5.open != null && s5.close != null) r.summary.change = s5.close - s5.open;
-      // The profile for the span actually served - a span the table does not
-      // ship is answered with the widest one no wider than the ask.
+      // The headline tiles are NOT overlaid from `metrics_5m`.
+      //
+      // Every tile on the strip is a function of the same tick frame: `ticks`,
+      // `ticks_per_minute` and `avg_interarrival_ms` are three views of one
+      // count over one span, and `change` / `change_pct` are the same move in
+      // two units. Overlaying the scalars the table carries (`ticks`,
+      // `change_pct`, `total_volume`, `realized_vol_bps`, `avg_spread`) while
+      // their dependents kept their tick-derived values broke that: the two
+      // bundles answer *different windows*, because `metrics_5m` snaps `as_of`
+      // down to its 5-minute stop while the tick path ends at the instant asked
+      // for. A strip showing `ticks` from one span beside `ticks_per_minute`
+      // from another reported 6,226 ticks next to 150.8/min (9,050 ticks/hour),
+      // and +0.14% next to an absolute 2.4300 whose own open is 4205.00.
+      //
+      // `analytics.summary` already derives every tile from one frame, so
+      // reading it whole is consistent by construction - and costs nothing
+      // extra: `/api/analytics` is fetched regardless for the OHLC, tick tape
+      // and microstructure panels, so the summary is computed either way.
+      // What `metrics_5m` genuinely saves is the volume-at-price ladder, which
+      // ships pre-binned; that overlay stays.
       const profile = (m.volume_profiles || {})[String(m.selected_window_minutes)];
       if (profile) r.volume_profile = profile;
       r.metrics_source = (m.meta || {}).source || null;

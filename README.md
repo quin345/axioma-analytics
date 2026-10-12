@@ -606,11 +606,18 @@ rather than failing, and omitted means the newest stop. `meta` names the source
 table (`metrics_5m`) and the stop it read, and an empty table is a `502` naming
 the table — the metrics job not having run is not a feed outage.
 
-The table carries no OHLC columns, so the **Last** and **High / Low** tiles come
-from `/api/analytics`. The dashboard overlays only the keys the table actually
-shipped (`metrics_5m` is authoritative for those, the tick path for the rest), so
-neither source can blank the other's numbers — see *Reading OHLC* in
-`docs/metrics_5m.md`.
+The table carries no OHLC columns, and the dashboard deliberately does **not**
+overlay its scalars onto the headline tiles. Every tile on that strip is a view of
+one tick frame — `ticks`, `ticks_per_minute` and `avg_interarrival_ms` are one
+count over one span, `change` and `change_pct` one move in two units — and the two
+bundles answer *different windows*, because `metrics_5m` snaps `as_of` down to its
+5-minute stop while the tick path ends at the instant asked for. Overlaying some
+and not others showed 6,226 ticks beside 150.8/min (9,050/hour) and +0.14% beside
+an absolute 2.4300, so the strip now reads `analytics.summary` whole.
+
+What `/api/metrics` still supplies is the **pre-binned volume-at-price ladder**,
+which the table ships already aggregated — that overlay stays, and it is where the
+precomputation actually pays.
 
 ```bash
 # Every window at the newest stop; the 90-minute ask is answered with the 60-minute one.

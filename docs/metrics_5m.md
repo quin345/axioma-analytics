@@ -38,7 +38,7 @@ in pandas.
 > **OHLC is not in this table.** The `open`/`high`/`low`/`close` window columns
 > were dropped from the schema: the session extremes come from `/api/analytics`,
 > which recomputes them from the tick stream (`analytics.summary`). This is the
-> one thing the read path must get right — see *Reading OHLC* below.
+> one thing the read path must get right — see *One window per strip* below.
 
 Row shape (one 5-minute `as_of` stop for one symbol), as verified with
 `getschema`:
@@ -381,38 +381,54 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    cannot offer a span the table does not ship; `metrics_5m` always carries all
    four. The point-in-time field is unchanged (5-min grid, 4 h).
 
-### Reading OHLC — the one thing to get right
+### One window per strip — why the scalars are not overlaid
 
-`metrics_5m` carries no `open`/`high`/`low`/`close` columns. Those tiles are fed
-by `/api/analytics`, which recomputes them from the tick stream, and the metrics
-bundle is **overlaid** on that report — so the two schemas meet in the browser:
+`metrics_5m` carries no `open`/`high`/`low`/`close` columns, so those tiles are fed
+by `/api/analytics`, which recomputes them from the tick stream. It used to also
+**overlay** the scalars it does carry onto that report:
 
 ```js
-// app/static/app.js, analyse()
+// REMOVED from app/static/app.js, analyse()
 for (const [k, v] of Object.entries(s5)) {
   if (v !== null && v !== undefined) r.summary[k] = v;
 }
 ```
 
-The null guard is load-bearing, not defensive noise. A blanket spread
-(`r.summary = { ...r.summary, ...s5 }`) lets *any* metric the table does not ship
-overwrite the tick-derived figure with `null` — which is exactly how the OHLC
-columns disappearing from the table emptied the **Last** and **High / Low** tiles
-while every other headline number kept working. Two rules keep that closed:
+The null guard in that loop was load-bearing — a blanket spread let any column the
+table did not ship blank a tick-derived tile, which is how the dropped OHLC
+columns emptied **Last** and **High / Low**. But the deeper problem was the merge
+itself: **the two bundles answer different windows.** `metrics_5m` snaps `as_of`
+*down* to its 5-minute stop; the tick path ends at the instant actually asked for.
+So the same row could show
 
-- **Never declare a column the table lacks.** `metrics.SCALAR_FIELDS` lists only
-  what `kql.WINDOW_METRICS` declares, so a dropped column cannot come back as a
-  null payload key.
-- **Never overlay a null.** `clean()` already turns NaN/Inf into `None`, so a
-  null in the bundle means "the table had nothing for this window" — never zero.
+| Tile | Shown | Implied |
+|---|---|---|
+| Ticks | 6,226 | — |
+| Ticks / min | 150.8 | **9,050** ticks/hour |
+| Avg gap | 397.8 ms | **9,050** ticks/hour |
+| Change | +0.14% | open ≈ 4201.55 |
+| Change (absolute) | 2.4300 | open = 4205.00 |
 
-Both are pinned by tests (`test_the_payload_carries_no_ohlc_keys`,
-`test_a_metrics_null_cannot_blank_a_tick_derived_tile`), because the failure is
-silent: the page renders, the tile is just blank.
+`ticks` from one span sat beside `ticks_per_minute` from another, and the two units
+of the same move named two different opens. The dashboard now reads
+`analytics.summary` **whole** — one frame, so the tiles agree by construction — and
+overlays only the pre-binned volume-at-price ladder, which is where the
+precomputation actually pays.
 
-This keeps the existing guarantee intact: a page load never triggers a KQL scan,
-and the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly
-what the table covers.
+Two rules keep a split source from returning:
+
+- **One frame per strip.** `SCALAR_FIELDS` is what `/api/metrics` *reports*; it is
+  never merged into the tick-derived summary. Pinned by
+  `test_the_headline_tiles_read_one_window_not_two`.
+- **The tiles are arithmetic, not independent reads.**
+  `ticks_per_minute == ticks / span_minutes`, `change_pct == change / open * 100`.
+  Pinned by `test_summary_tiles_agree_with_each_other`, so a future overlay that
+  breaks an identity fails a test instead of rendering a contradiction.
+
+The guarantee that matters is intact: a page load never triggers a KQL scan, and
+the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly what
+the table covers. The tick path was already being read for the OHLC, tick tape and
+microstructure panels, so dropping the scalar overlay costs no extra work.
 
 ---
 

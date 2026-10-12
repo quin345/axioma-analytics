@@ -41,13 +41,17 @@ log = logging.getLogger(__name__)
 #: from the `<metric>_<suffix>` column of `metrics_5m` and renamed to the key the
 #: dashboard already reads, so the panel's rendering is unchanged by the move.
 #:
-#: OHLC is deliberately absent: `metrics_5m` does not ship `open/high/low/close`
-#: columns - the session extremes come from `/api/analytics`, which computes them
-#: from the tick stream. Listing a column the table lacks would read as `null`
-#: and, because the metrics bundle is overlaid on the tick-derived summary,
-#: *blank* the "Last" and "High / Low" tiles that `/api/analytics` fills
-#: correctly. The overlay in `app/static/app.js` also drops null keys for the
-#: same reason, so neither side can null out the other.
+#: These are the figures `/api/metrics` reports for a window. They are **not**
+#: overlaid onto the dashboard's headline tiles: the strip reads
+#: `analytics.summary` whole, because every tile is a view of one tick frame and
+#: the two bundles answer different windows (`metrics_5m` snaps `as_of` down to
+#: its 5-minute stop, the tick path ends at the instant asked for). Mixing them
+#: showed 6,226 ticks beside 150.8/min and +0.14% beside an absolute 2.4300.
+#: `metrics_5m`'s real saving is the pre-binned volume-at-price ladder, which is
+#: overlaid - see `volume_profile`.
+#:
+#: OHLC is deliberately absent: the table ships no `open/high/low/close`
+#: columns, so the session extremes stay tick-derived.
 SCALAR_FIELDS: tuple[tuple[str, str], ...] = (
     ("ticks", "ticks"),
     ("vwap", "vwap"),

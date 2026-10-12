@@ -345,50 +345,50 @@ def test_the_script_never_declares_a_helper_twice():
 # The metrics source
 # ----------------------------------------------------------------------
 
-def test_the_dashboard_serves_its_metrics_from_the_metrics_5m_api():
-    """The headline tiles and the volume-profile panel read the precomputed
-    `metrics_5m` grid through `/api/metrics`, not the aggregate-DOM report.
+def test_the_headline_tiles_read_one_window_not_two():
+    """Every KPI tile must come from a single frame, so the strip cannot
+    contradict itself.
 
-    Both endpoints are green and the table has backed the lookup API since it
-    shipped, but the script kept driving every panel from `/api/analytics` - so
-    the dashboard showed tick-derived numbers and `/api/metrics` was dead
-    weight. Pin the wiring, and pin that the tick-only panels still come from
-    the report: the two reads have to go out together.
+    The strip used to overlay the scalars `metrics_5m` carries (`ticks`,
+    `change_pct`, `total_volume`, ...) onto the tick-derived summary while
+    their dependents (`ticks_per_minute`, `avg_interarrival_ms`, `change`)
+    kept the tick path's values. The two bundles answer *different windows* -
+    `metrics_5m` snaps `as_of` down to its 5-minute stop, the tick path ends at
+    the instant asked for - so the same row could show 6,226 ticks next to
+    150.8/min (9,050/hour), and +0.14% next to an absolute 2.4300.
+
+    `analytics.summary` derives every tile from one frame, so it is read whole
+    and the overlay is gone. Pin that no scalar is copied across.
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
 
-    # The precomputed grid is the source of the metrics it carries.
+    # No per-key copy of the metrics summary into the tick-derived one.
+    assert "Object.entries(s5)" not in body
+    assert "r.summary[k] = v" not in body
+    assert "r.summary.change = s5.close - s5.open" not in body
+    # The strip is rendered from the report's own summary, unmodified.
+    assert "renderKpis(r.summary, r.microstructure)" in body
+    # Both reads still go out together: the tick path feeds the panels only it
+    # can fill, and `metrics_5m` still supplies the pre-binned ladder.
+    assert "api(`/api/analytics?${p}`)" in body
     assert "api(`/api/metrics?${mp}`)" in body
-    # The overlay is key-by-key and skips nulls. A blanket spread would let a
-    # metric the table does not ship overwrite a tick-derived figure with null
-    # and blank the tile - which is exactly how the OHLC columns disappearing
-    # from the schema emptied "Last" and "High / Low".
-    assert "r.summary = { ...r.summary, ...s5 }" not in body
-    assert "if (v !== null && v !== undefined) r.summary[k] = v;" in body
-    # The profile for the served span replaces the tick-binned one, same shape.
+    assert "Promise.all" in body
     assert "m.volume_profiles" in body
     assert "r.volume_profile = profile" in body
-    # The tick-derived panels still come from the report, in the same call.
-    assert "api(`/api/analytics?${p}`)" in body
-    assert "Promise.all" in body
 
 
-def test_a_metrics_null_cannot_blank_a_tick_derived_tile():
-    """The overlay must be a merge that only carries what the table shipped.
-
-    `metrics_5m` and `/api/analytics` answer different questions and their
-    schemas have drifted before (OHLC was dropped from the table), so the two
-    bundles are combined with `Object.entries` + a null guard rather than a
-    spread. This pins the shape of that merge.
+def test_the_volume_profile_still_comes_from_the_precomputed_ladder():
+    """What `metrics_5m` genuinely saves is the volume-at-price ladder, which
+    ships pre-binned - so that overlay stays even though the scalars no longer
+    cross over.
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
 
-    assert "for (const [k, v] of Object.entries(s5))" in body
-    # A null from the table means "nothing for this window", never "zero", so it
-    # must leave the tick-derived value in place.
-    assert "if (v !== null && v !== undefined) r.summary[k] = v;" in body
+    assert "m.volume_profiles" in body
+    assert "r.volume_profile = profile" in body
+    assert "metricsFailed" in body          # a grid failure still banners
 
 
 def test_the_point_in_time_defaults_to_the_newest_metrics_stop():
