@@ -8,13 +8,13 @@ autocorrelation and large-trade market impact.
 
 The app talks to exactly one source on the production Fabric estate: the **KQL**
 (Eventhouse) database `ctrader_dom`. Every table it reads lives there — the
-per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
-(`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
-(Entra ID, no access key) so a dashboard request never re-scans the table, and
-that four-hour window is slid forward every 5 minutes just past the clock mark
-(:00:15, :05:15, …) — the earliest slice is purged, the newest slice is read.
-The 15 s delay lets the upstream feed settle past the mark so the read never
-races immature data.
+per-tick aggregate DOM metrics (`agg_dom`), the precomputed window metrics
+(`metrics_5m`) and the instrument dimension (`symbols_icmarkets`). Results are
+cached in **Redis** (Entra ID, no access key) so a dashboard request never
+re-scans a table, and that eight-hour window is slid forward every 5 minutes
+just past the clock mark (:00:15, :05:15, …) — the earliest slice is purged, the
+newest slice is read. The 15 s delay lets the upstream feed settle past the mark
+so the read never races immature data.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -38,13 +38,14 @@ python run.py             # dashboard on http://127.0.0.1:8000
 KQL_ENDPOINT_PROD="https://<eventhouse>.z<region>.kusto.fabric.microsoft.com"
 KQL_DATABASE="ctrader_dom"
 KQL_TABLE="agg_dom"
+METRICS_TABLE="metrics_5m"
 SYMBOL_TABLE="symbols_icmarkets"
 
 # Redis cache (Entra ID; there is no access key).
 REDIS_HOST="<name>.<region>.redis.azure.net"
 REDIS_PORT="10000"
 REDIS_TTL_SECONDS="450"
-CACHE_LOOKBACK_HOURS="4"
+CACHE_LOOKBACK_HOURS="8"
 CACHE_REFRESH_MINUTES="5"
 CACHE_REFRESH_OFFSET_SECONDS="15"
 
@@ -482,13 +483,11 @@ dom_stream_raw    ->   dom_book_flat        ->   agg_dom
                                                  imbalance, spreads)
 ```
 
-The column names are unchanged from the old SQL table, so the move was
-transport-only (`app.kql` instead of a T-SQL query in the retired `app.db`). The
-measured schema is `timestamp: datetime`, `symbolId: long`, the price and size
-columns `real`, plus the pipeline's own `eventId`, `eventSeq` and `eventDate`.
-Because `symbolId` is a `long`, the queries cast the `string` parameter
-(`symbolId == tolong(sym)`) instead of the column; a blank or non-numeric
-parameter simply selects no rows.
+The measured schema is `timestamp: datetime`, `symbolId: long`, the price and
+size columns `real`, plus the pipeline's own `eventId`, `eventSeq` and
+`eventDate`. Because `symbolId` is a `long`, the queries cast the `string`
+parameter (`symbolId == tolong(sym)`) instead of the column; a blank or
+non-numeric parameter simply selects no rows.
 `app/frames.py` normalises the rows to the canonical tick frame
 (`ts | symbol | bid | ask | last | volume`) so every dashboard panel works
 unchanged. The pipeline's own imbalance is used as the directional signal;
@@ -532,9 +531,10 @@ app/
   frames.py      tick-metric rows -> canonical tick frame
   assets.py      asset-class taxonomy and classification
   analytics.py   all computations (pure functions, no I/O)
+  metrics.py     precomputed `metrics_5m` lookup: window metrics + volume ladder
   service.py     instrument catalogue, health probing, fixed cache window
   main.py        FastAPI app + static pages
-  static/        dashboard (Chart.js), development notice, holding page, explainer
+  static/        dashboard (Chart.js), the `/welcome` explainer, the outage page, the retained under-development notice
 scripts/
   grant_workspace_access.py   grant the SP a role on the workspace
   refresh_cache.py            one cycle from cron/systemd instead of the app
@@ -564,7 +564,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
-| `GET /api/metrics` | The precomputed `metrics_5m` bundle: every headline metric and the volume profile for the symbol's chosen (default: newest) `as_of` stop, served from Redis |
+| `GET /api/metrics` | The precomputed `metrics_5m` bundle: the windowed metrics and the volume-at-price ladder for the symbol's chosen (default: newest) `as_of` stop, served from Redis. The dashboard overlays only the ladder; the headline tiles come from `/api/analytics` |
 | `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
@@ -593,9 +593,9 @@ curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-
 ```
 
 `/api/metrics` parameters: `symbol`, `window_minutes`, `as_of`. The dashboard
-reads this for its headline tiles and the volume-profile panel, and
-`/api/analytics` for the panels only the tick path can fill; both are asked for
-the same symbol, window and point in time.
+reads this alongside `/api/analytics` for the same symbol, window and point in
+time, and overlays only its pre-binned volume-at-price ladder; the headline
+tiles and the panels only the tick path can fill come from `/api/analytics`.
 
 Its `window_minutes` is snapped *down* to one of the four spans the precomputed
 table ships (60/120/180/240), and the payload reports the snap rather than hiding
@@ -628,18 +628,27 @@ curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'
 
 ## Analytics reference
 
-| Block | Metrics |
-|---|---|
-| Summary | ticks, OHLC, change, realised + annualised vol, spread stats, ticks/min, inter-arrival |
-| OHLCV | resampled bars (1s → 1d), VWAP, per-bar spread and tick count |
-| Microstructure | order-flow imbalance, spread evolution, inter-arrival, large trades + 1-tick impact |
-| Volume profile | volume-at-price, POC, 70% value area, high-volume nodes |
-| Rolling | rolling annualised volatility, rolling spread, cumulative return |
-| Distribution | histogram, skew, excess kurtosis, Jarque-Bera, bullish ratio |
-| Book depth | bid/ask resting size, depth imbalance series, levels per side |
-| Price change | percent change from a fixed reference (window start), path extremes |
-| Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios |
-| Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) |
+Every block below is computed from the tick-derived `/api/analytics` bundle
+(`app/analytics.py`), whose source is `ctrader_dom.agg_dom`. The full inventory
+of each KPI tile and card — its table and its exact formula — lives in
+[`docs/dashboard_metrics.md`](docs/dashboard_metrics.md).
+
+| Block | Metrics | Source |
+|---|---|---|
+| Summary | ticks, OHLC, change, realised + annualised vol, spread stats, ticks/min, inter-arrival | `agg_dom` |
+| OHLCV | resampled bars (1s → 1d), VWAP, per-bar spread and tick count | `agg_dom` |
+| Microstructure | order-flow imbalance, spread evolution, inter-arrival, large trades + 1-tick impact | `agg_dom` |
+| Volume profile | volume-at-price, POC, 70% value area, high-volume nodes (ladder overlaid from `metrics_5m`) | `agg_dom` + `metrics_5m` |
+| Rolling | rolling annualised volatility, rolling spread, cumulative return | `agg_dom` |
+| Distribution | histogram, skew, excess kurtosis, Jarque-Bera, bullish ratio | `agg_dom` |
+| Book depth | bid/ask resting size, depth imbalance series, levels per side | `agg_dom` |
+| Price change | percent change from a fixed reference (window start), path extremes | `agg_dom` |
+| Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios | `agg_dom` |
+| Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) | `agg_dom` |
+
+The windowed metrics `/api/metrics` reports (`ticks`, `vwap`, `change_pct`,
+`total_volume`, `realized_vol_bps`, `avg_spread`, `ofi_imbalance` per 1h/2h/3h/4h)
+come from `ctrader_dom.metrics_5m`; see [`docs/metrics_5m.md`](docs/metrics_5m.md).
 
 **Design notes**
 

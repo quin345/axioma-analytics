@@ -14,11 +14,12 @@ ladder, price change, distributions — is redone each time a dashboard loads, e
 the same point in time and window.
 
 `metrics_5m` moves that work **server-side and one time per window**: a KQL table
-holds, for every instrument and every 5-minute point in time, the headline metrics
+holds, for every instrument and every 5-minute point in time, the window metrics
 already aggregated over fixed **1 h / 2 h / 3 h / 4 h** trailing windows. That
 table is what gets pushed to **Redis**. A dashboard request becomes a lookup of a
-handful of pre-computed columns, never a re-scan of `agg_dom` and never a re-derive
-in pandas.
+handful of pre-computed columns — the volume-at-price ladder is the one the
+dashboard actually overlays (see *One window per strip*) — never a re-scan of
+`agg_dom` and never a re-derive in pandas.
 
 ## The contract
 
@@ -165,7 +166,13 @@ let JOINED =
 Aggregate to one row per `(symbolId, as_of, win)`, then **spread `win` into
 columns with explicit conditional aggregation**. We do *not* use `evaluate pivot`
 for this: its output schema is data-dependent (per the plugin docs), whereas the
-40 column names are a hard contract the app reads by name.
+stored column names are a hard contract the app reads by name.
+
+`open`/`high`/`low`/`close` are computed here as **intermediates** for
+`change_pct`; they are spread into columns only so Stage 5 can derive
+`change_pct_<w>` from them, and are then projected away — they are **not** stored
+(see the contract at the top). The stored scalar set is the 6 metrics × 4 windows
+plus `change_pct` and the nested `vap`/`poc`.
 
 ```kql
 let SCALARS =
@@ -282,17 +289,16 @@ resamples can be stored the same way — the ladder is the template.
 let Metrics5m() {
     SCALARS
     | join kind=inner (LADDER) on symbolId, as_of
-    // ---- derived columns (cheap; functions of the 40 scalars) ----
+    // ---- derived columns (cheap; functions of the stored scalars) ----
+    // OHLC (open/high/low/close) are computed above only as *intermediates*
+    // for change_pct; they are not stored in the table (see the contract at the
+    // top), so they are projected away here.
     | extend change_pct_1h = iif(open_1h > 0, (close_1h - open_1h) / open_1h * 100.0, real(null))
     | extend change_pct_2h = iif(open_2h > 0, (close_2h - open_2h) / open_2h * 100.0, real(null))
     | extend change_pct_3h = iif(open_3h > 0, (close_3h - open_3h) / open_3h * 100.0, real(null))
     | extend change_pct_4h = iif(open_4h > 0, (close_4h - open_4h) / open_4h * 100.0, real(null))
     | project symbolId, as_of,
               ticks_1h, ticks_2h, ticks_3h, ticks_4h,
-              open_1h, open_2h, open_3h, open_4h,
-              high_1h, high_2h, high_3h, high_4h,
-              low_1h, low_2h, low_3h, low_4h,
-              close_1h, close_2h, close_3h, close_4h,
               vwap_1h, vwap_2h, vwap_3h, vwap_4h,
               total_volume_1h, total_volume_2h, total_volume_3h, total_volume_4h,
               realized_vol_bps_1h, realized_vol_bps_2h, realized_vol_bps_3h, realized_vol_bps_4h,
@@ -368,12 +374,11 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    microstructure and distribution details — still come from `agg_dom`, because
    they are not in the precomputed table.
 4. **The dashboard** (`app/static/app.js`) asks for both in one `analyse()` call,
-   for the same symbol, window and point in time, then lays the metrics bundle
-   over the report: its `summary` and its
-   `volume_profiles[selected_window_minutes]` replace the tick-derived ones under
-   the same key names, so the headline tiles and the volume-profile panel read
-   `metrics_5m` while the panels only the tick path can fill keep their values.
-   The point-in-time selector is anchored on `/api/health`'s
+   for the same symbol, window and point in time, then overlays **only** the
+   pre-binned `volume_profiles[selected_window_minutes]` ladder onto the report —
+   that is the one thing `metrics_5m` genuinely saves. The headline tiles are
+   **not** overlaid: the strip reads `analytics.summary` whole (see *One window
+   per strip* below). The point-in-time selector is anchored on `/api/health`'s
    `metrics_latest_as_of`, so its default and its latest bound are the newest stop
    the grid ships.
 5. **Window control** (`app/static/index.html`): the offered set collapses to the
@@ -434,7 +439,7 @@ microstructure panels, so dropping the scalar overlay costs no extra work.
 
 ## Design notes & limitations
 
-- **`evaluate pivot` avoided for the 40 columns.** Its output schema is
+- **`evaluate pivot` avoided for the windowed columns.** Its output schema is
   data-derived and the plugin docs warn against it for automation. The app reads
   these columns **by name**, so we pin them with explicit `take_anyif` aggregation.
   `evaluate pivot(win, take_any(), …)` is the terse alternative if a stable
