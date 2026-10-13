@@ -1,12 +1,19 @@
-"""The precomputed window metrics, served as a lookup.
+"""The precomputed volume-at-price ladders, served as a lookup.
 
-`metrics_5m` already holds, for every instrument and every 5-minute point in
-time, every metric aggregated over the four fixed trailing windows (1 h / 2 h /
-3 h / 4 h) - including the volume-at-price ladder. So a dashboard request is a
-**lookup of pre-aggregated columns**: pick the row for the chosen point in time
-and the column set for the chosen window. Nothing is re-scanned in KQL and
-nothing is re-derived in pandas, which is the whole point of the table
-(`docs/metrics_5m.md`).
+`metrics_5m` holds, for every instrument and every 5-minute point in time, the
+volume-at-price ladder already binned over the four fixed trailing windows
+(1 h / 2 h / 3 h / 4 h). So a dashboard request is a **lookup of pre-aggregated
+columns**: pick the row for the chosen point in time and the `vap_*` column for
+the chosen window. Nothing is re-scanned in KQL and the ladder is not re-binned
+in pandas, which is the whole point of the table (`docs/metrics_5m.md`).
+
+This serves the one thing `metrics_5m` genuinely saves - the pre-binned
+volume-at-price ladder, which the dashboard overlays onto the tick-derived
+report. The scalar window metrics the table also ships (`ticks`, `vwap`,
+`realized_vol_bps`, ...) are **not** read here: the headline tiles come from
+`/api/analytics`, because every tile is a view of one tick frame and the two
+bundles answer different windows (`metrics_5m` snaps `as_of` down to its
+5-minute stop, the tick path ends at the instant asked for).
 
 Two things make that cheap:
 
@@ -36,34 +43,6 @@ from .config import Settings, get_settings
 from .errors import DataSourceError
 
 log = logging.getLogger(__name__)
-
-#: The scalar metrics a window payload carries, in display order. Each is read
-#: from the `<metric>_<suffix>` column of `metrics_5m` and renamed to the key the
-#: dashboard already reads, so the panel's rendering is unchanged by the move.
-#:
-#: These are the figures `/api/metrics` reports for a window. They are **not**
-#: overlaid onto the dashboard's headline tiles: the strip reads
-#: `analytics.summary` whole, because every tile is a view of one tick frame and
-#: the two bundles answer different windows (`metrics_5m` snaps `as_of` down to
-#: its 5-minute stop, the tick path ends at the instant asked for). Mixing them
-#: showed 6,226 ticks beside 150.8/min and +0.14% beside an absolute 2.4300.
-#: `metrics_5m`'s real saving is the pre-binned volume-at-price ladder, which is
-#: overlaid - see `volume_profile`.
-#:
-#: OHLC is deliberately absent: the table ships no `open/high/low/close`
-#: columns, so the session extremes stay tick-derived.
-SCALAR_FIELDS: tuple[tuple[str, str], ...] = (
-    ("ticks", "ticks"),
-    ("vwap", "vwap"),
-    ("change_pct", "change_pct"),
-    ("total_volume", "total_volume"),
-    ("realized_vol_bps", "realized_vol_bps"),
-    ("avg_spread_bps", "avg_spread"),
-    ("ofi_imbalance", "ofi_imbalance"),
-)
-
-#: Trading periods a year, for annualising the realised vol on read.
-_VOL_ANNUALISATION = 252 * 24 * 3600
 
 #: How many high-volume nodes the ladder reports.
 _HIGH_VOLUME_NODES = 5
@@ -229,26 +208,6 @@ def pick_stop(frame: pd.DataFrame, as_of: object = None) -> pd.Series | None:
     return frame.iloc[eligible[-1]]
 
 
-def window_payload(row: pd.Series, suffix: str) -> dict:
-    """One window's metrics, under the keys the dashboard already reads.
-
-    The columns are `<metric>_<suffix>`; the payload keys are the plain metric
-    names, so the panel does not care which window - or which source - it came
-    from. Annualisation is a multiply on the stored per-second vol, applied here
-    rather than in KQL so the convention stays in one place.
-    """
-    out: dict[str, Any] = {}
-    for column, field in SCALAR_FIELDS:
-        out[field] = _f(row.get(f"{column}_{suffix}"))
-
-    vol = out.get("realized_vol_bps")
-    out["annualised_vol_pct"] = (
-        _f(vol * float(np.sqrt(_VOL_ANNUALISATION)) / 10_000 * 100) if vol else None
-    )
-    return clean(out)
-
-
-
 def requested_window(minutes: Any) -> int:
     """The window a request asks for, defaulting to the narrowest the table ships.
 
@@ -287,21 +246,27 @@ def report_key(symbol: str | None, stop: object,
 
 def report(symbol: str | None = None, *, window_minutes: int | None = None,
            as_of: object = None, settings: Settings | None = None) -> dict:
-    """The full precomputed bundle for one symbol: every window at one stop.
+    """The precomputed volume-at-price bundle for one symbol: every window at one stop.
 
-    All four windows come back together, because they are four column sets on one
-    row - so the UI can switch window without a request, exactly as it switches
-    point in time. `window_minutes` only decides which one `summary` carries and
-    what `selected_window_minutes` reports.
+    All four windows come back together, because they are four ladder column sets
+    on one row - so the UI can switch window without a request, exactly as it
+    switches point in time. `window_minutes` only decides which one
+    `selected_window_minutes` reports.
+
+    This serves the one thing `metrics_5m` genuinely saves - the pre-binned
+    volume-at-price ladder, which the dashboard overlays onto the tick-derived
+    report. The headline scalar tiles are **not** here: they come from
+    `/api/analytics`, because every tile is a view of one tick frame and the two
+    bundles answer different windows (`metrics_5m` snaps `as_of` down to its
+    5-minute stop, the tick path ends at the instant asked for).
 
     The built bundle is cached in Redis under `report_key` (one entry per
     resolved stop), so a repeat request for the same symbol and stop is a JSON
-    read: no grid deserialise, no window/profile rebuild. The stop resolution
-    itself stays live - it is a row pick over the cached grid - but resolving
-    and then hitting the report entry is far cheaper than rebuilding all four
-    windows and four volume profiles. `requested_as_of`, `summary` and
-    `generated_at` differ per request, so they are stamped on after the cache
-    read rather than stored.
+    read: no grid deserialise, no profile rebuild. The stop resolution itself
+    stays live - it is a row pick over the cached grid - but resolving and then
+    hitting the report entry is far cheaper than rebuilding all four volume
+    profiles. `requested_as_of` and `generated_at` differ per request, so they
+    are stamped on after the cache read rather than stored.
     """
     s = settings or get_settings()
     frame = load(symbol, settings=s)
@@ -329,10 +294,9 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
         stored = cache.get_json(rk, s)
     except Exception:
         stored = None
-    if isinstance(stored, dict) and stored.get("windows") and stored.get("volume_profiles"):
+    if isinstance(stored, dict) and stored.get("volume_profiles"):
         return clean({
             **stored,
-            "summary": stored["windows"].get(str(served), stored.get("summary")),
             "selected_window_minutes": served,
             "requested_window_minutes": want,
             "stops": stops_list,
@@ -345,15 +309,12 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
             },
         })
 
-    windows = {str(span): window_payload(row, suf) for suf, span in kql.WINDOW_SUFFIXES}
     profiles = {
         str(span): volume_profile(_ladder(row.get(f"vap_{suf}")), row.get(f"poc_{suf}"))
         for suf, span in kql.WINDOW_SUFFIXES
     }
 
     bundle = clean({
-        "summary": windows[str(served)],
-        "windows": windows,
         "volume_profiles": profiles,
         "selected_window_minutes": served,
         "requested_window_minutes": want,

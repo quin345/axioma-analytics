@@ -41,6 +41,15 @@ dashboard actually overlays (see *One window per strip*) — never a re-scan of
 > which recomputes them from the tick stream (`analytics.summary`). This is the
 > one thing the read path must get right — see *One window per strip* below.
 
+> **The dashboard reads only the ladder.** Of the windowed columns above, the
+> app projects just the nested `vap_*`/`poc_*` (`kql.window_columns()` →
+> `WINDOW_NESTED`). The scalar columns (`ticks`, `vwap`, `total_volume`,
+> `realized_vol_bps`, `avg_spread_bps`, `ofi_imbalance`) and `change_pct` are
+> still **built** by the KQL below, but the dashboard **does not read them**: the
+> headline tiles come from `/api/analytics`, one tick frame. They are dead weight
+> in the Redis grid, so they can be dropped from this table (and this query) once
+> nothing else consumes them — see *One window per strip* below.
+
 Row shape (one 5-minute `as_of` stop for one symbol), as verified with
 `getschema`:
 
@@ -361,14 +370,16 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    `metrics_5m` directly, preserving the existing "KQL failure sets
    `connected:false`, cache failure does not" contract in `app/service.py`.
 2. **`/api/metrics`** (`app/main.py` → `app/metrics.py`): read the cached grid for
-   the symbol, pick the row for the requested `as_of` and the column set for the
-   requested window (`_1h/_2h/_3h/_4h`). One build produces the whole bundle — all
-   four windows and their `vap_*` ladders — and it is cached in turn under
+   the symbol, pick the row for the requested `as_of` and the `vap_*` column for
+   the requested window (`_1h/_2h/_3h/_4h`). One build produces the whole bundle —
+   all four windows' volume-at-price ladders — and it is cached in turn under
    `...:metrics_5m:metrics:report:<symbol>:<as_of>`, so switching window, or an
    instant that resolves to the same stop, costs no rebuild. The ladder is already
    in the blob, so the volume-profile panel needs **no** KQL call and no
    re-binning. An `as_of` is resolved to the stop it falls inside rather than
-   refused, and an absent one means the newest stop.
+   refused, and an absent one means the newest stop. Only the nested `vap_*`/`poc_*`
+   columns are projected — the scalars the table also ships are not read (see the
+   contract note above).
 3. **`/api/analytics`** (`app/service.py`) stays on the raw tick path: the
    tick-derived panels — OHLCV bars, the tick tape, the episode calendar, the
    microstructure and distribution details — still come from `agg_dom`, because
@@ -386,11 +397,13 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    cannot offer a span the table does not ship; `metrics_5m` always carries all
    four. The point-in-time field is unchanged (5-min grid, 4 h).
 
-### One window per strip — why the scalars are not overlaid
+### One frame per strip — why the scalars are neither read nor overlaid
 
 `metrics_5m` carries no `open`/`high`/`low`/`close` columns, so those tiles are fed
-by `/api/analytics`, which recomputes them from the tick stream. It used to also
-**overlay** the scalars it does carry onto that report:
+by `/api/analytics`, which recomputes them from the tick stream. `/api/metrics`
+used to also **report** the scalar columns the table ships (`ticks`, `vwap`,
+`total_volume`, `realized_vol_bps`, `avg_spread_bps`, `ofi_imbalance`,
+`change_pct`) and `app.js` used to overlay them onto that report:
 
 ```js
 // REMOVED from app/static/app.js, analyse()
@@ -415,15 +428,17 @@ So the same row could show
 | Change (absolute) | 2.4300 | open = 4205.00 |
 
 `ticks` from one span sat beside `ticks_per_minute` from another, and the two units
-of the same move named two different opens. The dashboard now reads
+of the same move named two different opens. The dashboard reads
 `analytics.summary` **whole** — one frame, so the tiles agree by construction — and
-overlays only the pre-binned volume-at-price ladder, which is where the
-precomputation actually pays.
+`/api/metrics` now serves **only** the pre-binned volume-at-price ladder: the read
+path does not project the scalar columns at all (`kql.window_columns()` is just
+`WINDOW_NESTED`), so there is nothing to overlay and nothing stale in the grid.
+The ladder is where the precomputation actually pays.
 
 Two rules keep a split source from returning:
 
-- **One frame per strip.** `SCALAR_FIELDS` is what `/api/metrics` *reports*; it is
-  never merged into the tick-derived summary. Pinned by
+- **One frame per strip.** The headline strip is rendered from `analytics.summary`
+  alone; `/api/metrics` contributes only the ladder overlay. Pinned by
   `test_the_headline_tiles_read_one_window_not_two`.
 - **The tiles are arithmetic, not independent reads.**
   `ticks_per_minute == ticks / span_minutes`, `change_pct == change / open * 100`.
@@ -433,7 +448,7 @@ Two rules keep a split source from returning:
 The guarantee that matters is intact: a page load never triggers a KQL scan, and
 the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly what
 the table covers. The tick path was already being read for the OHLC, tick tape and
-microstructure panels, so dropping the scalar overlay costs no extra work.
+microstructure panels, so dropping the scalar read costs no extra work.
 
 ---
 

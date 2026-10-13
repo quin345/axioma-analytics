@@ -199,14 +199,18 @@ def metrics_report(
         ),
     ),
 ) -> dict:
-    """Precomputed window metrics for one symbol, as a Redis lookup.
+    """Precomputed volume-at-price ladders for one symbol, as a Redis lookup.
 
-    Every metric here is already aggregated in `metrics_5m` over the four fixed
-    trailing windows, so this endpoint neither scans `agg_dom` nor re-derives
-    anything in pandas: it picks the row for the chosen point in time and the
-    column set for the chosen window out of the grid the refresh cycle pushed to
-    Redis. All four windows come back together, because they are four column sets
-    on one row - the UI can switch window without a request.
+    The ladder is already binned in `metrics_5m` over the four fixed trailing
+    windows, so this endpoint neither scans `agg_dom` nor re-bins in pandas: it
+    picks the row for the chosen point in time and the `vap_*` column for the
+    chosen window out of the grid the refresh cycle pushed to Redis. All four
+    windows come back together, because they are four column sets on one row -
+    the UI can switch window without a request.
+
+    The headline scalar tiles are served by `/api/analytics`, not here: they are
+    views of one tick frame, and `metrics_5m` snaps `as_of` to its 5-minute stop
+    while the tick path ends at the instant asked for.
 
     The point in time is clamped rather than rejected, for the same reason as
     `/api/analytics`: the grid is a discrete set of stops, so a bookmarked URL or

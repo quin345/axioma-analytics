@@ -83,16 +83,19 @@ def test_the_parameters_reach_the_lookup(client):
 
 
 def test_every_window_comes_back_so_switching_is_free(client):
-    """Four column sets on one row: the UI must not need a request to change
+    """Four ladders on one row: the UI must not need a request to change
     window, exactly as it does not need one to change point in time."""
     test_client, _ = client
 
     body = test_client.get("/api/metrics", params={"symbol": "1"}).json()
 
-    assert sorted(body["windows"]) == ["120", "180", "240", "60"]
+    assert sorted(body["volume_profiles"]) == ["120", "180", "240", "60"]
     assert body["window_choices_minutes"] == [60, 120, 180, 240]
-    assert body["summary"] == body["windows"]["60"]
-    assert all(body["windows"][w]["ticks"] for w in body["windows"])
+    assert all(body["volume_profiles"][w]["bins"] for w in body["volume_profiles"])
+    # The scalars are not served from `metrics_5m`: the tiles come from
+    # `/api/analytics`, one tick frame.
+    assert "windows" not in body
+    assert "summary" not in body
 
 
 def test_the_payload_carries_the_ladder_without_a_second_call(client):

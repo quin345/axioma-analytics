@@ -54,28 +54,28 @@ WINDOW_SUFFIXES: tuple[tuple[str, int], ...] = (
     ("1h", 60), ("2h", 120), ("3h", 180), ("4h", 240),
 )
 
-#: The windowed scalar metrics, in the order `metrics_5m` materialises them.
+#: Nested `dynamic`/`real` columns the metrics read projects: the volume-at-price
+#: ladder and its point of control, per window. These are the **only** windowed
+#: columns the dashboard reads from `metrics_5m`.
 #:
-#: OHLC (`open`/`high`/`low`/`close`) is deliberately **not** here: the table the
-#: dashboard reads ships the tick-level bars and the session extremes through
-#: `/api/analytics` instead, so a window column for them was dropped from the
-#: schema. Declaring a column the table does not have would read as `null` and
-#: blank the tiles that `/api/analytics` fills correctly - see
-#: `metrics.SCALAR_FIELDS` and the overlay in `app/static/app.js`.
-WINDOW_METRICS = (
-    "ticks", "vwap", "total_volume",
-    "realized_vol_bps", "avg_spread_bps", "ofi_imbalance",
-)
-
-#: Derived per window by the KQL, but trivial functions of the columns above.
-WINDOW_DERIVED = ("change_pct",)
-
-#: Nested `dynamic` columns: the volume-at-price ladder and its point of control.
+#: The scalar window metrics the table also ships (`ticks`, `vwap`,
+#: `total_volume`, `realized_vol_bps`, `avg_spread_bps`, `ofi_imbalance`,
+#: `change_pct`) are deliberately **not** projected: the headline tiles come from
+#: `/api/analytics`, which recomputes them from the tick frame, and `metrics_5m`
+#: snaps `as_of` down to its 5-minute stop while the tick path ends at the instant
+#: asked for, so the two answer *different windows*. `metrics_5m`'s real saving is
+#: the pre-binned volume-at-price ladder, which is the one thing overlaid - see
+#: `metrics.report` and `app/static/app.js`.
+#:
+#: OHLC (`open`/`high`/`low`/`close`) is likewise absent: the session extremes
+#: come from `/api/analytics`, so projecting a window column the table does not
+#: ship would read back as null. Reading by name means a renamed or missing
+#: column fails the read rather than returning a panel of nulls.
 WINDOW_NESTED = ("vap", "poc")
 
 
 def window_columns() -> list[str]:
-    """Every windowed column of `metrics_5m`, `<metric>_<suffix>`.
+    """Every windowed column of `metrics_5m` the read projects, `<metric>_<suffix>`.
 
     Pinned so the projection names each column explicitly. `evaluate pivot` is
     deliberately avoided: its output schema is data-derived, which is exactly
@@ -83,7 +83,7 @@ def window_columns() -> list[str]:
     """
     cols: list[str] = []
     for suffix, _ in WINDOW_SUFFIXES:
-        for name in (*WINDOW_METRICS, *WINDOW_DERIVED, *WINDOW_NESTED):
+        for name in WINDOW_NESTED:
             cols.append(f"{name}_{suffix}")
     return cols
 
@@ -269,8 +269,25 @@ declare query_parameters(sym:string = "");
 """
 
 
+#: The exact columns the metrics grid read projects: the two keys plus every
+#: windowed column `metrics.report` consumes (`window_columns()`). Naming them
+#: rather than reading `*` keeps the pull to what a request actually touches - a
+#: column the table ships but the app never reads (a stale `open_*`/`close_*`
+#: left from the pre-OHLC schema, a future debug field) is weight in the Redis
+#: grid for nothing. It also makes a renamed or missing column fail the read,
+#: which is the failure mode the pinned set exists to produce, instead of
+#: silently handing back a panel of nulls. The stamp is dropped by this
+#: projection (it is not listed), so there is no separate `project-away`.
+_METRICS_PROJECTION = ("symbolId", "as_of", *window_columns())
+
+
 def _metrics_fetch(obj: str, stamp: str | None) -> str:
     """The grid read, optionally deduplicated on `stamp`.
+
+    Only the projected columns come back - see `_METRICS_PROJECTION`. The
+    `arg_max(stamp, *)` still aggregates over the whole row (the stamp must see
+    every column to pick the newest one), and the following `project` narrows to
+    the consumed set, which also drops the stamp.
 
     `stamp=None` is the last resort: a table appended once per stop has nothing
     to dedupe, so a plain ordered scan is the correct read rather than a failure.
@@ -282,12 +299,13 @@ def _metrics_fetch(obj: str, stamp: str | None) -> str:
         "{symbol_match}\n"
         "| where isnull(start) or as_of >= start\n"
     )
+    projection = ", ".join(_METRICS_PROJECTION)
     if not stamp:
-        return head + "| order by symbolId asc, as_of asc"
+        return head + f"| project {projection}\n| order by symbolId asc, as_of asc"
     return (
         head
         + f"| summarize arg_max({stamp}, *) by symbolId, as_of\n"
-        + f"| project-away {stamp}\n"
+        + f"| project {projection}\n"
         + "| order by symbolId asc, as_of asc"
     )
 

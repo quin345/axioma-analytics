@@ -5,6 +5,55 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-13 - `/api/metrics` serves only the volume-at-price ladder; scalar columns dropped
+
+Scope: `metrics_5m` ships seven scalar window metrics (`ticks`, `vwap`,
+`total_volume`, `realized_vol_bps`, `avg_spread_bps`, `ofi_imbalance`,
+`change_pct`) plus the volume-at-price ladder, but the dashboard only ever
+overlaid the ladder — every headline tile is rendered from `/api/analytics`, one
+tick frame. The scalars were dead weight in the Redis grid and in the response,
+so the read path now projects only the nested `vap_*`/`poc_*` columns and
+`/api/metrics` no longer reports the scalar `windows`/`summary` keys at all.
+
+### Backend
+- [x] `app/kql.py`: `WINDOW_METRICS` and `WINDOW_DERIVED` removed; `window_columns()`
+      is now just `WINDOW_NESTED` (`vap`/`poc`). `_METRICS_PROJECTION` narrows the
+      grid read accordingly, so a renamed/missing column fails loudly rather than
+      reading back as null.
+- [x] `app/metrics.py`: `SCALAR_FIELDS`, `_VOL_ANNUALISATION` and `window_payload()`
+      removed. `report()` drops the `windows`/`summary` keys and serves only
+      `volume_profiles` (all four windows), `selected_window_minutes`,
+      `requested_window_minutes`, `window_choices_minutes`, `value_area_share`,
+      `stops` and `meta`.
+- [x] `app/main.py`: `/api/metrics` docstring updated to the ladder-only contract.
+
+### Docs
+- [x] `docs/metrics_5m.md`: contract note ("the dashboard reads only the ladder"),
+      the `/api/metrics` consumption step, and the *One frame per strip* section
+      updated; the KQL producer reference is unchanged (it still builds the
+      scalars — they are just no longer read here).
+- [x] `docs/dashboard_metrics.md`: the `metrics_5m` section now documents only the
+      ladder columns and marks the scalars "built by the KQL, not read by the app".
+- [x] `README.md`: endpoint table, the `/api/metrics` prose, and the analytics
+      reference updated.
+
+### Tests
+- [x] `tests/test_metrics.py`: column-contract test pins the nested-only projection;
+      the four `window_payload` tests removed; the report-bundle tests assert the
+      ladder-only payload (and that `windows`/`summary` are gone).
+- [x] `tests/test_metrics_api.py`: the switching-is-free test asserts on
+      `volume_profiles` and the absence of `windows`/`summary`.
+- [x] `tests/test_kql.py`: the `fetch_metrics` projection assertion updated.
+
+### Verification
+- [x] `pytest` - 382 passed; the 9 failures are pre-existing and environmental
+      (`.env` credentials, refresh-interval defaults), identical on the clean
+      baseline. The delta from baseline is exactly the four removed tests.
+- [x] `node --check app/static/app.js` clean.
+
+---
+---
+
 ## 2026-10-12 - Drawdown card replaced by price change from a reference point
 
 Scope: the *Drawdown* card read the `mid` column and divided it by its own

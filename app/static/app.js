@@ -1402,14 +1402,12 @@ function syncCalendarDetail() {
  *   the precomputed `metrics_5m` grid (a Redis lookup, not a re-scan).
  *
  * Both are asked for the same symbol, window span and point in time. The
- * metrics bundle is then laid over the report: the two agree on the key names
- * (`ticks`, OHLC, `vwap`, `change_pct`, `total_volume`, `realized_vol_bps`,
- * `avg_spread`, `annualised_vol_pct`) and on the volume-profile shape, so the
- * dashboard reads `metrics_5m` without any panel knowing which source it got.
- * Keys the table does not carry (durations, percentiles, trade counts) keep
- * their tick-derived values.
+ * metrics bundle supplies only the pre-binned volume-at-price ladder
+ * (`volume_profiles[selected_window_minutes]`), which is overlaid onto the
+ * report's own tick-derived profile; every headline tile and panel comes from
+ * `/api/analytics`, so no panel has to know which source the profile came from.
  *
- * When the metrics grid cannot be read the tick-derived summary stands in and
+ * When the metrics grid cannot be read the tick-derived profile stands in and
  * the banner says so, rather than blanking a page whose other panels are fine.
  */
 async function analyse() {

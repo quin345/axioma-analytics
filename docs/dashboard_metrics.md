@@ -23,9 +23,9 @@ Two serving paths feed the dashboard:
   tick frame, then recomputes every metric in pandas (`app/analytics.py`). This is
   the source of **all headline KPI tiles** and most chart cards.
 - **`/api/metrics`** — lookup. Reads the precomputed `metrics_5m` grid (pushed to
-  Redis by the refresh cycle) and returns a chosen window's columns without a
-  re-scan (`app/metrics.py`). Used to report windowed metrics and to overlay the
-  pre-binned volume ladder.
+  Redis by the refresh cycle) and returns the chosen window's **pre-binned
+  volume-at-price ladder** without a re-scan or re-binning (`app/metrics.py`). It
+  supplies only that ladder overlay; all headline tiles come from `/api/analytics`.
 
 ### Raw columns read from `agg_dom` (`kql.METRIC_COLUMNS`)
 
@@ -119,27 +119,18 @@ cards are click/keyboard disclosures with a detail body.
 | `calendar` | Data calendar | `calendarDays(report)` in `app.js` | `agg_dom` (via `ohlcv` bars) | OHLCV bars collapsed to one record per display-zone day: `open`=first bar open, `close`=last bar close, `high`/`low`=max/min, `ticks`=sum of bar `n`, `volume`=sum of bar `v`, `spread`=mean, `change = (close - open)/open * 100`, `busiest`=hour with most ticks. |
 
 ---
-## `metrics_5m` windowed metrics (`/api/metrics`, table `metrics_5m`)
+## `metrics_5m` volume-at-price ladder (`/api/metrics`, table `metrics_5m`)
 
 `metrics_5m` holds, per `(symbolId, as_of)` stop and per fixed window
-(`1h/2h/3h/4h`, suffixes `_1h`...`_4h`), these metrics. A dashboard request is a
-lookup: pick the row for the `as_of` stop and the column set for the window
-(`metrics.window_payload`). These are **reported** by `/api/metrics` but **not**
-overlaid onto the headline tiles (which stay tick-derived). Full KQL reference:
-`docs/metrics_5m.md`.
+(`1h/2h/3h/4h`, suffixes `_1h`...`_4h`), the **pre-binned volume-at-price ladder**
+(`vap_<w>`) and its point of control (`poc_<w>`). A dashboard request is a lookup:
+pick the row for the `as_of` stop and the `vap_*` column for the chosen window
+(`metrics.volume_profile`). This is the **only** thing `/api/metrics` serves, and
+the **only** thing the dashboard overlays from it — the precomputation genuinely
+pays here because the ladder ships already binned (no re-binning in pandas). Full
+KQL reference: `docs/metrics_5m.md`.
 
-| `SCALAR_FIELDS` column -> payload key | Type | Definition (over the window ending at `as_of`) | Table |
-|---|---|---|---|
-| `ticks` -> `ticks` | long | tick count | `metrics_5m` |
-| `vwap` -> `vwap` | real | `sum(mid*volume) / sum(volume)` | `metrics_5m` |
-| `change_pct` -> `change_pct` | real | percent change vs window open (derived) | `metrics_5m` |
-| `total_volume` -> `total_volume` | real | `sum(volume)` | `metrics_5m` |
-| `realized_vol_bps` -> `realized_vol_bps` | real | `sqrt(sum(ret^2) / duration_s)` (per-second) | `metrics_5m` |
-| `avg_spread_bps` -> `avg_spread` | real | mean relative spread (bps) | `metrics_5m` |
-| `ofi_imbalance` -> `ofi_imbalance` | real | normalised order-flow imbalance | `metrics_5m` |
-| (computed) -> `annualised_vol_pct` | real | `realized_vol_bps * sqrt(252*24*3600) / 10000 * 100` | derived on read |
-
-Nested columns:
+Nested columns the app reads:
 
 | Column | Type | Definition | Table |
 |---|---|---|---|
@@ -150,6 +141,16 @@ The volume-profile panel built from `vap_*` (`metrics.volume_profile`) returns t
 same shape as the tick-derived profile (`bins` descending by price, `poc`,
 `value_area`, `high_volume_nodes`), so the UI renders either source unchanged.
 
+> **The scalar window metrics are not read.** `metrics_5m` also ships `ticks`,
+> `vwap`, `total_volume`, `realized_vol_bps`, `avg_spread_bps`, `ofi_imbalance` and
+> `change_pct` per window, but the app does **not** project them
+> (`kql.window_columns()` is just `WINDOW_NESTED`) and `/api/metrics` no longer
+> reports them. Every headline tile comes from `/api/analytics` — one tick frame —
+> because the two bundles answer different windows (`metrics_5m` snaps `as_of`
+> down to its 5-minute stop, the tick path ends at the instant asked for). The
+> scalars are dead weight in the grid and can be dropped from the table once
+> nothing else consumes them (see `docs/metrics_5m.md`).
+
 ### `metrics_5m` contract (from `docs/metrics_5m.md`)
 
 | Property | Value |
@@ -157,9 +158,8 @@ same shape as the tick-derived profile (`bins` descending by price, `poc`,
 | Grain | one row per `(symbolId, as_of)` |
 | Point-in-time grid | last 4 h in 5-minute steps (49 stops, `as_of` inclusive) |
 | Windows (fixed) | 60 / 120 / 180 / 240 minutes, each ending at `as_of` |
-| Scalar columns | 6 metrics x 4 windows = 24 |
-| Derived columns | `change_pct_1h` ... `change_pct_4h` |
-| Nested columns | `vap_1h`...`vap_4h` (dynamic), `poc_1h`...`poc_4h` (real) |
+| Columns the app reads | `vap_1h`...`vap_4h` (dynamic), `poc_1h`...`poc_4h` (real) |
+| Scalar columns | `ticks`/`vwap`/`total_volume`/`realized_vol_bps`/`avg_spread_bps`/`ofi_imbalance` × 4 + `change_pct` × 4 — **built by the KQL, not read by the app** |
 | Source table | `ctrader_dom.agg_dom` |
 | Row stamp | `computed_at` (legacy fallback `ingested_at`) |
 | OHLC | **not** in this table — session extremes stay tick-derived (`agg_dom`) |

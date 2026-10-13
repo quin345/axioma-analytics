@@ -564,7 +564,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
-| `GET /api/metrics` | The precomputed `metrics_5m` bundle: the windowed metrics and the volume-at-price ladder for the symbol's chosen (default: newest) `as_of` stop, served from Redis. The dashboard overlays only the ladder; the headline tiles come from `/api/analytics` |
+| `GET /api/metrics` | The precomputed `metrics_5m` bundle: the pre-binned volume-at-price ladder for the symbol's chosen (default: newest) `as_of` stop, served from Redis. The dashboard overlays only that ladder; every headline tile comes from `/api/analytics` |
 | `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
@@ -599,24 +599,27 @@ tiles and the panels only the tick path can fill come from `/api/analytics`.
 
 Its `window_minutes` is snapped *down* to one of the four spans the precomputed
 table ships (60/120/180/240), and the payload reports the snap rather than hiding
-it: `requested_window_minutes` vs `selected_window_minutes`, with `summary` equal
-to `windows[selected_window_minutes]`. All four windows come back together, so
-changing span costs no request. `as_of` resolves to the stop it falls inside
-rather than failing, and omitted means the newest stop. `meta` names the source
-table (`metrics_5m`) and the stop it read, and an empty table is a `502` naming
+it: `requested_window_minutes` vs `selected_window_minutes`. All four windows'
+volume-at-price ladders come back together (`volume_profiles`), so changing span
+costs no request. `as_of` resolves to the stop it falls inside rather than
+failing, and omitted means the newest stop. `meta` names the source table
+(`metrics_5m`) and the stop it read, and an empty table is a `502` naming
 the table — the metrics job not having run is not a feed outage.
 
-The table carries no OHLC columns, and the dashboard deliberately does **not**
-overlay its scalars onto the headline tiles. Every tile on that strip is a view of
-one tick frame — `ticks`, `ticks_per_minute` and `avg_interarrival_ms` are one
-count over one span, `change` and `change_pct` one move in two units — and the two
-bundles answer *different windows*, because `metrics_5m` snaps `as_of` down to its
-5-minute stop while the tick path ends at the instant asked for. Overlaying some
-and not others showed 6,226 ticks beside 150.8/min (9,050/hour) and +0.14% beside
-an absolute 2.4300, so the strip now reads `analytics.summary` whole.
+`/api/metrics` serves **only** the pre-binned volume-at-price ladder; it projects
+only the `vap_*`/`poc_*` columns of `metrics_5m` and reports no scalar window
+metrics. The table carries no OHLC columns, and the dashboard deliberately does
+**not** overlay scalars onto the headline tiles either. Every tile on that strip
+is a view of one tick frame — `ticks`, `ticks_per_minute` and
+`avg_interarrival_ms` are one count over one span, `change` and `change_pct` one
+move in two units — and the two bundles answer *different windows*, because
+`metrics_5m` snaps `as_of` down to its 5-minute stop while the tick path ends at
+the instant asked for. Overlaying some and not others showed 6,226 ticks beside
+150.8/min (9,050/hour) and +0.14% beside an absolute 2.4300, so the strip reads
+`analytics.summary` whole and `/api/metrics` contributes only the ladder.
 
-What `/api/metrics` still supplies is the **pre-binned volume-at-price ladder**,
-which the table ships already aggregated — that overlay stays, and it is where the
+What `/api/metrics` supplies is the **pre-binned volume-at-price ladder**, which
+the table ships already aggregated — that overlay stays, and it is where the
 precomputation actually pays.
 
 ```bash
@@ -646,9 +649,9 @@ of each KPI tile and card — its table and its exact formula — lives in
 | Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios | `agg_dom` |
 | Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) | `agg_dom` |
 
-The windowed metrics `/api/metrics` reports (`ticks`, `vwap`, `change_pct`,
-`total_volume`, `realized_vol_bps`, `avg_spread`, `ofi_imbalance` per 1h/2h/3h/4h)
-come from `ctrader_dom.metrics_5m`; see [`docs/metrics_5m.md`](docs/metrics_5m.md).
+`/api/metrics` reads the pre-binned volume-at-price ladder (per 1h/2h/3h/4h) from
+`ctrader_dom.metrics_5m`; it projects only the `vap_*`/`poc_*` columns and serves
+no scalar window metrics. See [`docs/metrics_5m.md`](docs/metrics_5m.md).
 
 **Design notes**
 

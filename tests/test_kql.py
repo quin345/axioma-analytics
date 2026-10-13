@@ -298,7 +298,10 @@ def test_fetch_metrics_dedupes_on_computed_at(settings):
 
     csl = client.calls[0][1]
     assert "summarize arg_max(computed_at, *) by symbolId, as_of" in csl
-    assert "project-away computed_at" in csl
+    # Only the consumed columns come back: the named projection drops the stamp
+    # (and any column the app never reads) rather than a blanket `project-away`.
+    assert "project symbolId, as_of," in csl
+    assert "project-away" not in csl
     assert "order by symbolId asc, as_of asc" in csl
     # One read: the first stamp resolved, so there was nothing to fall back to.
     assert len(client.calls) == 1

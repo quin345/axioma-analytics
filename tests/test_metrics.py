@@ -31,9 +31,10 @@ def settings() -> Settings:
 def _grid(periods: int = 5, symbol: str = "1", offset: int = 0) -> pd.DataFrame:
     """A `metrics_5m` grid: `periods` 5-minute stops, every window present.
 
-    Mirrors the table's real schema - see the note on `SCALAR_FIELDS`: the
-    windowed metrics it ships plus the `computed_at` stamp the refresh writes,
-    and deliberately **no** `open/high/low/close` columns.
+    Mirrors the table's real schema - the nested `vap_*`/`poc_*` columns the read
+    projects, the scalar window columns the table also ships but the app does not
+    read, plus the `computed_at` stamp the refresh writes, and deliberately **no**
+    `open/high/low/close` columns.
     """
     rows = []
     for i, at in enumerate(pd.date_range("2026-10-10T09:00", periods=periods,
@@ -66,14 +67,18 @@ def test_the_window_columns_pin_the_four_trailing_windows():
     than hand back a panel of nulls."""
     cols = kql.window_columns()
 
-    assert len(cols) == 4 * (len(kql.WINDOW_METRICS)
-                             + len(kql.WINDOW_DERIVED)
-                             + len(kql.WINDOW_NESTED))
-    assert "ticks_1h" in cols and "ticks_4h" in cols
+    # Only the volume-at-price ladder and its POC: the scalars come from the
+    # tick path, so they are not projected from `metrics_5m` at all.
+    assert len(cols) == 4 * len(kql.WINDOW_NESTED)
     assert "vap_2h" in cols and "poc_3h" in cols
+    assert "vap_1h" in cols and "poc_4h" in cols
     assert "open_5m" not in cols          # the slider is gone: only fixed windows
-    # OHLC is not in the table's schema: the tick path supplies it, and
-    # projecting it here would read back as null and blank the tiles.
+    # The scalar window metrics the table ships are deliberately not read: the
+    # headline tiles come from `/api/analytics`, one tick frame.
+    for metric in ("ticks", "vwap", "total_volume", "realized_vol_bps",
+                   "avg_spread_bps", "ofi_imbalance", "change_pct"):
+        assert f"{metric}_1h" not in cols
+    # OHLC is not in the table's schema either: the tick path supplies it.
     for metric in ("open", "high", "low", "close"):
         assert f"{metric}_1h" not in cols
 
@@ -153,59 +158,8 @@ def test_an_empty_grid_has_no_stops_and_no_row():
 
 
 # --------------------------------------------------------------------------
-# Window payloads
+# Window resolution
 # --------------------------------------------------------------------------
-
-def test_a_window_payload_keeps_the_keys_the_dashboard_reads():
-    """Renamed to the plain metric names, so the panel does not care which window
-    - or which source - it came from."""
-    payload = metrics.window_payload(_grid().iloc[-1], "1h")
-
-    assert payload["ticks"] == 104.0
-    assert payload["vwap"] == 1.0852
-    assert payload["avg_spread"] == 1.5      # renamed from avg_spread_bps
-    assert payload["ofi_imbalance"] == 0.25
-    assert payload["realized_vol_bps"] == 12.5
-    # Annualisation is applied on read, not stored in KQL.
-    assert payload["annualised_vol_pct"] == pytest.approx(
-        12.5 * float(np.sqrt(252 * 24 * 3600)) / 10_000 * 100)
-
-
-def test_the_payload_carries_no_ohlc_keys():
-    """`metrics_5m` does not ship OHLC, and the metrics bundle is overlaid on the
-    tick-derived summary - so emitting a null `high`/`low` would *overwrite* the
-    figures `/api/analytics` computed and blank the tiles.
-
-    The contract is enforced from both ends: the payload omits the keys entirely,
-    and the overlay in `app/static/app.js` skips nulls.
-    """
-    payload = metrics.window_payload(_grid().iloc[-1], "1h")
-
-    for key in ("open", "high", "low", "close"):
-        assert key not in payload
-    # Only columns the table actually declares are read, so a dropped column can
-    # never silently reappear in a payload as a null.
-    shipped = {*kql.WINDOW_METRICS, *kql.WINDOW_DERIVED}
-    assert all(col in shipped for col, _ in metrics.SCALAR_FIELDS)
-
-
-def test_each_window_reads_its_own_column_set():
-    frame = _grid()
-    frame.loc[0, "ticks_4h"] = 999
-    at = pd.Timestamp("2026-10-10T09:00", tz="UTC")
-    row = frame[frame["as_of"] == at].iloc[0]
-
-    assert metrics.window_payload(row, "1h")["ticks"] == 100.0
-    assert metrics.window_payload(row, "4h")["ticks"] == 999.0
-
-
-def test_a_missing_column_is_none_rather_than_a_crash():
-    """A window the KQL left null - a symbol with no ticks in that span - is an
-    empty panel, not a 502."""
-    row = _grid().iloc[-1].drop(labels=[f"vwap_{s}" for s, _ in kql.WINDOW_SUFFIXES])
-
-    assert metrics.window_payload(row, "2h")["vwap"] is None
-
 
 def test_an_absent_window_defaults_to_the_narrowest_the_ui_offers():
     """The dashboard's own default is 1 h, so the API must agree with the control
@@ -424,19 +378,15 @@ def test_the_first_report_builds_and_caches_the_bundle(settings, store, fake_kql
     first = metrics.report("1", settings=settings)
 
     rk = metrics.report_key("1", first["meta"]["as_of"], settings)
-    assert store["docs"][rk]["windows"] == first["windows"]
     assert store["docs"][rk]["volume_profiles"] == first["volume_profiles"]
 
 
 def test_a_repeat_report_is_a_json_read_not_a_rebuild(settings, store, fake_kql,
                                                       monkeypatch):
-    """Same symbol, same stop: the windows and profiles come back from Redis."""
+    """Same symbol, same stop: the profiles come back from Redis."""
     first = metrics.report("1", window_minutes=60, settings=settings)
     builds = {"n": 0}
-    real_payload, real_profile = metrics.window_payload, metrics.volume_profile
-    monkeypatch.setattr(metrics, "window_payload",
-                        lambda *a, **k: builds.__setitem__("n", builds["n"] + 1)
-                        or real_payload(*a, **k))
+    real_profile = metrics.volume_profile
     monkeypatch.setattr(metrics, "volume_profile",
                         lambda *a, **k: builds.__setitem__("n", builds["n"] + 1)
                         or real_profile(*a, **k))
@@ -444,10 +394,8 @@ def test_a_repeat_report_is_a_json_read_not_a_rebuild(settings, store, fake_kql,
     second = metrics.report("1", window_minutes=240, settings=settings)
 
     assert builds["n"] == 0
-    assert second["windows"] == first["windows"]
     assert second["volume_profiles"] == first["volume_profiles"]
     # Per-request fields still follow the request, not the stored copy.
-    assert second["summary"] == second["windows"]["240"]
     assert second["requested_window_minutes"] == 240
     assert second["selected_window_minutes"] == 240
 
@@ -539,11 +487,14 @@ def test_the_report_carries_every_window_at_the_chosen_stop(settings, store,
     assert rep["meta"]["as_of"] == "2026-10-10T09:20:00+00:00"
     assert rep["selected_window_minutes"] == 60
     assert rep["window_choices_minutes"] == [60, 120, 180, 240]
-    # Switching window is free: all four are column sets on the same row.
-    assert sorted(rep["windows"]) == ["120", "180", "240", "60"]
-    assert rep["windows"]["240"]["ticks"] == 104.0
+    # Switching window is free: all four ladders are column sets on the same row.
+    assert sorted(rep["volume_profiles"]) == ["120", "180", "240", "60"]
     assert rep["volume_profiles"]["60"]["bins"]
-    assert rep["summary"] == rep["windows"]["60"]
+    assert rep["volume_profiles"]["240"]["bins"]
+    # The scalar window metrics are not served from `metrics_5m` at all: the
+    # headline tiles come from the tick path, one frame.
+    assert "windows" not in rep
+    assert "summary" not in rep
 
 
 def test_a_window_the_table_does_not_ship_is_reported_as_snapped(settings, store,
