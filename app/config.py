@@ -6,22 +6,31 @@ The app reads **one** source: the production Fabric **KQL** database
 * ``dom_stream_raw`` / ``dom_book_flat`` - the raw and flattened DOM feed
   (ingested, not queried directly by the dashboard),
 * ``agg_dom`` - the per-tick aggregate order-book metrics the analytics read,
+* ``metrics_5m`` - the precomputed window metrics: one row per
+  ``(symbolId, as_of)`` stop with every metric already aggregated over the four
+  fixed 1 h / 2 h / 3 h / 4 h trailing windows (`docs/metrics_5m.md`). This is
+  what the headline metrics are served from - pushed to Redis by the refresh
+  cycle and read back as a lookup, so a dashboard request never re-scans
+  `agg_dom` nor re-derives anything in pandas.
 * ``symbols_icmarkets`` - the icmarkets instrument dimension.
 
 Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
 the dashboard reads KQL once per window rather than on every request. The cache
 window is fixed at `CACHE_LOOKBACK_HOURS` (8 by default); the UI may narrow it
-but never widen it. A background cycle (`CACHE_REFRESH_MINUTES`, 30 by default)
-slides that window on the clock - at the half-hour marks, :00 and :30 - purging
-the earliest half hour and reading only the newest, so what the dashboard
-serves is never more than half an hour behind the feed and a symbol's cache
+but never widen it. A background cycle (`CACHE_REFRESH_MINUTES`, 5 by default)
+slides that window on the clock - just past the 5-minute marks (:00:15,
+:05:15, ...) - purging the earliest slice and reading only the newest, so what
+the dashboard serves is never more than a few minutes behind the feed and a
+symbol's cache
 entry never holds more than eight hours of rows.
 
 Eight hours is the sum the aggregate-window controls need: the timeline the user
-picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the window
-at that point may be `WINDOW_MAX_MINUTES` (240) more, so the earliest point
-with the widest window reaches exactly eight hours back. Anything shorter and
-the oldest selectable combination would fall outside the cache.
+picks a point from spans `TIMELINE_MINUTES` (240, four hours) and the widest
+window at that point is 240 minutes more, so the earliest point with the widest
+window reaches exactly eight hours back. Anything shorter and the oldest
+selectable combination would fall outside the cache. The window itself is one of
+a small fixed set (`WINDOW_CHOICES_MINUTES`, 60/120/180/240) that mirrors the
+four trailing windows the precomputed `metrics_5m` table always ships.
 
 There is no environment selector, no catalog discovery and no synthetic
 fallback - the configuration is just the endpoints, the Entra ID identity and
@@ -73,6 +82,31 @@ def _env_bool(*names: str, default: bool) -> bool:
     return raw.lower() in _TRUTHY
 
 
+def _env_int_list(*names: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    """A comma/space separated integer list from `names`, else `default`.
+
+    Duplicate, out-of-order and non-numeric entries are tolerated: the values
+    are de-duped and sorted ascending, so a stray config value cannot leave the
+    UI with two identical options or with a wider window offered after a
+    narrower one.
+    """
+    raw = _env(*names)
+    if not raw:
+        return tuple(default)
+    seen: set[int] = set()
+    for part in raw.replace(" ", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            n = int(part)
+        except ValueError:
+            continue
+        if n > 0:
+            seen.add(n)
+    return tuple(sorted(seen)) if seen else tuple(default)
+
+
 def _display_timezone(raw: str | None) -> str:
     """A usable IANA zone name; New York when the value is missing or unknown."""
     name = (raw or "").strip() or _DEFAULT_DISPLAY_TIMEZONE
@@ -113,6 +147,22 @@ class Settings:
     symbol_table: str = field(
         default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
     )
+    #: The precomputed window metrics: one row per `(symbolId, as_of)` stop with
+    #: every metric already aggregated over the four fixed trailing windows
+    #: (1 h / 2 h / 3 h / 4 h). Built by `Metrics5m()` in the metrics repo on the
+    #: same cadence as the cache - see `docs/metrics_5m.md`, which is the
+    #: source-of-truth for its columns. This is what `/api/metrics` reads, and
+    #: what the refresh cycle pushes to Redis: the point of the table is that a
+    #: dashboard request becomes a lookup of pre-aggregated columns instead of a
+    #: re-scan of `agg_dom` and a re-derive in pandas.
+    metrics_table: str = field(
+        default_factory=lambda: _env("METRICS_TABLE", default="metrics_5m") or "metrics_5m"
+    )
+    #: `metrics_5m` (default) reads the precomputed table; `ticks` falls back to
+    #: recomputing the metrics from `agg_dom`. See `metrics_source`.
+    _metrics_source: str | None = field(
+        default_factory=lambda: _env("METRICS_SOURCE", default="metrics_5m")
+    )
     #: Buffer applied to the KQL time filter so a tick written just before the
     #: window opens is still returned.
     kql_lag_minutes: int = field(default_factory=lambda: _env_int("KQL_LAG_MINUTES", default=2))
@@ -131,22 +181,31 @@ class Settings:
     cache_key_prefix: str = field(
         default_factory=lambda: _env("REDIS_KEY_PREFIX", default="axioma") or "axioma"
     )
-    #: Lifetime of a cached KQL result. 45 minutes covers one ingestion
-    #: interval, so the cache never outlives the data it mirrors.
-    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=2700))
+    #: Lifetime of a cached KQL result. 450 s (7.5 min) covers 1.5 refresh
+    #: cycles, so one missed cycle still leaves the cache populated.
+    cache_ttl_seconds: int = field(default_factory=lambda: _env_int("REDIS_TTL_SECONDS", default=450))
     #: The fixed window the cache holds and the UI may only narrow. Eight hours
     #: = a four-hour point-in-time timeline plus the widest (240 minute)
     #: aggregate window from its earliest point, so every combination the
     #: controls offer is served from the cache.
     cache_lookback_hours: int = field(default_factory=lambda: _env_int("CACHE_LOOKBACK_HOURS", default=8))
-    #: How often the background cycle slides that window from KQL: on the
-    #: clock marks (:00 and :30 for 30), the earliest interval is purged and
-    #: only the newest interval is read. 30 minutes is the maximum age of what
-    #: the dashboard serves, and `cache_ttl_seconds` runs 1.5 cycles ahead of
-    #: it so a single missed cycle still leaves the cache populated. 0 switches
-    #: the cycle off and returns to lazy, on-demand caching.
+    #: How often the background cycle slides that window from KQL: every 5
+    #: minutes on the clock marks plus a short offset (:00:15, :05:15, ...),
+    #: the earliest interval is purged and only the newest interval is read.
+    #: 5 minutes is the maximum age of what the dashboard serves, and
+    #: `cache_ttl_seconds` runs 1.5 cycles ahead of it so a single missed
+    #: cycle still leaves the cache populated. 0 switches the cycle off and
+    #: returns to lazy, on-demand caching.
     cache_refresh_minutes: int = field(
-        default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=30)
+        default_factory=lambda: _env_int("CACHE_REFRESH_MINUTES", default=5)
+    )
+    #: Delay past each 5-minute clock mark before the cycle fires, so the
+    #: upstream feed has settled and the read does not race immature data.
+    #: 15 s puts the runs at :00:15, :05:15, ... (e.g. 4:45:15).
+    cache_refresh_offset_seconds: float = field(
+        default_factory=lambda: _env_int(
+            "CACHE_REFRESH_OFFSET_SECONDS", default=15
+        )
     )
 
     # --- Aggregate window ---------------------------------------------------
@@ -157,10 +216,21 @@ class Settings:
     timeline_step_minutes: int = field(
         default_factory=lambda: _env_int("TIMELINE_STEP_MINUTES", default=5)
     )
-    #: The aggregate-window choices offered at a point, in minutes. The widest
-    #: plus the timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
+    #: The fixed aggregate-window choices offered at a point, in minutes. These
+    #: mirror the four trailing windows `metrics_5m` precomputes for every
+    #: `(symbolId, as_of)` stop - 1 h / 2 h / 3 h / 4 h - so the UI offers only
+    #: what the precomputed table always ships. The widest (240) plus the
+    #: timeline is what fixes `cache_lookback_hours`: 240 + 240 = 480.
+    #: `window_min_minutes` / `window_max_minutes` are the legacy continuous
+    #: bounds, kept only so an older cached `/api/health` payload still renders
+    #: a sensible control; the UI prefers `window_choices` when present.
+    window_choices_minutes: tuple[int, ...] = field(
+        default_factory=lambda: _env_int_list(
+            "WINDOW_CHOICES_MINUTES", default=(60, 120, 180, 240)
+        )
+    )
     window_min_minutes: int = field(
-        default_factory=lambda: _env_int("WINDOW_MIN_MINUTES", default=5)
+        default_factory=lambda: _env_int("WINDOW_MIN_MINUTES", default=60)
     )
     window_max_minutes: int = field(
         default_factory=lambda: _env_int("WINDOW_MAX_MINUTES", default=240)
@@ -232,6 +302,37 @@ class Settings:
         """
         lo = max(1, self.window_min_minutes)
         return max(lo, min(self.window_max_minutes, self.cache_lookback_minutes))
+
+    @property
+    def window_choices(self) -> tuple[int, ...]:
+        """The fixed aggregate-window choices the UI offers, in minutes.
+
+        `window_choices_minutes` (the four `metrics_5m` windows: 1 h / 2 h /
+        3 h / 4 h) capped by the cache window, so a shorter cache drops a
+        choice it cannot serve rather than offering history it does not hold.
+        Never empty: if every choice is wider than the cache, the cache window
+        itself is offered so the control always has a usable value.
+        """
+        cap = self.cache_lookback_minutes
+        choices = tuple(m for m in self.window_choices_minutes if m <= cap)
+        return choices or (cap,)
+
+    @property
+    def metrics_source(self) -> str:
+        """Where `/api/metrics` reads from: the precomputed table or the ticks.
+
+        A rollback switch, not a data-source selector: the tick path is kept
+        because `metrics_5m` is rebuilt by a separate scheduled job and a
+        stalled or half-appended table would otherwise leave the dashboard with
+        no headline metrics at all. Set `METRICS_SOURCE=ticks` to fall back to
+        the pandas recompute without a deploy.
+        """
+        return (self._metrics_source or "").strip().lower() or "metrics_5m"
+
+    @property
+    def use_metrics_5m(self) -> bool:
+        """True when the precomputed table backs the metrics read path."""
+        return self.metrics_source == "metrics_5m"
 
     @property
     def cache_refresh_seconds(self) -> int:

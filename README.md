@@ -3,7 +3,7 @@
 Microstructure analytics over the **production aggregate DOM feed**. Every
 instrument is categorised by asset class using the pipeline's own
 classification, and the dashboard renders OHLCV bars, order-flow imbalance,
-spread evolution, volume-at-price, return distribution, drawdown,
+spread evolution, volume-at-price, return distribution, price change,
 autocorrelation and large-trade market impact.
 
 The app talks to exactly one source on the production Fabric estate: the **KQL**
@@ -11,8 +11,10 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 per-tick aggregate DOM metrics (`agg_dom`), the instrument dimension
 (`symbols_icmarkets`) and the database clock. Results are cached in **Redis**
 (Entra ID, no access key) so a dashboard request never re-scans the table, and
-that four-hour window is slid forward every 30 minutes on the clock (:00 and
-:30) — the earliest half hour is purged, the newest half hour is read.
+that four-hour window is slid forward every 5 minutes just past the clock mark
+(:00:15, :05:15, …) — the earliest slice is purged, the newest slice is read.
+The 15 s delay lets the upstream feed settle past the mark so the read never
+races immature data.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -41,9 +43,10 @@ SYMBOL_TABLE="symbols_icmarkets"
 # Redis cache (Entra ID; there is no access key).
 REDIS_HOST="<name>.<region>.redis.azure.net"
 REDIS_PORT="10000"
-REDIS_TTL_SECONDS="2700"
+REDIS_TTL_SECONDS="450"
 CACHE_LOOKBACK_HOURS="4"
-CACHE_REFRESH_MINUTES="30"
+CACHE_REFRESH_MINUTES="5"
+CACHE_REFRESH_OFFSET_SECONDS="15"
 
 # Authentication - see the table below.
 FABRIC_MANAGED_IDENTITY="true"
@@ -78,32 +81,38 @@ narrow the window, never widen it, and never trigger a second KQL read.
 
 Eight hours is what the dashboard's point-in-time controls need. The *Point in
 time* field spans four hours (`TIMELINE_MINUTES`) in five-minute steps
-(`TIMELINE_STEP_MINUTES`), and at each point on it an aggregate *Window* of 5
-to 240 minutes (`WINDOW_MIN_MINUTES` / `WINDOW_MAX_MINUTES`) may be chosen. The
-earliest point taken back by the widest window therefore reaches exactly
-4 h + 4 h, so every combination the controls offer is served from the cache.
-`/api/health` publishes all four values and the window ceiling is capped by
-the cache, so a shorter cache narrows the control instead of offering history
-it cannot fill. Moving the point in time or changing the window is a free,
-in-memory narrowing of the cached copy.
+(`TIMELINE_STEP_MINUTES`), and at each point on it an aggregate *Window* is
+chosen from a small fixed set — **1 h, 2 h, 3 h or 4 h**
+(`WINDOW_CHOICES_MINUTES`, 60/120/180/240). These mirror the four trailing
+windows the precomputed `metrics_5m` KQL table ships for every
+`(symbolId, as_of)` stop, so the control offers only what the table always
+precomputes. The earliest point taken back by the widest window therefore
+reaches exactly 4 h + 4 h, so every combination the controls offer is served
+from the cache. `/api/health` publishes the set as `window_choices_minutes`,
+and any choice wider than the cache is dropped rather than offered, so a
+shorter cache narrows the control instead of promising history it cannot fill.
+Moving the point in time or changing the window is a free, in-memory narrowing
+of the cached copy.
 
 ### Keeping the window current
 
 A cache is only useful if it is fresh, so the app slides the fixed window on a
-schedule: **every `CACHE_REFRESH_MINUTES` (30 by default), on the clock marks
-(:00 and :30 — 1:30, 2:00, 2:30, …)** a background task advances each cached
+schedule: **every `CACHE_REFRESH_MINUTES` (5 by default), just past the
+5-minute clock marks (:00:15, :05:15, … — the 15 s
+`CACHE_REFRESH_OFFSET_SECONDS` delay lets the upstream feed settle so the read
+never races immature data, e.g. 4:45:15)** a background task advances each cached
 symbol's window. The cycle is scheduled against the wall clock rather than the
-process start time, so restarts do not shift it and it lines up with a
-`*/30` cron entry running the one-shot script. What the dashboard serves is
-therefore at most half an hour behind the feed, and anything inside the window
+process start time, so restarts do not shift it and a systemd timer
+(`OnCalendar=*:0/5:15`) lines up with it. What the dashboard serves is
+therefore at most a few minutes behind the feed, and anything inside the window
 still costs no query at all.
 
 Each cycle slides rather than re-reads:
 
 * **the new slice** — only rows newer than the symbol's newest cached row are
-  fetched from KQL (roughly the last 30 minutes), and
+  fetched from KQL (roughly the last 5 minutes), and
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
-  are dropped, which on a 30-minute cycle is exactly the earliest half hour.
+  are dropped, which on a 5-minute cycle is exactly the earliest slice.
 
 A cache entry therefore never holds more than eight hours of a symbol, and the
 KQL read per cycle covers only the interval, not the whole window. The purge is
@@ -114,9 +123,9 @@ its data while no ticks arrive.
 |---|---|---|
 | Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute aggregate window. |
 | Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
-| Window | `WINDOW_MIN_MINUTES="5"`, `WINDOW_MAX_MINUTES="240"` | The aggregate window offered at each point in time. The ceiling is capped by the cache. |
-| Refresh | `CACHE_REFRESH_MINUTES="30"` | The maximum age of what a page load shows, on the :00/:30 marks. Set `0` to switch the cycle off and cache lazily, on demand. |
-| TTL | `REDIS_TTL_SECONDS="2700"` | 45 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+| Window | `WINDOW_CHOICES_MINUTES="60,120,180,240"` | The fixed aggregate-window choices offered at each point in time (1 h / 2 h / 3 h / 4 h), mirroring the `metrics_5m` trailing windows. Choices wider than the cache are dropped. |
+| Refresh | `CACHE_REFRESH_MINUTES="5"`, `CACHE_REFRESH_OFFSET_SECONDS="15"` | The maximum age of what a page load shows, just past the 5-minute marks (e.g. 4:45:15). Set `0` to switch the cycle off and cache lazily, on demand. |
+| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes = 1.5 cycles, so one missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 | Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
 
 The first cycle runs immediately, so a restart warms the cache instead of
@@ -285,12 +294,12 @@ what the in-process cycle does, and exits non-zero when the endpoint is
 unreachable so a timer surfaces it:
 
 ```bash
-*/30 * * * * /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
+1-59/5 * * * * sleep 14; /usr/bin/python3 /home/azureuser/axioma-analytics/scripts/refresh_cache.py \
     >> /var/log/axioma-refresh.log 2>&1
 ```
 
 ```ini
-# /etc/systemd/system/axioma-refresh.service   (+ .timer, OnCalendar=*:0/30)
+# /etc/systemd/system/axioma-refresh.service   (+ .timer, OnCalendar=*:0/5:15)
 [Service]
 Type=oneshot
 User=azureuser
@@ -306,8 +315,8 @@ It redirects HTTP to HTTPS (with the ACME challenge path carved out so
 
 | Location | Why it differs |
 |---|---|
-| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off. A cold analytics request may still be scanning KQL and returns large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, and buffering would hold big payloads in nginx memory. |
-| `/static/` | Short `expires`, so unversioned filenames still revalidate. |
+| `/api/` | `limit_req` at 10 r/s, 120 s read timeout, buffering off, and `add_header Cache-Control "no-store"`. A cold analytics request may still be scanning KQL and returns large JSON; the default 60 s timeout would 504 while the app is still computing a correct answer, buffering would hold big payloads in nginx memory, and the payload is recomputed every 5 minutes, so it must never be served from a stale cache. |
+| `/static/` | `expires -1` (`Cache-Control: no-cache`), so the browser revalidates on every load. The app already sends `no-cache, must-revalidate`; a *positive* `expires` here would overwrite it and pin `app.js`/`styles.css` in the browser — after a deploy that pairs a stale `app.js` with the fresh `index.html`, which renders controls the script cannot bind. ETag/Last-Modified turn the revalidation into a cheap `304`. |
 | `/` | Dashboard and everything else. |
 
 The bare-domain and `www` blocks are front doors, not sites of their own:
@@ -339,8 +348,8 @@ came back from KQL and the instrument names came from the same KQL database.
 `cache_connected` reports the Redis cache separately — it decides whether a
 request costs a KQL query, but a cache failure is never an outage, because
 reads fall through to KQL. `cache_refreshed_at` (with `cached_symbols`) is the
-age of what the cache is serving: on a healthy 30-minute cycle it moves every
-half hour, and `cache_refresh_minutes` is the interval it is aiming for.
+age of what the cache is serving: on a healthy 5-minute cycle it moves every
+few minutes, and `cache_refresh_minutes` is the interval it is aiming for.
 
 ### Deploying an update
 
@@ -551,10 +560,11 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_choices_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
-| `GET /api/analytics` | Full analytics bundle |
+| `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
+| `GET /api/metrics` | The precomputed `metrics_5m` bundle: every headline metric and the volume profile for the symbol's chosen (default: newest) `as_of` stop, served from Redis |
 | `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
@@ -582,6 +592,38 @@ symbol's `asset_class`.
 curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-09T02:20:00Z'
 ```
 
+`/api/metrics` parameters: `symbol`, `window_minutes`, `as_of`. The dashboard
+reads this for its headline tiles and the volume-profile panel, and
+`/api/analytics` for the panels only the tick path can fill; both are asked for
+the same symbol, window and point in time.
+
+Its `window_minutes` is snapped *down* to one of the four spans the precomputed
+table ships (60/120/180/240), and the payload reports the snap rather than hiding
+it: `requested_window_minutes` vs `selected_window_minutes`, with `summary` equal
+to `windows[selected_window_minutes]`. All four windows come back together, so
+changing span costs no request. `as_of` resolves to the stop it falls inside
+rather than failing, and omitted means the newest stop. `meta` names the source
+table (`metrics_5m`) and the stop it read, and an empty table is a `502` naming
+the table — the metrics job not having run is not a feed outage.
+
+The table carries no OHLC columns, and the dashboard deliberately does **not**
+overlay its scalars onto the headline tiles. Every tile on that strip is a view of
+one tick frame — `ticks`, `ticks_per_minute` and `avg_interarrival_ms` are one
+count over one span, `change` and `change_pct` one move in two units — and the two
+bundles answer *different windows*, because `metrics_5m` snaps `as_of` down to its
+5-minute stop while the tick path ends at the instant asked for. Overlaying some
+and not others showed 6,226 ticks beside 150.8/min (9,050/hour) and +0.14% beside
+an absolute 2.4300, so the strip now reads `analytics.summary` whole.
+
+What `/api/metrics` still supplies is the **pre-binned volume-at-price ladder**,
+which the table ships already aggregated — that overlay stays, and it is where the
+precomputation actually pays.
+
+```bash
+# Every window at the newest stop; the 90-minute ask is answered with the 60-minute one.
+curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'
+```
+
 ---
 
 ## Analytics reference
@@ -595,7 +637,7 @@ curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-
 | Rolling | rolling annualised volatility, rolling spread, cumulative return |
 | Distribution | histogram, skew, excess kurtosis, Jarque-Bera, bullish ratio |
 | Book depth | bid/ask resting size, depth imbalance series, levels per side |
-| Drawdown | drawdown path, worst episodes with peak/trough/recovery |
+| Price change | percent change from a fixed reference (window start), path extremes |
 | Behaviour | autocorrelation, efficiency ratio, Hurst, variance ratios |
 | Hourly | activity, volume, return and volatility by hour (display time zone; see `DISPLAY_TIMEZONE`) |
 
@@ -624,16 +666,16 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
-the refresh cycle (clock-aligned :00/:30 slots, immediate first pass, repeat, a
+the refresh cycle (clock-aligned 5-minute slots with a 15 s offset, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
-earliest half hour, the default symbol warmed, a failing symbol keeping its
+earliest slice, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
 the pages and routes around them (`/` serving the dashboard, the retained
 `/dashboard` alias, `/unavailable` and `/welcome`),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
-conservation, drawdown sign, strict JSON serialisability, and a degenerate
-flat-price series (guards against divide-by-zero).
+conservation, the price-change reference point, strict JSON serialisability, and
+a degenerate flat-price series (guards against divide-by-zero).
 
 Redis is not required to run the tests: the KQL layer and the Redis client are
 both stubbed, and the cycle is driven with a stub instead of the network.
@@ -649,6 +691,7 @@ both stubbed, and the cycle is driven with a stub instead of the network.
 | Cached ticks look stale after a pipeline backfill | The cycle slides each entry incrementally, so rows older than the cached newest row are only picked up by a full read. Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`) and the next cycle re-reads the whole window; the TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |
 | Health's `cache_refreshed_at` is not advancing | The cycle is failing or switched off (`CACHE_REFRESH_MINUTES=0`). Check `journalctl -u axioma.service` for `Cache refresh cycle failed`; the dashboard still works, every request just falls through to KQL. |
 | Every request is slow again | The cache is empty or unreachable, so each read costs a KQL scan. Check `cache_connected` and whether the symbols are cached (`cached_symbols`). |
+| The site still looks outdated (old UI) right after a deploy | The browser is serving a cached `/static/` asset. Confirm nginx returns `Cache-Control: no-cache` (not a positive `expires`) for `/static/`: the app sends `no-cache, must-revalidate` and nginx must not overwrite it, or `app.js` lingers until the `expires` window passes and pairs with the new `index.html`. A hard reload bypasses it once. |
 | `KQL_ENDPOINT_PROD is not set` | Add it to `.env` (or set `KQL_ENDPOINT`). |
 | `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |

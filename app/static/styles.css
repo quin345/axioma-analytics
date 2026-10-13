@@ -2,6 +2,9 @@
   --bg:#0b0f17; --panel:#121826; --panel2:#182032; --line:#232d42;
   --fg:#e6ecf7; --muted:#8798b4; --accent:#4c9aff; --up:#22c55e; --down:#ef4444;
   --warn:#f59e0b; --radius:14px;
+  /* Controls: the caption line every field reserves so the inputs below them
+     line up, and the gap that separates caption / control / hint. */
+  --ctl-cap:17px; --ctl-gap:6px;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);
@@ -46,16 +49,45 @@ h2{font-size:13px;margin:0 0 12px;letter-spacing:.06em;text-transform:uppercase;
 .banner ul{margin:6px 0 0;padding-left:18px}
 .banner.bad{border-color:var(--down);background:rgba(239,68,68,.09);color:#f8c9c9}
 
-.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;
+/* Controls: one aligned row of fields plus the action cell.
+   The fields sit in a grid of equal tracks, and every field reserves the same
+   three rows - caption, control, hint - so all selects and number inputs share
+   a single baseline even where a column carries an extra line below it (the
+   point-in-time stamp). The controls all get one height, and the buttons drop
+   by the caption row so they line up with that same control row. */
+.controls{display:flex;flex-wrap:wrap;align-items:flex-start;gap:14px 18px;
   padding:16px 24px;border-bottom:1px solid var(--line)}
-.controls label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--muted);
+.fields{flex:1 1 auto;min-width:0;display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(146px,1fr));
+  /* A field that wraps with one track left opens an implicit column; sizing it
+     like the explicit ones keeps the grid even instead of letting it stretch. */
+  grid-auto-columns:minmax(0,1fr);
+  gap:12px 16px;align-items:start}
+.fields > label{display:grid;grid-template-rows:var(--ctl-cap) auto auto;
+  row-gap:var(--ctl-gap);min-width:0;font-size:11px;color:var(--muted);
   text-transform:uppercase;letter-spacing:.05em}
+/* A caption that does not fit its track is clipped rather than widened, so the
+   track - and every baseline beside it - stays put. */
+.fields .lab{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The point-in-time field holds the time, the instant it resolved to and the
+   range it may move inside, so it takes two tracks to keep them on one line. */
+.fields > label.wide{grid-column:span 2}
+/* One control height across selects, number inputs and buttons: the row reads as
+   a single line rather than a set of slightly different boxes. */
+.fields > label > select,.fields > label > input,.actions button{
+  width:100%;min-width:0;height:36px;padding-top:0;padding-bottom:0}
+.actions{flex:0 0 auto;display:flex;align-items:flex-start;gap:10px;
+  padding-top:calc(var(--ctl-cap) + var(--ctl-gap))}
+.actions button{flex:0 0 auto;width:auto;white-space:nowrap}
 /* The point-in-time input sits next to a range hint; the time input itself
    gets the accent, and the muted text around it never fights for attention. */
-.tlrow{display:flex;align-items:center;gap:10px}
-.controls input[type=time]{min-width:110px;font-variant-numeric:tabular-nums}
+.tlrow{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.tlrow input[type=time]{flex:0 0 auto;width:auto;min-width:110px;
+  font-variant-numeric:tabular-nums}
 .tlout{font-size:12.5px;color:var(--fg);font-variant-numeric:tabular-nums;white-space:nowrap}
 .tlrange{color:var(--muted);font-size:11px}
+@media (max-width:900px){.fields{grid-template-columns:repeat(auto-fit,minmax(132px,1fr))}}
+@media (max-width:360px){.fields > label.wide{grid-column:span 1}}
 select,input{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
   padding:8px 11px;border-radius:9px;font-size:13px;min-width:132px;font-family:inherit}
 select:focus,input:focus{outline:2px solid var(--accent);outline-offset:1px}
@@ -76,7 +108,9 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
   color:var(--accent);margin:0 0 14px;padding-bottom:9px;border-bottom:1px solid var(--line)}
 .stack{display:grid;gap:16px;grid-template-columns:1fr}
 
-.kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;margin-bottom:26px}
+/* The KPI strip is one row: auto-flowing columns keeps every tile side by
+   side instead of wrapping to a second row when the count grows. */
+.kpis{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:12px;margin-bottom:26px}
 .kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:15px 17px}
 .kpi .label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.07em}
 .kpi .value{font-size:22px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums;
@@ -116,16 +150,17 @@ main{padding:24px 24px 72px;max-width:1680px;margin:0 auto}
   margin:0 0 10px;font-weight:600}
 .card-detail h3 + h3{margin-top:18px}
 .card-detail p.explain{margin:0 0 14px;font-size:12.5px;line-height:1.6;color:var(--muted)}
-/* 300px minimum keeps wide values (drawdown episode timelines, hour-by-hour
-   rows) on one line in the full-width cards without crowding the narrow ones. */
+/* 300px minimum keeps wide values (a reference price beside its timestamp,
+   hour-by-hour rows) on one line in the full-width cards without crowding the
+   narrow ones. */
 .dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:2px 22px;margin:0}
 .dl div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;
   border-bottom:1px solid rgba(35,45,66,.5);font-size:12.5px}
 .dl dt{color:var(--muted);white-space:nowrap;flex:0 0 auto}
 .dl dd{margin:0;font-variant-numeric:tabular-nums;text-align:right;
-  /* A wide value (a drawdown episode timeline joins three timestamps with
-     arrows) cannot fit beside its label. Wrapping inside the value keeps the
-     row intact, where nowrap made it spill out of the card. */
+  /* A wide value (a reference price joined to its timestamp, say) cannot fit
+     beside its label. Wrapping inside the value keeps the row intact, where
+     nowrap made it spill out of the card. */
   white-space:normal;overflow-wrap:anywhere;line-height:1.45;
   /* Absorbs the slack so the value hugs the right edge, even when wrapped. */
   margin-left:auto}

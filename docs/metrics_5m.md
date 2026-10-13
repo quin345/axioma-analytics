@@ -10,7 +10,7 @@
 Today `app/analytics.py` recomputes every metric in pandas on **every** request.
 `app/service.py` / `app/cache.py` only cache the **raw ticks** (`agg_dom` rows)
 in Redis, so the heavy work — OHLC, realised vol, order-flow, the volume-at-price
-ladder, drawdown, distributions — is redone each time a dashboard loads, even for
+ladder, price change, distributions — is redone each time a dashboard loads, even for
 the same point in time and window.
 
 `metrics_5m` moves that work **server-side and one time per window**: a KQL table
@@ -27,49 +27,50 @@ in pandas.
 | Grain | one row per `(symbolId, as_of)` | — |
 | Point-in-time grid | last **4 h** in **5-minute** steps (49 stops, `as_of` inclusive) | `TIMELINE_MINUTES=240`, `TIMELINE_STEP_MINUTES=5` |
 | Windows (fixed) | **60 / 120 / 180 / 240** minutes, each ending at `as_of` | replaces the old 5–240 min slider |
-| Scalar columns | **10 metrics × 4 windows = 40** columns (`<metric>_1h … <metric>_4h`) | `app/analytics.py` summary/OFI/spread/vol |
-| Nested columns | `dynamic` objects per window (`vap_1h…`, `dist_1h…`, …) | `volume_profile`, `return_distribution` |
+| Scalar columns | **6 metrics × 4 windows = 24** columns (`<metric>_1h … <metric>_4h`) | `app/analytics.py` summary/OFI/spread/vol |
+| Derived columns | `change_pct_1h … change_pct_4h` | `summary.change_pct` |
+| Nested columns | `dynamic`/`real` per window (`vap_1h…`, `poc_1h…`) | `volume_profile` |
 | Source table | `ctrader_dom.agg_dom` (per-tick derived order-book metrics) | `kql.KQL_TABLE` |
 | Scan span | **8 h** of ticks (4 h timeline + 4 h widest window) | `CACHE_LOOKBACK_HOURS=8` |
 | Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=30` |
+| Row stamp | `computed_at` (`ingested_at` is the legacy fallback) | `kql.METRICS_STAMPS` |
 
-Row shape (one 5-minute `as_of` stop for one symbol):
+> **OHLC is not in this table.** The `open`/`high`/`low`/`close` window columns
+> were dropped from the schema: the session extremes come from `/api/analytics`,
+> which recomputes them from the tick stream (`analytics.summary`). This is the
+> one thing the read path must get right — see *One window per strip* below.
+
+Row shape (one 5-minute `as_of` stop for one symbol), as verified with
+`getschema`:
 
 ```
 symbolId : long
 as_of    : datetime            // the point in time this row is "as of"
 ticks_1h … ticks_4h            : long      // 4 cols
-open_1h  … open_4h             : real      // 4
-high_1h  … high_4h             : real      // 4
-low_1h   … low_4h              : real      // 4
-close_1h … close_4h            : real      // 4
 vwap_1h  … vwap_4h             : real      // 4
 total_volume_1h … _4h          : real      // 4
 realized_vol_bps_1h … _4h      : real      // 4
 avg_spread_bps_1h … _4h        : real      // 4
-ofi_imbalance_1h … _4h         : real      // 4   -> 40 scalar columns
+ofi_imbalance_1h … _4h         : real      // 4   -> 24 scalar columns
+change_pct_1h … change_pct_4h  : real      // 4   -> derived
 vap_1h   … vap_4h              : dynamic   // volume-at-price ladder (nested)
-dist_1h  … dist_4h             : dynamic   // return-distribution histogram (nested)
+poc_1h   … poc_4h              : real      // 4   -> 32 windowed columns
+computed_at                    : datetime  // when this row was computed
 ```
 
-### The 10 windowed metrics
+### The 6 windowed metrics
 
 | Metric | Type | Definition (over the window ending at `as_of`) | `analytics.py` analogue |
 |---|---|---|---|
 | `ticks` | long | tick count | `summary.ticks` |
-| `open` | real | first mid by time (`arg_min(mid, timestamp)`) | `summary.open` |
-| `high` | real | `max(mid)` | `summary.high` |
-| `low` | real | `min(mid)` | `summary.low` |
-| `close` | real | last mid by time (`arg_max(mid, timestamp)`) | `summary.close` |
 | `vwap` | real | `sum(mid*volume)/sum(volume)` | `summary.vwap` |
 | `total_volume` | real | `sum(volume)` | `summary.total_volume` |
 | `realized_vol_bps` | real | `sqrt(Σ ret² / duration_s) × 10000` | `summary.realized_vol_bps` |
 | `avg_spread_bps` | real | `avg(spread_bps)` | `summary.avg_spread` |
 | `ofi_imbalance` | real | `sum(signed_volume)/sum(abs(signed_volume))` ∈ [-1,1] | `microstructure.order_flow` |
 
-`change_pct`, `tick_rate`, `median_spread`, `p95_spread`, `depth_imbalance` are
-trivial functions of the 40 columns above and are derived **after** the pivot (see
-*Derived columns*), so they cost nothing to add without another table scan.
+`change_pct` is a trivial function of the window's OHLC and is derived **after**
+the pivot, so it costs nothing to add without another table scan.
 ---
 
 ## The KQL
@@ -171,10 +172,15 @@ let SCALARS =
     JOINED
     | summarize
         ticks           = count(),
-        open            = arg_min(mid, timestamp),
+        // `arg_min/arg_max(ExprToMinimize/Maximize, ExprToReturn, ...)`: the
+        // *criterion comes first*. `arg_min(timestamp, mid)` is then "the mid at
+        // the earliest tick" - the open - and `arg_max(timestamp, mid)` is the
+        // close. Handing them `(mid, timestamp)` instead returns a *datetime* in
+        // a `real` column, which is the same argument-order slip as the POC below.
+        open            = arg_min(timestamp, mid),
         high            = max(mid),
         low             = min(mid),
-        close           = arg_max(mid, timestamp),
+        close           = arg_max(timestamp, mid),
         vwap            = iif(sum(volume) > 0, sum(mid * volume) / sum(volume), avg(mid)),
         total_volume    = sum(volume),
         avg_spread_bps  = avg(spread_bps),
@@ -227,6 +233,13 @@ The volume-at-price ladder is a `dynamic` array per window. Build it on the same
 (70 %) and high-volume nodes are a light pass over this already-materialised
 ladder — see *Design notes*.
 
+`poc_*` is the **centre price of the bin holding the most volume**, i.e.
+`arg_max(vol, center)` — criterion first. The app marks that bin on the profile
+chart, so a `poc_*` that is not the busiest price bin (a volume, say, from
+swapped arguments) marks the wrong bar; the read path in `app/metrics.py`
+therefore takes the busiest bin of the ladder and keeps the stored column as a
+cross-check, not as the marker.
+
 ```kql
 let LADDER =
     JOINED
@@ -243,7 +256,11 @@ let LADDER =
       by symbolId, as_of, win, idx
     | order by idx asc
     | summarize ladder = make_list(pack("price", center, "volume", vol, "ticks", cnt)),
-                poc    = arg_max(center, vol)
+                // `arg_max(ExprToMaximize, ExprToReturn)`: maximize the *volume*
+                // of the bin and return its *centre price*. Swapping these two
+                // put a volume in the `poc_*` column, i.e. a point of control
+                // that was not the busiest price bin.
+                poc    = arg_max(vol, center)
       by symbolId, as_of, win
     // spread the four ladders into vap_1h … vap_4h (nested dynamic columns)
     | summarize vap_1h = take_anyif(ladder, win == "1h"), vap_2h = take_anyif(ladder, win == "2h"),
@@ -298,14 +315,21 @@ let Metrics5m() {
 accumulates versions. Either
 - `.set-or-append` only the newest slice and let the reader keep the latest per
   `as_of`, or
-- expose a deduplicating view the app reads:
+- expose a deduplicating view the app reads. The live table writes `computed_at`,
+  and the reader probes for it directly:
+
   ```kql
   .create function Metrics5mLatest() {
       metrics_5m
-      | summarize arg_max(ingested_at, *) by symbolId, as_of
+      | summarize arg_max(computed_at, *) by symbolId, as_of
   }
   ```
-  (add an `ingested_at` column in Stage 5 so "latest" is well-defined).
+
+  `kql.METRICS_STAMPS` names the stamps the app tries, in order
+  (`computed_at`, then the legacy `ingested_at`), and falls back to a plain
+  ordered scan when the table carries neither: a table appended once per stop has
+  nothing to dedupe. Only a *missing column* is retried — an auth or throttle
+  failure surfaces rather than being paid for three times over.
 
 A **materialized view** over `agg_dom` is *not* suitable here: the as-of self-join
 and `serialize`/window steps are outside the materialized-view operator subset. Use
@@ -320,26 +344,91 @@ a scheduled refresh (Fabric notebook / eventstream / update policy) that runs
 No code change is required to *produce* this — but the read path flips from "cache
 raw ticks, recompute" to "cache the finished metrics, look up":
 
-1. **Refresh job** (`app/refresh.py`, on `CACHE_REFRESH_MINUTES`): run
-   `Metrics5m()` and write the result per symbol into Redis, replacing today's
-   `axioma:ticks:<symbol>` Parquet blob with an `axioma:metrics:<symbol>` blob
-   (49 `as_of` rows × ~60 columns). Same TTL (`REDIS_TTL_SECONDS=2700`), same
-   clock cadence. A cache miss still falls back to running `Metrics5m()` directly,
-   preserving the existing "KQL failure sets `connected:false`, cache failure does
-   not" contract in `app/service.py`.
-2. **`/api/analytics`** (`app/service.py`): read the cached `metrics_5m` frame for
-   the symbol, pick the requested `as_of` row and the requested window column set
-   (`_1h/_2h/_3h/_4h`). The nested `vap_*` ladder is already in the blob, so the
-   volume-profile panel needs **no** KQL call and no re-binning.
-3. **Window control** (`app/static/index.html`): the 5–240 min slider collapses to
-   the four fixed choices 60/120/180/240. `window_min_minutes` / `window_max_minutes`
-   and the `/api/health` echoes stay the single source of the offered set;
-   `metrics_5m` always ships all four. The point-in-time field is unchanged (5-min
-   grid, 4 h).
+1. **Refresh job** (`app/refresh.py`, on `CACHE_REFRESH_MINUTES`): the cycle reads
+   `metrics_5m` and slides the grid per symbol into Redis — `metrics.refresh_symbol`,
+   called from the cache cycle in `app/service.py` and gated on `METRICS_SOURCE`.
+   It lands under `<prefix>:<database>:metrics_5m:metrics:<symbol>`, keyed apart
+   from the raw `agg_dom` ticks: the two hold different shapes under the same
+   symbol, so one key namespace for both would let a stale tick frame be read back
+   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (5-minute
+   slots, 15 s past the mark). A cache miss still falls back to reading
+   `metrics_5m` directly, preserving the existing "KQL failure sets
+   `connected:false`, cache failure does not" contract in `app/service.py`.
+2. **`/api/metrics`** (`app/main.py` → `app/metrics.py`): read the cached grid for
+   the symbol, pick the row for the requested `as_of` and the column set for the
+   requested window (`_1h/_2h/_3h/_4h`). One build produces the whole bundle — all
+   four windows and their `vap_*` ladders — and it is cached in turn under
+   `...:metrics_5m:metrics:report:<symbol>:<as_of>`, so switching window, or an
+   instant that resolves to the same stop, costs no rebuild. The ladder is already
+   in the blob, so the volume-profile panel needs **no** KQL call and no
+   re-binning. An `as_of` is resolved to the stop it falls inside rather than
+   refused, and an absent one means the newest stop.
+3. **`/api/analytics`** (`app/service.py`) stays on the raw tick path: the
+   tick-derived panels — OHLCV bars, the tick tape, the episode calendar, the
+   microstructure and distribution details — still come from `agg_dom`, because
+   they are not in the precomputed table.
+4. **The dashboard** (`app/static/app.js`) asks for both in one `analyse()` call,
+   for the same symbol, window and point in time, then lays the metrics bundle
+   over the report: its `summary` and its
+   `volume_profiles[selected_window_minutes]` replace the tick-derived ones under
+   the same key names, so the headline tiles and the volume-profile panel read
+   `metrics_5m` while the panels only the tick path can fill keep their values.
+   The point-in-time selector is anchored on `/api/health`'s
+   `metrics_latest_as_of`, so its default and its latest bound are the newest stop
+   the grid ships.
+5. **Window control** (`app/static/index.html`): the offered set collapses to the
+   four fixed choices 60/120/180/240, filled from `/api/health` so the control
+   cannot offer a span the table does not ship; `metrics_5m` always carries all
+   four. The point-in-time field is unchanged (5-min grid, 4 h).
 
-This keeps the existing guarantee intact: a page load never triggers a KQL scan,
-and the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly
-what the table covers.
+### One window per strip — why the scalars are not overlaid
+
+`metrics_5m` carries no `open`/`high`/`low`/`close` columns, so those tiles are fed
+by `/api/analytics`, which recomputes them from the tick stream. It used to also
+**overlay** the scalars it does carry onto that report:
+
+```js
+// REMOVED from app/static/app.js, analyse()
+for (const [k, v] of Object.entries(s5)) {
+  if (v !== null && v !== undefined) r.summary[k] = v;
+}
+```
+
+The null guard in that loop was load-bearing — a blanket spread let any column the
+table did not ship blank a tick-derived tile, which is how the dropped OHLC
+columns emptied **Last** and **High / Low**. But the deeper problem was the merge
+itself: **the two bundles answer different windows.** `metrics_5m` snaps `as_of`
+*down* to its 5-minute stop; the tick path ends at the instant actually asked for.
+So the same row could show
+
+| Tile | Shown | Implied |
+|---|---|---|
+| Ticks | 6,226 | — |
+| Ticks / min | 150.8 | **9,050** ticks/hour |
+| Avg gap | 397.8 ms | **9,050** ticks/hour |
+| Change | +0.14% | open ≈ 4201.55 |
+| Change (absolute) | 2.4300 | open = 4205.00 |
+
+`ticks` from one span sat beside `ticks_per_minute` from another, and the two units
+of the same move named two different opens. The dashboard now reads
+`analytics.summary` **whole** — one frame, so the tiles agree by construction — and
+overlays only the pre-binned volume-at-price ladder, which is where the
+precomputation actually pays.
+
+Two rules keep a split source from returning:
+
+- **One frame per strip.** `SCALAR_FIELDS` is what `/api/metrics` *reports*; it is
+  never merged into the tick-derived summary. Pinned by
+  `test_the_headline_tiles_read_one_window_not_two`.
+- **The tiles are arithmetic, not independent reads.**
+  `ticks_per_minute == ticks / span_minutes`, `change_pct == change / open * 100`.
+  Pinned by `test_summary_tiles_agree_with_each_other`, so a future overlay that
+  breaks an identity fails a test instead of rendering a contradiction.
+
+The guarantee that matters is intact: a page load never triggers a KQL scan, and
+the widest selectable combination (4 h timeline + 4 h window = 8 h) is exactly what
+the table covers. The tick path was already being read for the OHLC, tick tape and
+microstructure panels, so dropping the scalar overlay costs no extra work.
 
 ---
 
@@ -353,9 +442,11 @@ what the table covers.
 - **Value area (70 %) and high-volume nodes** are a sequential greedy expansion
   over the ladder — awkward in pure KQL. The ladder is fully materialised in
   `vap_*`, so compute these from the cached array in memory (a sort over ~40
-  bins), which is **not** a table re-scan. POC is already in KQL (`arg_max`). If
-  you insist on doing it in KQL, it needs an `mv-apply` running-accumulation pass
-  over the price-sorted ladder.
+  bins), which is **not** a table re-scan. POC is already in KQL
+  (`arg_max(vol, center)` — maximize volume, return the bin's centre price) and
+  the app re-derives it from the ladder anyway, so the two can never disagree
+  about which bar is marked. If you insist on doing the value area in KQL, it
+  needs an `mv-apply` running-accumulation pass over the price-sorted ladder.
 - **Mirrored / majority-crossed book.** `mid` and `abs(spread)` are swap-invariant,
   so this query does not need the per-frame mirror repair `frames.from_ticks` does;
   the directional signal stays the pipeline's own `imbalance`, which is

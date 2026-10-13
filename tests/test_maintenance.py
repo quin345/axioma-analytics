@@ -172,10 +172,25 @@ def test_the_header_says_last_update_not_latest_tick(client):
     assert 'id="lastTick"' in header and "Last update" in header
     assert "Latest tick" not in header
     # The alignment is stated in the tooltip, so it is not a surprise.
-    assert "30-minute refresh step" in header
-    # The cadence strip leads with the 30-minute grid, not 45.
-    assert "Data refreshes every 30 minutes" in page
-    assert "Data refreshes every 45 minutes" not in page
+    assert "5-minute refresh step" in header
+    # The cadence strip leads with the 5-minute grid, not 30.
+    assert "Data refreshes every 5 minutes" in page
+    assert "Data refreshes every 30 minutes" not in page
+
+
+def test_the_header_last_update_is_floored_to_the_5_minute_grid():
+    """`Last update` must show the 5-minute mark (14:47 -> 14:45), not the
+    raw feed second - and the proof-of-cache chip must exist."""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "fmt.fivemin(feed)" in js
+    # The visible badge is on the grid; only the hover tooltip keeps seconds.
+    assert "`Last update ${fmt.fivemin(feed)}" in js
+    assert 'id="fbCache"' in (STATIC / "index.html").read_text(encoding="utf-8")
+    # An open tab re-reads health every minute so the 5-minute cycle shows
+    # without a manual reload; a fresh cache stamp pulls the new window.
+    assert "setInterval(async () =>" in js
+    assert "cache_refreshed_at" in js
 
 
 def test_every_control_the_script_reads_exists_in_the_page():
@@ -324,3 +339,72 @@ def test_the_script_never_declares_a_helper_twice():
 
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert dupes == [], f"app.js declares these functions more than once: {dupes}"
+
+
+# ----------------------------------------------------------------------
+# The metrics source
+# ----------------------------------------------------------------------
+
+def test_the_headline_tiles_read_one_window_not_two():
+    """Every KPI tile must come from a single frame, so the strip cannot
+    contradict itself.
+
+    The strip used to overlay the scalars `metrics_5m` carries (`ticks`,
+    `change_pct`, `total_volume`, ...) onto the tick-derived summary while
+    their dependents (`ticks_per_minute`, `avg_interarrival_ms`, `change`)
+    kept the tick path's values. The two bundles answer *different windows* -
+    `metrics_5m` snaps `as_of` down to its 5-minute stop, the tick path ends at
+    the instant asked for - so the same row could show 6,226 ticks next to
+    150.8/min (9,050/hour), and +0.14% next to an absolute 2.4300.
+
+    `analytics.summary` derives every tile from one frame, so it is read whole
+    and the overlay is gone. Pin that no scalar is copied across.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
+
+    # No per-key copy of the metrics summary into the tick-derived one.
+    assert "Object.entries(s5)" not in body
+    assert "r.summary[k] = v" not in body
+    assert "r.summary.change = s5.close - s5.open" not in body
+    # The strip is rendered from the report's own summary, unmodified.
+    assert "renderKpis(r.summary, r.microstructure)" in body
+    # Both reads still go out together: the tick path feeds the panels only it
+    # can fill, and `metrics_5m` still supplies the pre-binned ladder.
+    assert "api(`/api/analytics?${p}`)" in body
+    assert "api(`/api/metrics?${mp}`)" in body
+    assert "Promise.all" in body
+    assert "m.volume_profiles" in body
+    assert "r.volume_profile = profile" in body
+
+
+def test_the_volume_profile_still_comes_from_the_precomputed_ladder():
+    """What `metrics_5m` genuinely saves is the volume-at-price ladder, which
+    ships pre-binned - so that overlay stays even though the scalars no longer
+    cross over.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("async function analyse()"):js.index("function renderPriceTag")]
+
+    assert "m.volume_profiles" in body
+    assert "r.volume_profile = profile" in body
+    assert "metricsFailed" in body          # a grid failure still banners
+
+
+def test_the_point_in_time_defaults_to_the_newest_metrics_stop():
+    """The selector's latest bound - and the first paint - are the newest
+    `metrics_5m` stop, so the headline numbers and the chosen point agree.
+
+    The timeline is anchored on `/api/health`'s `metrics_latest_as_of` rather
+    than the newest raw tick: a tick ahead of the grid would otherwise offer a
+    point the metrics lookup cannot answer. An empty field pins to that stop
+    instead of sitting blank while the API quietly resolves the newest row.
+    """
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert "buildTimeline(h.metrics_latest_as_of || h.latest_tick || undefined);" in js
+    assert "window.__asOf = timeline.latest;" in js
+    # The field shows the pinned stop, not an empty control.
+    assert "input.value = fmt.hm(new Date(timeline.latest).toISOString());" in js
+    # A point the user moved off the newest stop is kept; one still on it follows.
+    assert "window.__asOfLatest !== false" in js

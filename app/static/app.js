@@ -78,14 +78,14 @@ const fmt = {
     if (!p) return String(iso);
     return `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
   },
-  /** The update time on the 30-minute refresh grid: 14:47:12 -> 14:30:00.
+  /** The update time on the 5-minute refresh grid: 14:47:12 -> 14:45:00.
    * Floored, never rounded up, so "Last update" cannot sit in the future. */
-  halfhour: (iso) => {
+  fivemin: (iso) => {
     if (!iso) return "\u2013";
     const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit",
                                hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     if (!p) return String(iso);
-    const mm = Number(p.minute) < 30 ? "00" : "30";
+    const mm = String(Math.floor(Number(p.minute) / 5) * 5).padStart(2, "0");
     return `${p.year}-${p.month}-${p.day} ${p.hour}:${mm}`;
   },
   /** "HH:MM:SS" in the display zone, for the clock-grid badges. */
@@ -238,18 +238,21 @@ async function loadHealth() {
   // KQL query, which is a warning rather than a failure.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
   // The controls are configured from the API so they can never drift from what
-  // the service actually offers. The refresh cycle runs on the :00/:30 clock
-  // grid, so 30 minutes gives 05:00, 05:30, ...
-  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 30;
-  // The cadence strip: "Data refreshes every 30 minutes", mirrored from the API.
+  // the service actually offers. The refresh cycle runs just past the 5-minute
+  // clock marks (+15 s), so 05:00:15, 05:05:15, ...
+  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 5;
+  REFRESH_OFFSET_SECONDS = Number(h.cache_refresh_offset_seconds) || 0;
+  // The cadence strip: "Data refreshes every 5 minutes", mirrored from the API.
   set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
-  // The timeline is anchored on the newest row the feed has, so a symbol switch
-  // (which can change that row) re-anchors it; `buildTimeline` keeps whatever
-  // point the user picked rather than sliding it.
+  // The timeline is anchored on the newest `metrics_5m` stop - the point the
+  // headline metrics are served from - so the selector's latest bound is the
+  // last precomputed timestamp, not merely the last raw tick. It falls back to
+  // the newest tick when the grid is empty or the probe predates it, so the
+  // control still lands on something usable rather than an empty range.
   // The field may sit after the report, so anchor it on the newest data and
   // rebuild the earliest/latest bounds before renderFreshness paints the badge.
-  buildTimeline(h.latest_tick || undefined);
+  buildTimeline(h.metrics_latest_as_of || h.latest_tick || undefined);
   renderFreshness();
   return h;
 }
@@ -367,7 +370,9 @@ async function fillTimeframes(h) {
  * That is what keeps the oldest stop with the widest window inside the cached
  * window: span (4 h) + window (4 h) = the 8 hours Redis holds, exactly. The
  * chosen point is kept as an absolute instant, so refilling the controls or
- * newer data arriving does not silently move what the user selected.
+ * newer data arriving does not silently move a point the user picked; while the
+ * point still sits on the newest stop it follows the feed instead, which is how
+ * the control's default stays the latest `metrics_5m` timestamp.
  */
 const timeline = { span: 240, step: 5, earliest: null, latest: null };
 window.__asOf = null;        // chosen point in time, epoch ms
@@ -405,11 +410,14 @@ function buildTimeline(fromIso) {
 
   // The input is a HH:MM wall-clock time, so intersect the typed slot with the
   // 4-hour window and keep the stop grid: the field can never show a point the
-  // analysis does not honour. An empty field, or a first paint, follows the
-  // newest stop instead of inventing a midnight slot.
+  // analysis does not honour. A point the user moved off the newest stop stays
+  // put when newer data arrives; one still sitting on it follows the feed,
+  // which is what makes the selector's default the *latest* `metrics_5m`
+  // timestamp rather than whichever one happened to be newest at page load.
   const input = $("asOf");
   const typed = input ? String(input.value || "").trim() : "";
-  if (typed) {
+  const follows = window.__asOfLatest !== false;
+  if (typed && !follows) {
     // The typed HH:MM is a wall-clock time in the display zone: resolve it
     // against that zone's calendar day rather than UTC's.
     const { y, mo, d } = zoneDate(anchor);
@@ -423,6 +431,15 @@ function buildTimeline(fromIso) {
     window.__asOf = point;
     window.__asOfLatest = point === timeline.latest;
     input.value = fmt.hm(new Date(point).toISOString());
+  } else {
+    // Nothing chosen yet - a first paint - or the chosen point is still the
+    // newest stop. Pin the control to that stop, which for the `metrics_5m`
+    // path is the last precomputed timestamp, so the field shows the point the
+    // headline metrics were served for instead of sitting empty while the API
+    // silently resolves the newest row.
+    window.__asOf = timeline.latest;
+    window.__asOfLatest = true;
+    if (input) input.value = fmt.hm(new Date(timeline.latest).toISOString());
   }
   renderAsOf();
 }
@@ -479,24 +496,41 @@ function asOfIso() {
 
 /**
  * The aggregate window: how many minutes the analysis runs for, ending at the
- * chosen point in time. Every step from the minimum up to the maximum the API
- * publishes, built from the API so it can never offer more history than the
- * cache holds - a window change is always a free, in-memory narrowing.
+ * chosen point in time. The offered set is the fixed choices `/api/health`
+ * publishes (`window_choices_minutes`), which mirror the four trailing windows
+ * the precomputed `metrics_5m` table always ships - 1 h / 2 h / 3 h / 4 h - so
+ * the control can never offer more history than the table precomputes, and a
+ * window change is always a free, in-memory narrowing. When the API has not
+ * published the fixed set (an older cached payload), fall back to building the
+ * choices from the legacy `window_min_minutes`..`window_max_minutes` bounds.
  */
 function fillWindows(h) {
   const sel = $("windowMinutes");
   if (!sel) return;
-  const step = Math.max(1, Number(h && h.timeline_step_minutes) || 5);
-  const min = Math.max(1, Number(h && h.window_min_minutes) || 5);
-  const max = Math.max(min,
-    Number(h && h.window_max_minutes) || Number(h && h.lookback_minutes) || 240);
-  const choices = [];
-  for (let m = min; m <= max; m += step) choices.push(m);
-  if (choices[choices.length - 1] !== max) choices.push(max);
+  const choices = Array.isArray(h && h.window_choices_minutes)
+    ? h.window_choices_minutes
+        .map((m) => Number(m))
+        .filter((m) => Number.isFinite(m) && m > 0)
+    : [];
+  let opts = choices;
+  if (!opts.length) {
+    // Legacy fallback: every step from the minimum up to the maximum the API
+    // publishes, so it can never offer more history than the cache holds.
+    const step = Math.max(1, Number(h && h.timeline_step_minutes) || 5);
+    const min = Math.max(1, Number(h && h.window_min_minutes) || 5);
+    const max = Math.max(min,
+      Number(h && h.window_max_minutes) || Number(h && h.lookback_minutes) || 240);
+    opts = [];
+    for (let m = min; m <= max; m += step) opts.push(m);
+    if (opts[opts.length - 1] !== max) opts.push(max);
+  }
+  opts = [...new Set(opts)].sort((a, b) => a - b);
   const keep = Number(val("windowMinutes", 60));
-  sel.innerHTML = choices
+  sel.innerHTML = opts
     .map((m) => `<option value="${m}">${esc(durationLabel(m))}</option>`).join("");
-  sel.value = String(choices.includes(keep) ? keep : (choices.includes(60) ? 60 : max));
+  // Keep the current choice if it is still offered, else default to 1 h (60),
+  // else the widest on offer.
+  sel.value = String(opts.includes(keep) ? keep : (opts.includes(60) ? 60 : opts[opts.length - 1]));
 }
 
 
@@ -529,7 +563,10 @@ function renderKpis(s, m) {
 /* ---------------- data freshness ---------------- */
 
 /** Ingest cadence for the aggregate DOM table, in minutes. */
-let REFRESH_MINUTES = 30;
+let REFRESH_MINUTES = 5;
+
+/** Delay past each clock mark before the cycle fires, in seconds. */
+let REFRESH_OFFSET_SECONDS = 15;
 
 /** Full timestamp in the display zone: "2026-10-05 11:46:10". */
 function stamp(iso) {
@@ -551,20 +588,23 @@ function age(ms) {
 }
 
 /**
- * Wall-clock time the next ingest is expected: the first clock mark the
- * cycle runs on (:00/:30 for a 30 minute interval) strictly after now, in
+ * Wall-clock time the next ingest is expected: the first clock slot the
+ * cycle runs on (5-minute marks plus the offset, e.g. :00:15, :05:15)
+ * strictly after now, in
  * local time. The cycle is scheduled against the local wall clock, so this
  * mirrors that; two refreshes separated by the full interval can never be
- * missed, and the badge never hints at a mark that has already passed.
+ * missed, and the badge never hints at a slot that has already passed.
  */
-function nextRefresh(intervalMinutes) {
+function nextRefresh(intervalMinutes, offsetSeconds) {
   const interval = Math.max(1, Number(intervalMinutes) || REFRESH_MINUTES) * 60_000;
+  const offset = ((Number(offsetSeconds ?? REFRESH_OFFSET_SECONDS) || 0) * 1000) % interval;
   const now = new Date();
   const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-  const elapsed = now.getTime() - midnight.getTime();
-  // The cycle lands on the next full interval mark, never one exactly at now:
-  // waiting a full interval avoids double-firing and keeps the grid aligned.
-  const slot = Math.floor(elapsed / interval) * interval + interval;
+  const elapsed = now.getTime() - midnight.getTime() - offset;
+  // The cycle lands on the next full interval slot plus the offset, never one
+  // exactly at now: waiting a full interval avoids double-firing and keeps
+  // the grid aligned.
+  const slot = Math.floor(elapsed / interval) * interval + interval + offset;
   return new Date(midnight.getTime() + slot);
 }
 
@@ -593,25 +633,30 @@ function renderFreshness(report) {
 
   // Only touch className when a class is supplied (see set() above).
   set("lastTick",
-      feed ? `Last update ${fmt.hm(feed)} ${tzAbbr()}` : "Last update unavailable");
+      feed ? `Last update ${fmt.fivemin(feed)} ${tzAbbr()}` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
 
   // The strip reports the loaded window; without a report there is nothing new
-  // to say, so a health refresh leaves what the last analysis wrote alone.
+  // to say about the window itself, but the cycle stamps (next refresh, cache
+  // write) are about the feed and must move on a health-only poll too -
+  // otherwise an open tab never shows the 5-minute updates.
+  const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
+  set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
+  // Proof the Redis cache is moving: when the refresh cycle last finished,
+  // floored to the 5-minute grid it runs on (e.g. 14:47:12 -> 14:45).
+  const cacheStamp = h.cache_refreshed_at || null;
+  set("fbCache", cacheStamp ? `${fmt.fivemin(cacheStamp)} ${tzAbbr()}` : "\u2013",
+      cacheStamp ? "ok" : "");
   if (!report) return;
   set("fbLastTick", `${fmt.hm(windowLatest)} ${tzAbbr()}`,
       ageMs !== null && ageMs > REFRESH_MINUTES * 60_000 ? "warn" : "ok");
 
-  // Next refresh: the next clock slot the ingest cycle runs on, strictly after
-  // now - minutes past the hour are snapped to :00/:30 regardless of the feed.
-  const next = nextRefresh(REFRESH_MINUTES);
-  set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
-    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, on the :00/:30 refresh slots.`;
+    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, just past the 5-minute marks.`;
   }
 }
 
@@ -717,19 +762,18 @@ function renderCharts(r) {
                 y: { grid: { color: "rgba(35,45,66,.55)" } } } }),
   });
 
-  const dd = r.drawdown.series || [];
-  draw("cDD", {
+  const chg = r.price_change.series || [];
+  draw("cChg", {
     type: "line",
-    data: { labels: dd.map((p) => fmt.time(p.t)),
-      datasets: [{ data: dd.map((p) => p.dd), borderColor: "#ef4444", borderWidth: 1.3, pointRadius: 0, fill: true,
-        backgroundColor: "rgba(239,68,68,.14)" }] },
+    data: { labels: chg.map((p) => fmt.time(p.t)),
+      datasets: [{ data: chg.map((p) => p.pct), borderColor: "#4c9aff", borderWidth: 1.3, pointRadius: 0,
+        fill: { target: "origin" }, backgroundColor: "rgba(76,154,255,.14)" }] },
     options: baseOpts({ scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 5 } },
-      y: { max: 0, grid: { color: "rgba(35,45,66,.55)" }, ticks: { callback: (v) => `${fmt.n(v, 1)}%` } } } }),
+      y: { grid: { color: "rgba(35,45,66,.55)" }, ticks: { callback: (v) => `${fmt.n(v, 1)}%` } } } }),
   });
-  const ep = (r.drawdown.episodes || [])[0];
-  $("dd-note").textContent = r.drawdown.max_drawdown_pct === null ? "" :
-    `Max drawdown ${fmt.n(r.drawdown.max_drawdown_pct, 2)}%` +
-    (ep ? ` \u00b7 worst trough ${fmt.time(ep.trough_ts)}` : "");
+  $("chg-note").textContent = r.price_change.change_pct === null ? "" :
+    `Change since window start ${fmt.pct(r.price_change.change_pct, 2)}` +
+    (r.price_change.reference_ts ? ` \u00b7 reference ${fmt.time(r.price_change.reference_ts)}` : "");
 const sp = r.microstructure.spread || [];
   draw("cSpread", {
     type: "line",
@@ -1006,20 +1050,20 @@ const DETAILS = {
       ]);
   },
 
-  dd: (r) => {
-    const d = r.drawdown || {};
-    const eps = d.episodes || [];
-    const rows = eps.map((e, i) => [
-      `#${i + 1} \u00b7 ${fmt.pct(e.depth_pct, 2)}`,
-      `${fmt.time(e.peak_ts)} \u2192 ${fmt.time(e.trough_ts)}` +
-        (e.recovered_ts ? ` \u2192 ${fmt.time(e.recovered_ts)}` : " \u00b7 unrecovered"),
-    ]);
-    return block("Worst episodes",
-      "Drawdown is measured from the running peak. The deepest episodes are listed " +
-      "first; an unrecovered trough means the window ends below its prior high.", [
-        ["Max drawdown", fmt.pct(d.max_drawdown_pct, 2)],
-        ["Episodes", fmt.int(eps.length)],
-      ]) + (rows.length ? block("Episode timeline", null, rows) : "");
+  chg: (r) => {
+    const c = r.price_change || {};
+    const pts = c.series || [];
+    return block("Reference point",
+      "Every reading is the mid price's percent change from one fixed baseline: " +
+      "the first tick of the window, so the path starts at 0% and moves either " +
+      "side of it. Nothing is measured against a running high, so a recovery to " +
+      "the opening price reads as 0% however far the path wandered in between.", [
+        ["Reference", `${fmt.px(c.reference_mid)} \u00b7 ${esc(fmt.time(c.reference_ts))}`],
+        ["Change since reference", fmt.pct(c.change_pct, 2)],
+        ["Highest", `${fmt.pct(c.max_pct, 2)} \u00b7 ${esc(fmt.time(c.max_ts))}`],
+        ["Lowest", `${fmt.pct(c.min_pct, 2)} \u00b7 ${esc(fmt.time(c.min_ts))}`],
+        ["Points plotted", fmt.int(pts.length)],
+      ]);
   },
 
   spread: (r) => {
@@ -1349,25 +1393,89 @@ function syncCalendarDetail() {
 
 /* ---------------- orchestration ---------------- */
 
+/**
+ * Run one analysis. Two reads go out together:
+ *
+ * - `/api/analytics` - the tick-derived panels: OHLCV bars, tick tape, the
+ *   episode calendar and the microstructure/distribution details.
+ * - `/api/metrics` - every headline metric and the volume profile, read from
+ *   the precomputed `metrics_5m` grid (a Redis lookup, not a re-scan).
+ *
+ * Both are asked for the same symbol, window span and point in time. The
+ * metrics bundle is then laid over the report: the two agree on the key names
+ * (`ticks`, OHLC, `vwap`, `change_pct`, `total_volume`, `realized_vol_bps`,
+ * `avg_spread`, `annualised_vol_pct`) and on the volume-profile shape, so the
+ * dashboard reads `metrics_5m` without any panel knowing which source it got.
+ * Keys the table does not carry (durations, percentiles, trade counts) keep
+ * their tick-derived values.
+ *
+ * When the metrics grid cannot be read the tick-derived summary stands in and
+ * the banner says so, rather than blanking a page whose other panels are fine.
+ */
 async function analyse() {
   const btn = $("run");
   if (btn) btn.disabled = true;
   setLoading(true);
   try {
+    // The chosen point in time. Absent until the timeline is built, which both
+    // APIs read as "the newest row" / "the newest stop".
+    const point = asOfIso();
+    // How wide the aggregate window runs ending at the chosen point; the API
+    // clamps it to the cached window anyway, so a stale page or a
+    // hand-edited URL still returns data rather than a 422.
+    const windowMinutes = val("windowMinutes", 60) || 60;
     const p = new URLSearchParams({
       symbol: val("symbol"),
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
-      // How wide the aggregate window runs ending at the chosen point; the API
-      // clamps it to the cached window anyway, so a stale page or a
-      // hand-edited URL still returns data rather than a 422.
-      window_minutes: val("windowMinutes", 60) || 60,
-      // The chosen point in time. Absent until the timeline is built, which the
-      // API reads as "up to the newest row".
-      ...(asOfIso() ? { as_of: asOfIso() } : {}),
+      window_minutes: windowMinutes,
+      ...(point ? { as_of: point } : {}),
     });
-    const r = await api(`/api/analytics?${p}`);
+    // The metrics read needs only what identifies one row of the grid: the
+    // symbol, the span the `metrics_5m` table ships a column set for, and the
+    // point in time.
+    const mp = new URLSearchParams({
+      symbol: val("symbol"),
+      window_minutes: windowMinutes,
+      ...(point ? { as_of: point } : {}),
+    });
+    // The metrics bundle failing must not take the tick panels down with it, so
+    // it is caught and reported while the report still renders.
+    let metricsFailed = null;
+    const [r, m] = await Promise.all([
+      api(`/api/analytics?${p}`),
+      api(`/api/metrics?${mp}`).catch((err) => { metricsFailed = err; return null; }),
+    ]);
+    window.__lastReport = r;
+    window.__metrics = m;
+    if (m) {
+      // The headline tiles are NOT overlaid from `metrics_5m`.
+      //
+      // Every tile on the strip is a function of the same tick frame: `ticks`,
+      // `ticks_per_minute` and `avg_interarrival_ms` are three views of one
+      // count over one span, and `change` / `change_pct` are the same move in
+      // two units. Overlaying the scalars the table carries (`ticks`,
+      // `change_pct`, `total_volume`, `realized_vol_bps`, `avg_spread`) while
+      // their dependents kept their tick-derived values broke that: the two
+      // bundles answer *different windows*, because `metrics_5m` snaps `as_of`
+      // down to its 5-minute stop while the tick path ends at the instant asked
+      // for. A strip showing `ticks` from one span beside `ticks_per_minute`
+      // from another reported 6,226 ticks next to 150.8/min (9,050 ticks/hour),
+      // and +0.14% next to an absolute 2.4300 whose own open is 4205.00.
+      //
+      // `analytics.summary` already derives every tile from one frame, so
+      // reading it whole is consistent by construction - and costs nothing
+      // extra: `/api/analytics` is fetched regardless for the OHLC, tick tape
+      // and microstructure panels, so the summary is computed either way.
+      // What `metrics_5m` genuinely saves is the volume-at-price ladder, which
+      // ships pre-binned; that overlay stays.
+      const profile = (m.volume_profiles || {})[String(m.selected_window_minutes)];
+      if (profile) r.volume_profile = profile;
+      r.metrics_source = (m.meta || {}).source || null;
+    } else if (metricsFailed) {
+      banner([`Headline metrics could not be read from metrics_5m: ${metricsFailed.message}`]);
+    }
     renderKpis(r.summary, r.microstructure);
     renderCharts(r);
     renderTicks(r.ticks);
@@ -1453,4 +1561,24 @@ on("calToday", "click", () => {
 document.addEventListener("DOMContentLoaded", () => {
   wireCards();
   init();
+  // Re-read /api/health every minute so an open tab picks up each 5-minute
+  // refresh cycle: the header "Last update", the "Next refresh" and
+  // "Cache updated" stamps all move without a manual reload. Health-only:
+  // the loaded charts are left alone until the user re-runs.
+  setInterval(async () => {
+    try {
+      const h = window.__health || {};
+      const prevCache = h.cache_refreshed_at || null;
+      const prevTick = h.latest_tick || null;
+      const fresh = await loadHealth();
+      renderFreshness(null);
+      // The cache just turned over: pull the new window automatically so the
+      // charts follow the feed instead of sitting on the old one.
+      if (fresh.cache_refreshed_at && fresh.cache_refreshed_at !== prevCache) {
+        await analyse();
+      } else if (fresh.latest_tick && fresh.latest_tick !== prevTick) {
+        renderFreshness(window.__lastReport || null);
+      }
+    } catch (err) { bannerErr(err.message); }
+  }, 60_000);
 });

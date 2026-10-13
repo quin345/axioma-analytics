@@ -60,6 +60,33 @@ class _FakeClient:
         return _Result(self.results.pop(0))
 
 
+class _StampProbingClient(_FakeClient):
+    """Rejects `computed_at`, then `ingested_at`, then serves the plain scan.
+
+    Reproduces a table carrying neither stamp column, so the read walks the
+    whole probe list the way a table built to the original contract does.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([[{"as_of": pd.Timestamp("2026-10-12T00:45:00Z")}]])
+        self.served = False
+
+    def execute(self, database: str, csl: str, props=None):
+        self.calls.append((database, csl, props))
+        if "arg_max(computed_at" in csl:
+            raise KustoError(
+                "Semantic error: Failed to resolve column or scalar "
+                "expression named 'computed_at'"
+            )
+        if "arg_max(ingested_at" in csl:
+            raise KustoError(
+                "Semantic error: Failed to resolve column or scalar "
+                "expression named 'ingested_at'"
+            )
+        self.served = True
+        return _Result(self.results[0])
+
+
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
     """Credential selection from a known-empty environment, then restore.
@@ -253,6 +280,64 @@ def test_fetch_ticks_without_a_symbol_does_not_filter(settings):
     client = _FakeClient([[{"timestamp": pd.Timestamp("2026-10-08T10:00:00Z")}]])
     kql.fetch_ticks(client, settings=settings)
     assert _param(client.calls[0][2], "sym") == ""
+
+
+# --------------------------------------------------------------------------
+# fetch_metrics()
+# --------------------------------------------------------------------------
+
+def _metrics_settings(settings: Settings) -> Settings:
+    return Settings(**{**settings.__dict__, "metrics_table": "metrics_5m"})
+
+
+def test_fetch_metrics_dedupes_on_computed_at(settings):
+    """The table the dashboard reads stamps each row `computed_at`, so the newest
+    version of a stop is the newest computation of it."""
+    client = _FakeClient([[{"as_of": pd.Timestamp("2026-10-12T00:45:00Z")}]])
+    kql.fetch_metrics(client, symbol="41", settings=_metrics_settings(settings))
+
+    csl = client.calls[0][1]
+    assert "summarize arg_max(computed_at, *) by symbolId, as_of" in csl
+    assert "project-away computed_at" in csl
+    assert "order by symbolId asc, as_of asc" in csl
+    # One read: the first stamp resolved, so there was nothing to fall back to.
+    assert len(client.calls) == 1
+
+
+def test_fetch_metrics_falls_back_to_the_older_stamp_then_to_a_plain_scan(settings):
+    """A table built to the previous contract has no `computed_at`. That is a
+    schema difference, not an outage, so the read retries rather than failing."""
+    client = _StampProbingClient()
+    df = kql.fetch_metrics(client, symbol="41", settings=_metrics_settings(settings))
+
+    assert "arg_max(ingested_at, *)" in client.calls[1][1]
+    # With no stamp column at all there is nothing to dedupe: a plain ordered
+    # scan is the correct read, and it must still return rows.
+    assert "arg_max" not in client.calls[2][1]
+    assert "order by symbolId asc, as_of asc" in client.calls[2][1]
+    assert client.served
+    assert len(client.calls) == 3          # no further probing
+    assert not df.empty
+
+
+def test_fetch_metrics_a_real_failure_is_not_retried(settings):
+    """Only a missing column is worth retrying. An auth or throttle failure must
+    surface, or a genuine outage would be paid for three times over."""
+    client = _FakeClient(error=KustoError("Forbidden (403-Forbidden)"))
+    with pytest.raises(DataSourceError, match="KQL query failed"):
+        kql.fetch_metrics(client, symbol="41", settings=_metrics_settings(settings))
+
+    assert len(client.calls) == 1
+
+
+def test_fetch_metrics_narrows_to_the_stops_at_or_after_start(settings):
+    """How the refresh cycle pulls only the newest slice of the grid."""
+    client = _FakeClient([[{"as_of": pd.Timestamp("2026-10-12T00:45:00Z")}]])
+    kql.fetch_metrics(client, symbol="41", start="2026-10-12T00:40:00+00:00",
+                      settings=_metrics_settings(settings))
+
+    assert "| where isnull(start) or as_of >= start" in client.calls[0][1]
+    assert _param(client.calls[0][2], "start") == "2026-10-12T00:40:00+00:00"
 
 
 # --------------------------------------------------------------------------

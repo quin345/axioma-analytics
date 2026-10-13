@@ -64,7 +64,8 @@ def main() -> None:
     cache = (f"{settings.redis_host}:{settings.redis_port}"
              if settings.redis_configured else "not configured - reading KQL per request")
     print(f"  Cache       : {cache}, window {settings.cache_lookback_hours} h")
-    cadence = (f"every {settings.cache_refresh_minutes} min on the clock (:00/:30)"
+    cadence = (f"every {settings.cache_refresh_minutes} min on the clock "
+               f"(+{settings.cache_refresh_offset_seconds:g}s offset)"
                if settings.cache_refresh_seconds else "off - cached on demand")
     print(f"  Refresh     : {cadence}\n")
     uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload)

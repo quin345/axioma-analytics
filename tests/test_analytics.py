@@ -134,10 +134,36 @@ def test_return_distribution_stats(frame):
     assert 0.0 <= d["stats"]["bullish_ratio"] <= 1.0
 
 
-def test_drawdown_is_non_positive(frame):
-    dd = analytics.drawdown(frame)
-    assert dd["max_drawdown_pct"] <= 0
-    assert all(p["dd"] <= 0 for p in dd["series"])
+def test_price_change_is_anchored_on_the_window_start(frame):
+    """The path is percent change from one fixed baseline, so the first point
+    is 0% and the last equals the reported change."""
+    c = analytics.price_change(frame)
+    assert c["reference_mid"] == pytest.approx(float(frame["mid"].iloc[0]))
+    assert c["change_pct"] == pytest.approx(
+        (float(frame["mid"].iloc[-1]) / float(frame["mid"].iloc[0]) - 1) * 100
+    )
+    assert c["min_pct"] <= c["max_pct"]
+    assert c["series"]
+    # No reading can be pinned to a running high: a fall below the opening
+    # price is simply negative, which a drawdown path could never show.
+    assert all(p["pct"] >= -100.0 for p in c["series"])
+
+
+def test_price_change_is_empty_for_a_flat_frame():
+    empty = analytics.price_change(pd.DataFrame())
+    assert empty["series"] == [] and empty["change_pct"] is None
+
+
+def test_price_change_survives_a_zero_reference():
+    """A zero opening mid makes the percentage undefined; it must not leak
+    inf/NaN into the payload."""
+    ts = pd.date_range("2026-01-01", periods=5, freq="1s", tz="UTC")
+    flat = pd.DataFrame({"ts": ts, "symbol": "X", "bid": 0.0, "ask": 0.0,
+                         "mid": [0.0, 1.0, 2.0, 1.0, 0.0], "volume": 1.0,
+                         "spread": 0.0, "spread_bps": 0.0})
+    out = analytics.price_change(flat)
+    json.dumps(out, allow_nan=False)
+    assert out["change_pct"] is None
 
 
 def test_behaviour_bounds(frame):
@@ -154,11 +180,38 @@ def test_hourly_profile_covers_buckets(frame):
 
 # ---------- reporting ----------
 
+def test_summary_tiles_agree_with_each_other(frame):
+    """The KPI strip reads one summary, so its tiles cannot contradict.
+
+    Every tile is a different view of the same frame: `ticks`,
+    `ticks_per_minute` and `avg_interarrival_ms` are one count over one span,
+    and `change` / `change_pct` are one move in two units. Overlaying some of
+    them from `metrics_5m` - a *different* window, because the table snaps
+    `as_of` to its 5-minute stop - left the strip reporting 6,226 ticks beside
+    150.8/min (9,050/hour) and +0.14% beside an absolute 2.4300. Pin the
+    arithmetic so a split source cannot return.
+    """
+    s = analytics.summary(frame)
+    span_min = s["duration_seconds"] / 60
+
+    # One count, three views.
+    assert s["ticks_per_minute"] == pytest.approx(s["ticks"] / span_min, rel=1e-6)
+    # The mean gap spans n-1 intervals between n ticks, not n.
+    assert s["avg_interarrival_ms"] == pytest.approx(
+        s["duration_seconds"] * 1000 / (s["ticks"] - 1), rel=1e-6
+    )
+    # One move, two units: the percentage is the absolute over the open.
+    assert s["change"] == pytest.approx(s["close"] - s["open"], rel=1e-9)
+    assert s["change_pct"] == pytest.approx(s["change"] / s["open"] * 100, rel=1e-9)
+    # The extremes bracket the close the "Last" tile shows.
+    assert s["low"] <= s["close"] <= s["high"]
+
+
 def test_build_report_is_json_serialisable(frame):
     report = analytics.build_report(frame, timeframe="1m", window=25)
     json.dumps(report)  # must not raise
     assert set(report) >= {"summary", "ohlcv", "microstructure", "volume_profile",
-                           "rolling", "distribution", "drawdown", "behaviour", "hourly"}
+                           "rolling", "distribution", "price_change", "behaviour", "hourly"}
 
 
 def test_no_nan_leaks_into_report(frame):

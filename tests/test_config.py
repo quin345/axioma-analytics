@@ -17,10 +17,13 @@ from app.config import Settings
 #: defaults rather than about whatever this machine's ``.env`` happens to set.
 _ENV_KEYS = (
     "KQL_ENDPOINT_PROD", "KQL_ENDPOINT", "KQL_DATABASE", "KQL_TABLE",
+    "METRICS_TABLE", "METRICS_SOURCE",
     "KQL_LAG_MINUTES", "SYMBOL_TABLE", "DEFAULT_SYMBOL", "MAX_TICKS",
     "REDIS_HOST", "REDIS_PORT", "REDIS_SSL", "REDIS_DB", "REDIS_TIMEOUT",
     "REDIS_KEY_PREFIX", "REDIS_TTL_SECONDS", "CACHE_LOOKBACK_HOURS",
-    "CACHE_REFRESH_MINUTES",
+    "CACHE_REFRESH_MINUTES", "CACHE_REFRESH_OFFSET_SECONDS",
+    "TIMELINE_MINUTES", "TIMELINE_STEP_MINUTES",
+    "WINDOW_CHOICES_MINUTES", "WINDOW_MIN_MINUTES", "WINDOW_MAX_MINUTES",
     "FABRIC_TENANT_ID", "FABRIC_CLIENT_ID", "FABRIC_CLIENT_SECRET",
     "FABRIC_MANAGED_IDENTITY", "FABRIC_MANAGED_IDENTITY_CLIENT_ID",
     "MAINTENANCE_MODE",
@@ -49,6 +52,37 @@ def test_defaults_point_at_the_kql_database():
 def test_defaults_point_at_the_kql_dimension():
     """The instrument dimension lives in the same KQL database, not in SQL."""
     assert Settings().symbol_table == "symbols_icmarkets"
+
+
+def test_defaults_point_at_the_precomputed_metrics_table():
+    """The headline metrics are served from this table, so its name has to be
+    configurable without a deploy - the metrics repo owns it, not this app."""
+    assert Settings().metrics_table == "metrics_5m"
+
+
+def test_the_metrics_source_defaults_to_the_precomputed_table():
+    s = Settings()
+
+    assert s.metrics_source == "metrics_5m"
+    assert s.use_metrics_5m is True
+
+
+def test_the_metrics_source_can_fall_back_to_the_tick_path(monkeypatch):
+    """A rollback switch: a stalled or half-appended `metrics_5m` must not leave
+    the dashboard with no headline metrics at all."""
+    monkeypatch.setenv("METRICS_SOURCE", "ticks")
+    assert Settings().use_metrics_5m is False
+
+    monkeypatch.setenv("METRICS_SOURCE", "Metrics_5M")     # case-insensitive
+    assert Settings().use_metrics_5m is True
+
+
+def test_an_unrecognised_metrics_source_is_the_tick_path(monkeypatch):
+    """An unknown value means the operator meant to opt out; guessing the table
+    would be the worse failure."""
+    monkeypatch.setenv("METRICS_SOURCE", "warehouse")
+    assert Settings().metrics_source == "warehouse"
+    assert Settings().use_metrics_5m is False
 
 
 def test_default_symbol_is_gold():
@@ -156,7 +190,36 @@ def test_the_widest_window_is_clamped_to_the_cache(monkeypatch):
 def test_the_point_in_time_controls_default() -> None:
     s = Settings()
     assert (s.timeline_minutes, s.timeline_step_minutes) == (240, 5)
-    assert (s.window_min_minutes, s.window_max_minutes) == (5, 240)
+    # The aggregate window is a small fixed set that mirrors the four trailing
+    # windows the precomputed `metrics_5m` table ships: 1 h / 2 h / 3 h / 4 h.
+    assert s.window_choices == (60, 120, 180, 240)
+    assert (s.window_min_minutes, s.window_max_minutes) == (60, 240)
+
+
+def test_the_window_choices_are_overridable_and_normalised(monkeypatch):
+    """`WINDOW_CHOICES_MINUTES` is de-duped and sorted, so a stray config value
+    cannot leave the UI with duplicate or out-of-order options."""
+    monkeypatch.setenv("WINDOW_CHOICES_MINUTES", "240, 60, 60, 180, 120, bad")
+    assert Settings().window_choices == (60, 120, 180, 240)
+
+
+def test_the_window_choices_fall_back_to_the_default_when_unparseable(monkeypatch):
+    monkeypatch.setenv("WINDOW_CHOICES_MINUTES", "not-numbers")
+    assert Settings().window_choices == (60, 120, 180, 240)
+
+
+def test_a_window_choice_wider_than_the_cache_is_dropped(monkeypatch):
+    """A fixed choice the cache cannot serve is dropped, not offered."""
+    s = Settings(cache_lookback_hours=3)  # 180 minutes
+    assert s.window_choices == (60, 120, 180)
+    assert all(m <= s.cache_lookback_minutes for m in s.window_choices)
+
+
+def test_the_window_choices_are_never_empty():
+    """If every choice is wider than the cache, the cache window itself is
+    offered so the control always has a usable value."""
+    s = Settings(cache_lookback_hours=1)  # 60 minutes
+    assert s.window_choices == (60,)
 
 
 def test_the_point_in_time_controls_are_overridable(monkeypatch):
@@ -195,14 +258,24 @@ def test_cache_window_is_never_degenerate(monkeypatch):
 
 
 def test_cache_ttl_covers_one_ingestion_interval():
-    """45 minutes: long enough to be useful, short enough not to outlive data."""
-    assert Settings().cache_ttl_seconds == 2700
+    """450 s (7.5 min): 1.5 refresh cycles, so one miss still leaves data."""
+    assert Settings().cache_ttl_seconds == 450
 
 
-def test_the_refresh_cycle_runs_every_half_hour():
+def test_the_refresh_cycle_runs_every_five_minutes():
     s = Settings()
-    assert s.cache_refresh_minutes == 30
-    assert s.cache_refresh_seconds == 1800
+    assert s.cache_refresh_minutes == 5
+    assert s.cache_refresh_seconds == 300
+
+
+def test_the_refresh_cycle_fires_just_past_the_mark():
+    s = Settings()
+    assert s.cache_refresh_offset_seconds == 15
+
+
+def test_the_refresh_offset_is_overridable(monkeypatch):
+    monkeypatch.setenv("CACHE_REFRESH_OFFSET_SECONDS", "30")
+    assert Settings().cache_refresh_offset_seconds == 30
 
 
 def test_the_refresh_cycle_is_overridable(monkeypatch):
@@ -217,7 +290,7 @@ def test_the_refresh_cycle_can_be_switched_off(monkeypatch):
 
 
 def test_the_ttl_outlives_a_refresh_cycle():
-    """A missed cycle must not empty the cache: 2700 s covers 1.5 cycles."""
+    """A missed cycle must not empty the cache: 450 s covers 1.5 cycles."""
     s = Settings()
     assert s.cache_ttl_seconds > s.cache_refresh_seconds
     assert s.cache_ttl_seconds >= s.cache_refresh_seconds * 1.5

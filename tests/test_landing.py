@@ -72,7 +72,7 @@ def test_page_explains_what_the_app_measures():
         "What it measures",
         "order-flow imbalance",
         "volume-at-price",
-        "drawdown",
+        "price change",
         "autocorrelation",
         "resampled bars",
         "asset class",

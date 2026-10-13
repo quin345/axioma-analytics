@@ -21,6 +21,9 @@ TIMEFRAMES: dict[str, str] = {
     "30m": "30min", "1h": "1h", "2h": "2h", "4h": "4h", "1d": "1D",
 }
 
+#: The share of a volume profile's volume the value area spans.
+VALUE_AREA_SHARE = 0.70
+
 
 def _f(x: Any, default: float | None = None) -> float | None:
     """JSON-safe float: NaN/Inf become None."""
@@ -310,18 +313,8 @@ def volume_profile(df: pd.DataFrame, *, bins: int = 60) -> dict:
     # Point of control = busiest price; value area = 70% of total volume.
     poc_i = int(np.argmax(vol.to_numpy()))
     total = float(vol.sum())
-    va_lo = va_hi = None
-    if total > 0:
-        lo_i = hi_i = poc_i
-        acc = float(vol.iloc[poc_i])
-        while acc < 0.70 * total and (lo_i > 0 or hi_i < len(vol) - 1):
-            down = float(vol.iloc[lo_i - 1]) if lo_i > 0 else -1.0
-            up = float(vol.iloc[hi_i + 1]) if hi_i < len(vol) - 1 else -1.0
-            if up >= down:
-                hi_i += 1; acc += up
-            else:
-                lo_i -= 1; acc += down
-        va_lo, va_hi = _f(labels[lo_i]), _f(labels[hi_i])
+    va = value_area(profile, poc_i) if total > 0 else None
+    va_lo, va_hi = va if va is not None else (None, None)
 
     # The ladder reads top-to-bottom from the highest price, so the bins are
     # returned in descending price order. Point-of-control, value area and the
@@ -335,6 +328,42 @@ def volume_profile(df: pd.DataFrame, *, bins: int = 60) -> dict:
             _high_volume_nodes(profile), key=lambda n: n["price"], reverse=True
         ),
     }
+
+
+def value_area(profile: list[dict], poc_index: int) -> tuple[float | None, float | None] | None:
+    """The 70 % value area around the point of control, as (low, high) prices.
+
+    Greedy expansion from the POC outwards: at each step the busier of the two
+    neighbouring bins is absorbed, until `VALUE_AREA_SHARE` of the volume is
+    covered or the ladder runs out. The bins must be in **ascending** price
+    order, so adjacency means anything - `volume_profile` inverts them only
+    after this has run.
+
+    Shared with `app.metrics`, which runs it over the ladder `metrics_5m`
+    already materialised. Doing it here rather than in KQL keeps the two paths
+    byte-identical: a profile read from the table and one binned in pandas must
+    report the same value area, or the panel would change shape with the data
+    source. That is a sort over ~40 bins, not a table re-scan.
+    """
+    if not profile or not 0 <= poc_index < len(profile):
+        return None
+    vols = [float(p["volume"]) for p in profile]
+    total = float(sum(vols))
+    if total <= 0:
+        return None
+
+    lo_i = hi_i = poc_index
+    acc = vols[poc_index]
+    while acc < VALUE_AREA_SHARE * total and (lo_i > 0 or hi_i < len(vols) - 1):
+        down = vols[lo_i - 1] if lo_i > 0 else -1.0
+        up = vols[hi_i + 1] if hi_i < len(vols) - 1 else -1.0
+        if up >= down:
+            hi_i += 1
+            acc += up
+        else:
+            lo_i -= 1
+            acc += down
+    return _f(profile[lo_i]["price"]), _f(profile[hi_i]["price"])
 
 
 def _high_volume_nodes(profile: list[dict], top: int = 5) -> list[dict]:
@@ -467,32 +496,42 @@ def return_distribution(df: pd.DataFrame, *, bins: int = 60) -> dict:
     }
 
 
-def drawdown(df: pd.DataFrame) -> dict:
-    """Peak-to-trough drawdown path and the worst episodes."""
+def price_change(df: pd.DataFrame) -> dict:
+    """Percent change of the mid price from a fixed reference point.
+
+    The reference is the **first tick in the window**, so the path starts at
+    0% and moves either side of it. Nothing is measured against a running
+    high: the baseline is the same price for every point in the window, which
+    makes the reading comparable across windows and says nothing about
+    drawdown.
+    """
+    empty = {"series": [], "reference_ts": None, "reference_mid": None,
+             "change_pct": None, "min_pct": None, "min_ts": None,
+             "max_pct": None, "max_ts": None}
     if df.empty:
-        return {"series": [], "max_drawdown_pct": None, "episodes": []}
+        return empty
     mid = df["mid"]
-    peak = mid.cummax()
-    dd = (mid / peak - 1) * 100
-    episodes: list[dict] = []
-    in_dd = dd < 0
-    start = None
-    for i, flag in enumerate(in_dd):
-        if flag and start is None:
-            start = i
-        elif not flag and start is not None:
-            episodes.append(_dd_episode(df, dd, start, i - 1))
-            start = None
-    if start is not None:
-        episodes.append(_dd_episode(df, dd, start, len(dd) - 1))
-    episodes.sort(key=lambda e: e["depth_pct"])
+    base = float(mid.iloc[0])
+    # A zero (or missing) reference makes the percentage undefined; emit an
+    # empty path rather than infinities that would break strict JSON.
+    pct = (mid / base - 1) * 100 if base else mid * np.nan
     step = max(1, len(df) // 1200)
+    if pct.notna().any():
+        lo, hi = int(pct.idxmin()), int(pct.idxmax())
+        low = {"min_pct": _f(pct.iloc[lo]), "min_ts": df["ts"].iloc[lo].isoformat()}
+        high = {"max_pct": _f(pct.iloc[hi]), "max_ts": df["ts"].iloc[hi].isoformat()}
+    else:
+        low = {"min_pct": None, "min_ts": None}
+        high = {"max_pct": None, "max_ts": None}
     return {
         "series": [
-            {"t": ts.isoformat(), "dd": _f(v)} for ts, v in zip(df["ts"], dd)
+            {"t": ts.isoformat(), "pct": _f(v)} for ts, v in zip(df["ts"], pct)
         ][::step],
-        "max_drawdown_pct": _f(dd.min()),
-        "episodes": episodes[:5],
+        "reference_ts": df["ts"].iloc[0].isoformat(),
+        "reference_mid": _f(base),
+        "change_pct": _f(pct.iloc[-1]),
+        **low,
+        **high,
     }
 
 
@@ -641,22 +680,10 @@ def build_report(df: pd.DataFrame, *, timeframe: str = "1m", window: int = 50, b
         "volume_profile": volume_profile(d, bins=bins),
         "rolling": rolling_metrics(d, window=window),
         "distribution": return_distribution(d, bins=min(bins, 40)),
-        "drawdown": drawdown(d),
+        "price_change": price_change(d),
         "behaviour": behaviour(d),
         "hourly": hourly_profile(d, tz=tz),
         "depth": book_depth(d),
         "ticks": tick_table(d, limit=250),
         "timeframes": list(TIMEFRAMES.keys()),
     })
-
-
-def _dd_episode(df: pd.DataFrame, dd: pd.Series, lo: int, hi: int) -> dict:
-    worst = dd.iloc[lo:hi + 1]
-    trough = int(worst.idxmin())
-    return {
-        "peak_ts": df["ts"].iloc[lo].isoformat(),
-        "trough_ts": df["ts"].iloc[trough].isoformat(),
-        "recovered_ts": df["ts"].iloc[hi].isoformat() if hi + 1 < len(df) else None,
-        "depth_pct": _f(worst.min()),
-        "duration_ticks": int(hi - lo + 1),
-    }

@@ -40,11 +40,15 @@ def _fresh_status(monkeypatch, settings):
 
 def _patch_kql(monkeypatch, *, rows: int = 100,
                latest: str | None = "2026-10-08T01:00:00Z", symbols: int = 348,
+               metrics_stops: int = 49,
+               metrics_latest: str | None = "2026-10-08T01:00:00Z",
                error: str | None = None) -> list[str]:
     """Patch the KQL probe; return the list the connection lifecycle is logged in.
 
     `rows=0` / `symbols=0` replay an empty-but-readable table, which is the
-    ingest-pipeline case rather than the endpoint-down case.
+    ingest-pipeline case rather than the endpoint-down case. `metrics_stops=0`
+    replays an empty `metrics_5m`, which is the stalled-metrics-job case: the
+    ticks are flowing but the precomputed grid has not been rebuilt.
     """
     seen: list[str] = []
 
@@ -64,6 +68,8 @@ def _patch_kql(monkeypatch, *, rows: int = 100,
                             lambda client, settings=None: (rows, latest))
         monkeypatch.setattr(service.kql, "symbol_count",
                             lambda client, settings=None: symbols)
+        monkeypatch.setattr(service.kql, "metrics_stats",
+                            lambda client, settings=None: (metrics_stops, metrics_latest))
     return seen
 
 
@@ -101,6 +107,7 @@ def test_the_probe_reads_the_configured_dimension(monkeypatch):
     monkeypatch.setattr(service.kql, "tick_stats", lambda c, s=None: (1, None))
     monkeypatch.setattr(service.kql, "symbol_count",
                         lambda c, s=None: seen.append(s.symbol_table) or 5)
+    monkeypatch.setattr(service.kql, "metrics_stats", lambda c, s=None: (49, "now"))
     _patch_cache(monkeypatch)
 
     assert service.status(refresh=True).dimension_rows == 5
@@ -125,7 +132,8 @@ def test_the_point_in_time_controls_are_echoed_on_the_probe(monkeypatch):
     st = service.status(refresh=True)
 
     assert (st.timeline_minutes, st.timeline_step_minutes) == (240, 5)
-    assert (st.window_min_minutes, st.window_max_minutes) == (5, 240)
+    assert st.window_choices_minutes == [60, 120, 180, 240]
+    assert (st.window_min_minutes, st.window_max_minutes) == (60, 240)
 
 
 def test_the_window_ceiling_follows_a_shorter_cache(monkeypatch):
