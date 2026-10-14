@@ -153,16 +153,16 @@
   <section class="block" aria-labelledby="h-micro">
     <h2 class="block-title" id="h-micro">Microstructure</h2>
     <div class="grid">
-      <div class="card" data-card="ofi">
+      <!-- Two thirds of the row: the signed aggressive volume and its normalised
+           imbalance read better across the wider card. -->
+      <div class="card span2" data-card="ofi">
         <h2 class="card-title">Order-flow imbalance</h2>
         <div class="chart"><canvas id="cOFI"></canvas></div>
         <p class="note" id="ofi-note"></p>
         <div class="card-detail" data-detail-for="ofi" hidden></div>
       </div>
 
-      <!-- Two thirds of the row: resting size per side and the depth imbalance
-           series read better across the wider card. -->
-      <div class="card span2" data-card="depth" id="depthCard">
+      <div class="card" data-card="depth" id="depthCard">
         <h2 class="card-title">Book depth &amp; imbalance</h2>
         <div class="chart"><canvas id="cDepth"></canvas></div>
         <p class="note" id="depth-note"></p>
@@ -215,7 +215,9 @@
         <div class="card-detail" data-detail-for="hour" hidden></div>
       </div>
 
-      <div class="card" data-card="vol">
+      <!-- Two thirds of the row: the volatility path reads better across the
+           wider card, so the last row is `hour | vol(span2)`. -->
+      <div class="card span2" data-card="vol">
         <h2 class="card-title">Rolling volatility</h2>
         <div class="chart"><canvas id="cVol"></canvas></div>
         <p class="note" id="vol-note"></p>

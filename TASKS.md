@@ -5,6 +5,26 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-14 — Microstructure/liquidity grid reflow: OFI and volatility widened
+
+Scope: swap two cards' grid spans so each block's rows fill the 3-column grid.
+The order-flow panel carries a signed-volume series plus its normalised
+imbalance, and the volatility panel reads better as a wide line, while the
+book-depth imbalance series is a single bar set that fits one column.
+
+### Frontend
+- [x] `app/static/index.html`: `ofi` card now carries `span2` (two thirds of the
+      row); the `depth` card drops to a single column. The *Microstructure* block
+      reads `ofi(span2) | depth` then `acf | large(span2)` — both rows full.
+- [x] `app/static/index.html`: `vol` card now carries `span2`, so the *Liquidity*
+      block's last row is `hour | vol(span2)` instead of `hour | vol` with an
+      empty third column.
+
+### Verification
+- [x] `python3 -m pytest tests/test_maintenance.py tests/test_landing.py` → 28 passed
+
+---
+
 ## 2026-10-14 — Microstructure grid reflow: depth widened, autocorrelation dropped a row
 
 Scope: the *Microstructure* block was `ofi | depth | acf` on one row with the
