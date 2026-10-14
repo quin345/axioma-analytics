@@ -5,6 +5,24 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-14 — Microstructure grid reflow: depth widened, autocorrelation dropped a row
+
+Scope: the *Microstructure* block was `ofi | depth | acf` on one row with the
+`large` card (span2) alone on the next, leaving an empty column beside it. The
+book-depth panel carries two stacked series (resting size per side plus the
+imbalance ratio), so it was the cramped one.
+
+### Frontend
+- [x] `app/static/index.html`: the `depth` card now carries `span2` (two thirds of
+      the row), matching the `chg` and `large` cards.
+- [x] `app/static/index.html`: the `acf` card moved after `large`, so the block
+      reads `ofi | depth(span2)` then `acf | large(span2)` — both rows full.
+
+### Verification
+- [x] `python3 -m pytest tests/test_maintenance.py tests/test_landing.py` → 28 passed
+
+---
+
 ## 2026-10-14 - "Last update" floored to the one-minute grid, not the 5-minute one
 
 Scope: the refresh cycle runs every `CACHE_REFRESH_MINUTES` (now 1) on the
