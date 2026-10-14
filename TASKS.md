@@ -5,6 +5,85 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-14 — Microstructure/liquidity grid reflow: OFI and volatility widened
+
+Scope: swap two cards' grid spans so each block's rows fill the 3-column grid.
+The order-flow panel carries a signed-volume series plus its normalised
+imbalance, and the volatility panel reads better as a wide line, while the
+book-depth imbalance series is a single bar set that fits one column.
+
+### Frontend
+- [x] `app/static/index.html`: `ofi` card now carries `span2` (two thirds of the
+      row); the `depth` card drops to a single column. The *Microstructure* block
+      reads `ofi(span2) | depth` then `acf | large(span2)` — both rows full.
+- [x] `app/static/index.html`: `vol` card now carries `span2`, so the *Liquidity*
+      block's last row is `hour | vol(span2)` instead of `hour | vol` with an
+      empty third column.
+
+### Verification
+- [x] `python3 -m pytest tests/test_maintenance.py tests/test_landing.py` → 28 passed
+
+---
+
+## 2026-10-14 — Microstructure grid reflow: depth widened, autocorrelation dropped a row
+
+Scope: the *Microstructure* block was `ofi | depth | acf` on one row with the
+`large` card (span2) alone on the next, leaving an empty column beside it. The
+book-depth panel carries two stacked series (resting size per side plus the
+imbalance ratio), so it was the cramped one.
+
+### Frontend
+- [x] `app/static/index.html`: the `depth` card now carries `span2` (two thirds of
+      the row), matching the `chg` and `large` cards.
+- [x] `app/static/index.html`: the `acf` card moved after `large`, so the block
+      reads `ofi | depth(span2)` then `acf | large(span2)` — both rows full.
+
+### Verification
+- [x] `python3 -m pytest tests/test_maintenance.py tests/test_landing.py` → 28 passed
+
+---
+
+## 2026-10-14 - "Last update" floored to the one-minute grid, not the 5-minute one
+
+Scope: the refresh cycle runs every `CACHE_REFRESH_MINUTES` (now 1) on the
+clock, but the header **Last update** badge and the freshness-strip **Cache
+updated** chip floored their timestamps to a **5-minute** boundary
+(`fmt.fivemin`). A tick at 14:47:12 therefore read as **14:45** — up to ~5 min
+"stale" even though the window is rewritten every minute. The KPI cards
+themselves were never wrong: they read `agg_dom` via `/api/analytics` (the
+*Last* tile is `summary.close`), so this was purely a display-grid bug.
+
+### Frontend
+- [x] `app/static/app.js`: `fmt.fivemin` (5-minute floor) replaced by `fmt.minute`
+      (floor to the minute — seconds dropped, still never rounded up). Both the
+      header **Last update** badge and the **Cache updated** chip now use it, so
+      they land on the same one-minute grid the refresh cycle writes on.
+- [x] `app/static/app.js`: docstrings/comments that still said "30-minute" /
+      "5-minute" (leftovers from older cadences) corrected to the one-minute grid.
+
+### Docs
+- [x] `README.md`: systemd timer example corrected to `OnCalendar=*:*:15`
+      (was `*:0/5:15`), "at most a minute behind the feed" (was "a few minutes"),
+      and the test-coverage line now says one-minute slots (was 5-minute).
+- [x] `docs/metrics_5m.md`: the *Refresh* row and the read-path prose corrected
+      to the one-minute cadence (were `CACHE_REFRESH_MINUTES=30` / "5-minute slots").
+- [x] `app/service.py`: the window-slide docstring now describes a one-minute
+      cycle / earliest minute (was 30-minute / earliest half hour).
+
+### Tests
+- [x] `tests/test_maintenance.py`: `test_the_header_last_update_is_floored_to_the_5_minute_grid`
+      renamed to `..._to_the_minute_grid` and re-pinned on `fmt.minute(feed)`.
+
+### Verification
+- [x] `node --check app/static/app.js` clean
+- [x] `pytest tests/test_maintenance.py` - 20 passed
+- [x] No `fivemin` / stale "5-minute"/"30-minute" refresh-cadence references remain
+      in `README.md`, `docs/`, `app/` or `scripts/`.
+
+---
+
+---
+
 ## 2026-10-13 - `/api/metrics` serves only the volume-at-price ladder; scalar columns dropped
 
 Scope: `metrics_5m` ships seven scalar window metrics (`ticks`, `vwap`,

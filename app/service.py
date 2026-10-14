@@ -441,7 +441,7 @@ def _slide_window(cached: pd.DataFrame, added: pd.DataFrame,
       newer copy where the two overlap (the slice is read from the cached
       newest timestamp, which is inclusive), and
     * purges every row older than `window_minutes` before the newest row -
-      on a 30-minute cycle that is exactly the earliest half hour - then caps
+      on a one-minute cycle that is exactly the earliest minute - then caps
       the result at `limit`, keeping the newest rows.
 
     The purge is anchored on the newest row rather than the wall clock, so a

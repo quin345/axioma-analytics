@@ -2,13 +2,13 @@
 
 The dashboard's window is fixed at ``CACHE_LOOKBACK_HOURS`` and served from
 Redis. This module is what keeps that window *current*: every
-``CACHE_REFRESH_MINUTES`` (5 by default) it slides the window - the earliest
+``CACHE_REFRESH_MINUTES`` (1 by default) it slides the window - the earliest
 slice is purged and the newest slice is read from KQL - so a page load
-shows data from the last minutes without a visitor waiting on a scan.
+shows data from the last minute without a visitor waiting on a scan.
 
 The cycle is scheduled on the **clock**, not on the process start time: with a
-5-minute interval the runs land just past the wall-clock marks (:00:15,
-:05:15, :10:15, ...) - the 15-second ``CACHE_REFRESH_OFFSET_SECONDS`` delay
+one-minute interval the runs land just past the wall-clock marks (:00:15,
+:01:15, :02:15, ...) - the 15-second ``CACHE_REFRESH_OFFSET_SECONDS`` delay
 lets the upstream feed settle so the read never races immature data -
 whatever time the service was restarted, so operators can reason about when
 the KQL work happens and the one-shot script lines up with the in-process

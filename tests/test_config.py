@@ -262,10 +262,10 @@ def test_cache_ttl_covers_one_ingestion_interval():
     assert Settings().cache_ttl_seconds == 450
 
 
-def test_the_refresh_cycle_runs_every_five_minutes():
+def test_the_refresh_cycle_runs_every_minute():
     s = Settings()
-    assert s.cache_refresh_minutes == 5
-    assert s.cache_refresh_seconds == 300
+    assert s.cache_refresh_minutes == 1
+    assert s.cache_refresh_seconds == 60
 
 
 def test_the_refresh_cycle_fires_just_past_the_mark():

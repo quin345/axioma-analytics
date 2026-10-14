@@ -222,11 +222,16 @@ th{cursor:default}
 .pill.bad{background:rgba(239,68,68,.14);color:var(--down)}
 .pill.warn{background:rgba(245,158,11,.14);color:var(--warn)}
 
-.loading{position:fixed;inset:0;display:grid;place-items:center;gap:14px;
-  background:rgba(11,15,23,.82);z-index:50;color:var(--muted)}
-.loading{display:none;place-items:center}
-.loading:not(.hidden){display:grid;align-content:center;justify-items:center;gap:14px}
-.spinner{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent);
+/* Loading indicator: a compact, non-blocking pill pinned to the corner rather
+   than a full-screen overlay, so the page underneath stays visible and usable
+   while a query runs. pointer-events:none keeps it from swallowing clicks. */
+.loading{position:fixed;right:20px;bottom:20px;z-index:50;display:none;
+  pointer-events:none;align-items:center;gap:10px;
+  padding:10px 16px;border-radius:999px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--fg);font-size:13px;
+  box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.loading:not(.hidden){display:inline-flex}
+.spinner{width:16px;height:16px;border:2.5px solid var(--line);border-top-color:var(--accent);
   border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .err{color:var(--down);padding:12px}
