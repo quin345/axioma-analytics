@@ -238,11 +238,11 @@ async function loadHealth() {
   // KQL query, which is a warning rather than a failure.
   if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
   // The controls are configured from the API so they can never drift from what
-  // the service actually offers. The refresh cycle runs just past the 5-minute
-  // clock marks (+15 s), so 05:00:15, 05:05:15, ...
-  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 5;
+  // the service actually offers. The refresh cycle runs just past the minute
+  // clock marks (+15 s), so 05:00:15, 05:01:15, ...
+  REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 1;
   REFRESH_OFFSET_SECONDS = Number(h.cache_refresh_offset_seconds) || 0;
-  // The cadence strip: "Data refreshes every 5 minutes", mirrored from the API.
+  // The cadence strip: "Data refreshes every minute", mirrored from the API.
   set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
   // The timeline is anchored on the newest `metrics_5m` stop - the point the
@@ -563,7 +563,7 @@ function renderKpis(s, m) {
 /* ---------------- data freshness ---------------- */
 
 /** Ingest cadence for the aggregate DOM table, in minutes. */
-let REFRESH_MINUTES = 5;
+let REFRESH_MINUTES = 1;
 
 /** Delay past each clock mark before the cycle fires, in seconds. */
 let REFRESH_OFFSET_SECONDS = 15;
@@ -589,7 +589,7 @@ function age(ms) {
 
 /**
  * Wall-clock time the next ingest is expected: the first clock slot the
- * cycle runs on (5-minute marks plus the offset, e.g. :00:15, :05:15)
+ * cycle runs on (minute marks plus the offset, e.g. :00:15, :01:15)
  * strictly after now, in
  * local time. The cycle is scheduled against the local wall clock, so this
  * mirrors that; two refreshes separated by the full interval can never be

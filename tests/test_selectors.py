@@ -131,7 +131,7 @@ def test_health_publishes_the_refresh_cycle(client, catalogue, monkeypatch):
 
     h = client.get("/api/health").json()
 
-    assert h["cache_refresh_minutes"] == 5
+    assert h["cache_refresh_minutes"] == 1
     assert h["cache_refresh_offset_seconds"] == 15
     assert h["cache_refreshed_at"] == "2026-10-08T01:30:00+00:00"
     assert h["cached_symbols"] == 3
