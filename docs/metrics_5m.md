@@ -33,7 +33,7 @@ dashboard actually overlays (see *One window per strip*) — never a re-scan of
 | Nested columns | `dynamic`/`real` per window (`vap_1h…`, `poc_1h…`) | `volume_profile` |
 | Source table | `ctrader_dom.agg_dom` (per-tick derived order-book metrics) | `kql.KQL_TABLE` |
 | Scan span | **8 h** of ticks (4 h timeline + 4 h widest window) | `CACHE_LOOKBACK_HOURS=8` |
-| Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=30` |
+| Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=1` |
 | Row stamp | `computed_at` (`ingested_at` is the legacy fallback) | `kql.METRICS_STAMPS` |
 
 > **OHLC is not in this table.** The `open`/`high`/`low`/`close` window columns
@@ -365,7 +365,7 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    It lands under `<prefix>:<database>:metrics_5m:metrics:<symbol>`, keyed apart
    from the raw `agg_dom` ticks: the two hold different shapes under the same
    symbol, so one key namespace for both would let a stale tick frame be read back
-   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (5-minute
+   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (one-minute
    slots, 15 s past the mark). A cache miss still falls back to reading
    `metrics_5m` directly, preserving the existing "KQL failure sets
    `connected:false`, cache failure does not" contract in `app/service.py`.

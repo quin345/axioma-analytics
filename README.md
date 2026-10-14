@@ -104,8 +104,8 @@ minute clock marks (:00:15, :01:15, … — the 15 s
 never races immature data, e.g. 4:45:15)** a background task advances each cached
 symbol's window. The cycle is scheduled against the wall clock rather than the
 process start time, so restarts do not shift it and a systemd timer
-(`OnCalendar=*:0/5:15`) lines up with it. What the dashboard serves is
-therefore at most a few minutes behind the feed, and anything inside the window
+(`OnCalendar=*:*:15`) lines up with it. What the dashboard serves is
+therefore at most a minute behind the feed, and anything inside the window
 still costs no query at all.
 
 Each cycle slides rather than re-reads:
@@ -678,7 +678,7 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
-the refresh cycle (clock-aligned 5-minute slots with a 15 s offset, immediate first pass, repeat, a
+the refresh cycle (clock-aligned one-minute slots with a 15 s offset, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest slice, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),

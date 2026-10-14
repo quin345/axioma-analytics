@@ -78,15 +78,16 @@ const fmt = {
     if (!p) return String(iso);
     return `${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
   },
-  /** The update time on the 5-minute refresh grid: 14:47:12 -> 14:45:00.
-   * Floored, never rounded up, so "Last update" cannot sit in the future. */
-  fivemin: (iso) => {
+  /** The update time on the 1-minute refresh grid: 14:47:12 -> 14:47.
+   * Floored to the minute (seconds dropped), never rounded up, so "Last
+   * update" cannot sit in the future. The cache refresh cycle runs every
+   * minute, so the badge lands on the same grid the window is written on. */
+  minute: (iso) => {
     if (!iso) return "\u2013";
     const p = zoneParts(iso, { year: "numeric", month: "2-digit", day: "2-digit",
                                hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
     if (!p) return String(iso);
-    const mm = String(Math.floor(Number(p.minute) / 5) * 5).padStart(2, "0");
-    return `${p.year}-${p.month}-${p.day} ${p.hour}:${mm}`;
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
   },
   /** "HH:MM:SS" in the display zone, for the clock-grid badges. */
   hm: (iso) => {
@@ -615,7 +616,7 @@ function nextRefresh(intervalMinutes, offsetSeconds) {
  * what "Last update" means: when the pipeline last wrote, whichever point in
  * time is on screen. It falls back to `meta.latest_tick` - the newest tick the
  * analytics query returned - when the probe has nothing. The time is floored to
- * the 30-minute refresh step, the grid the ingest cycle lands on, and never
+ * the one-minute refresh step, the grid the ingest cycle lands on, and never
  * rounded up so the badge cannot claim an update from the future. The
  * freshness strip below still describes the loaded window.
  */
@@ -633,7 +634,7 @@ function renderFreshness(report) {
 
   // Only touch className when a class is supplied (see set() above).
   set("lastTick",
-      feed ? `Last update ${fmt.fivemin(feed)} ${tzAbbr()}` : "Last update unavailable");
+      feed ? `Last update ${fmt.minute(feed)} ${tzAbbr()}` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
@@ -641,13 +642,13 @@ function renderFreshness(report) {
   // The strip reports the loaded window; without a report there is nothing new
   // to say about the window itself, but the cycle stamps (next refresh, cache
   // write) are about the feed and must move on a health-only poll too -
-  // otherwise an open tab never shows the 5-minute updates.
+  // otherwise an open tab never shows the one-minute updates.
   const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
   set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   // Proof the Redis cache is moving: when the refresh cycle last finished,
-  // floored to the 5-minute grid it runs on (e.g. 14:47:12 -> 14:45).
+  // floored to the minute grid it runs on (e.g. 14:47:12 -> 14:47).
   const cacheStamp = h.cache_refreshed_at || null;
-  set("fbCache", cacheStamp ? `${fmt.fivemin(cacheStamp)} ${tzAbbr()}` : "\u2013",
+  set("fbCache", cacheStamp ? `${fmt.minute(cacheStamp)} ${tzAbbr()}` : "\u2013",
       cacheStamp ? "ok" : "");
   if (!report) return;
   set("fbLastTick", `${fmt.hm(windowLatest)} ${tzAbbr()}`,
@@ -656,7 +657,7 @@ function renderFreshness(report) {
   set("fbRows", fmt.int(rows));
   const badge = $("tickAge");
   if (badge && next) {
-    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, just past the 5-minute marks.`;
+    badge.title = `Data last updated ${fmt.hm(feed)} ${tzAbbr()}. Next ingest expected ${fmt.hm(next.toISOString())} ${tzAbbr()}, just past the minute marks.`;
   }
 }
 
@@ -1559,7 +1560,7 @@ on("calToday", "click", () => {
 document.addEventListener("DOMContentLoaded", () => {
   wireCards();
   init();
-  // Re-read /api/health every minute so an open tab picks up each 5-minute
+  // Re-read /api/health every minute so an open tab picks up each one-minute
   // refresh cycle: the header "Last update", the "Next refresh" and
   // "Cache updated" stamps all move without a manual reload. Health-only:
   // the loaded charts are left alone until the user re-runs.
