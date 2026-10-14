@@ -2,7 +2,9 @@
 
 Inventory of every KPI tile and card on the AXIOMA dashboard, the database
 table each reads from, and the formula behind each metric. Generated from the
-source in `app/` and `app/static/`.
+source in `app/` and `app/static/`. For the end-to-end methodology — data
+sourcing, normalisation, windowing semantics, consistency rules and known
+limitations — see [`docs/methodology.md`](methodology.md).
 
 ## Data model at a glance
 

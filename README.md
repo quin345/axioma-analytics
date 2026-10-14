@@ -634,7 +634,10 @@ curl -s 'localhost:8000/api/metrics?symbol=41&window_minutes=90'
 Every block below is computed from the tick-derived `/api/analytics` bundle
 (`app/analytics.py`), whose source is `ctrader_dom.agg_dom`. The full inventory
 of each KPI tile and card — its table and its exact formula — lives in
-[`docs/dashboard_metrics.md`](docs/dashboard_metrics.md).
+[`docs/dashboard_metrics.md`](docs/dashboard_metrics.md), and the end-to-end
+methodology (sourcing, normalisation, windowing, every formula, consistency
+rules and known limitations) in
+[`docs/methodology.md`](docs/methodology.md).
 
 | Block | Metrics | Source |
 |---|---|---|
