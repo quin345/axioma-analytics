@@ -142,6 +142,14 @@ function draw(id, cfg) {
 
 async function api(path) {
   const r = await fetch(path);
+  if (r.status === 401) {
+    // The session expired or was revoked mid-use. The gate only shows /login
+    // to someone who needs it, so one bounce beats a dashboard full of 401
+    // banners; health never 401s (it is a public probe), so the sign-in page
+    // is the only place this can lead.
+    location.href = "/login";
+    throw new Error("Not authenticated.");
+  }
   if (!r.ok) {
     let msg = `${r.status}`;
     try { msg = (await r.json()).detail || msg; } catch (_) {}
@@ -213,6 +221,10 @@ async function loadHealth() {
   // Kept for the expanded Instrument-coverage card, which reads feed totals
   // that /api/analytics does not return.
   window.__health = h;
+  // The Sign-out control follows the gate: shown only while the server has
+  // LOGIN_PASSWORD set, so an open server never offers a dead button.
+  const lo = $("logout");
+  if (lo) lo.classList.toggle("hidden", !h.login_enabled);
   // The IANA zone every wall-clock time on the page is rendered in, published
   // by /api/health so one setting drives the clock, the time badges and the
   // hourly profile. UTC until the first answer keeps the pre-load paint sane.
@@ -1526,6 +1538,12 @@ async function init() {
 function on(id, ev, fn) { const el = $(id); if (el) el.addEventListener(ev, fn); }
 
 on("run", "click", analyse);
+// End the session server-side, then land on the sign-in page. The endpoint is
+// public and idempotent, so the button works even after the session expired.
+on("logout", "click", async () => {
+  try { await fetch("/api/logout", { method: "POST" }); } catch (_) {}
+  location.href = "/login";
+});
 // Changing the asset class re-filters the symbol list, then re-analyses.
 on("assetClass", "change", async () => {
   try { await loadSymbols(); await analyse(); }

@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
-from . import analytics, metrics, refresh, service
+from . import analytics, auth, metrics, refresh, service
 from .assets import CLASS_LABELS
 from .config import get_settings
 from .errors import DataSourceError
@@ -41,6 +42,29 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def gate_dashboard(request: Request, call_next):
+    """Keep the dashboard and its data behind the login page.
+
+    One check in one place: while ``LOGIN_PASSWORD`` is set, every request
+    must carry a live session cookie, except the public paths listed in
+    ``auth.is_public``. Pages bounce to ``/login`` so a bookmarked dashboard
+    lands on the form; the JSON API answers ``401`` instead, which the
+    dashboard's own script turns into the same bounce - a redirect would hand
+    a fetch call an HTML body. Left open on purpose: the login flow, the
+    health probe (no rows, and what uptime checks poll), the explainer and
+    outage pages, the API docs (schema only) and the static assets.
+    """
+    s = get_settings()
+    if not s.login_enabled or auth.is_public(request.url.path, s):
+        return await call_next(request)
+    if auth.session_valid(request.cookies.get(auth.COOKIE_NAME)):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": "Not authenticated."}, status_code=401)
+    return RedirectResponse("/login", status_code=307)
 
 
 @app.get("/api/health")
@@ -134,7 +158,79 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         # and the hourly activity profile. Published so one server setting
         # drives the whole UI instead of the browser assuming UTC.
         "display_timezone": s.display_timezone,
+        # Whether the dashboard is behind the login gate. Published so the UI
+        # shows the Sign-out control only on a gated server - an open one
+        # must not offer a button that signs you out of nothing.
+        "login_enabled": s.login_enabled,
     }
+
+
+class LoginRequest(BaseModel):
+    """The sign-in form's payload. Both fields are plain strings; a blank
+    answer is simply a wrong one, answered by `auth.verify` like any other."""
+
+    username: str = ""
+    password: str = ""
+
+
+@app.get("/login")
+def login_page(request: Request) -> Any:
+    """The sign-in page, or the dashboard for someone already signed in.
+
+    Served at its own path so the gate has somewhere to bounce to; an
+    authenticated visitor asking for it again is sent straight back to the
+    dashboard, so the form only ever shows to someone who needs it. Like the
+    other standalone pages it is a static file - no data source involved.
+    """
+    s = get_settings()
+    if s.login_enabled and auth.session_valid(request.cookies.get(auth.COOKIE_NAME)):
+        return RedirectResponse("/", status_code=307)
+    return FileResponse(
+        STATIC_DIR / "login.html",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+@app.post("/api/login")
+def login(payload: LoginRequest, response: Response) -> dict:
+    """Exchange the form's credentials for a session cookie.
+
+    The one account is checked in constant time (`auth.verify`), a wrong
+    pair is a plain 401 whatever was wrong, and no cookie is set on failure.
+    The cookie is HttpOnly and SameSite=Lax, so the dashboard's script never
+    sees the token and a cross-site form post cannot ride it.
+    """
+    s = get_settings()
+    if not s.login_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Login is disabled: no LOGIN_PASSWORD is configured.",
+        )
+    if not auth.verify(payload.username, payload.password, s):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    response.set_cookie(
+        auth.COOKIE_NAME,
+        auth.start_session(s),
+        max_age=max(1, s.login_session_hours) * 3600,
+        httponly=True,
+        samesite="lax",
+        secure=s.login_cookie_secure,
+        path="/",
+    )
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+def logout(request: Request, response: Response) -> dict:
+    """End the session and clear the cookie. Idempotent and public: the
+    button should always work, and signing out twice is not an error."""
+    s = get_settings()
+    auth.end_session(request.cookies.get(auth.COOKIE_NAME))
+    response.delete_cookie(
+        auth.COOKIE_NAME, path="/", httponly=True, samesite="lax",
+        secure=s.login_cookie_secure,
+    )
+    return {"ok": True}
 
 
 @app.get("/api/asset-classes")

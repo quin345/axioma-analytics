@@ -260,9 +260,40 @@ class Settings:
         default_factory=lambda: _env_bool("MAINTENANCE_MODE", default=False)
     )
 
+    # --- Dashboard login (the website gate) ---------------------------------
+    #: The account that signs in at /login. User-facing, and entirely separate
+    #: from the Entra identity above, which only authenticates the data plane.
+    login_username: str = field(
+        default_factory=lambda: _env("LOGIN_USERNAME", default="admin") or "admin"
+    )
+    #: The gate exists only while this is set: a blank password leaves the site
+    #: open, which is how a credential-less local run and the test suite
+    #: behave. `run.py` prints the state so an open door in production is
+    #: visible at startup rather than discovered later.
+    login_password: str = field(
+        default_factory=lambda: _env("LOGIN_PASSWORD") or ""
+    )
+    #: How long a signed-in session lives. Sessions are held in the app
+    #: process (single worker), so a restart signs everyone out; the cookie
+    #: and its server-side token expire together.
+    login_session_hours: int = field(
+        default_factory=lambda: _env_int("LOGIN_SESSION_HOURS", default=12)
+    )
+    #: True behind TLS (nginx terminates it in production) so the session
+    #: cookie is never sent over plain HTTP. Off for http://127.0.0.1.
+    login_cookie_secure: bool = field(
+        default_factory=lambda: _env_bool("LOGIN_COOKIE_SECURE", default=False)
+    )
+
     @property
     def has_credentials(self) -> bool:
         return bool(self.tenant_id and self.client_id and self.client_secret)
+
+    @property
+    def login_enabled(self) -> bool:
+        """True while a dashboard password is configured - the gate is the
+        password alone, so blank/unset leaves the site open."""
+        return bool(self.login_password)
 
     @property
     def use_managed_identity(self) -> bool:

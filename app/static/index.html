@@ -46,6 +46,10 @@
          runs on (just past the mark, e.g. :01:15) - not the time the page was served. -->
     <span id="lastTick" class="freshness" title="Time of the most recent data update, shown in the display time zone on the refresh step">Last update &ndash;</span>
     <span id="tickAge" class="tickage"></span>
+    <!-- Shown only when the server reports login_enabled: an open server must
+         not offer a button that signs you out of nothing. -->
+    <span class="conn-sep" aria-hidden="true"></span>
+    <button id="logout" class="ghost sm hidden" title="End this session and return to the sign-in page">Sign out</button>
   </div>
 </header>
 

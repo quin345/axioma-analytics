@@ -67,7 +67,11 @@ def main() -> None:
     cadence = (f"every {settings.cache_refresh_minutes} min on the clock "
                f"(+{settings.cache_refresh_offset_seconds:g}s offset)"
                if settings.cache_refresh_seconds else "off - cached on demand")
-    print(f"  Refresh     : {cadence}\n")
+    print(f"  Refresh     : {cadence}")
+    login = (f"enabled (user={settings.login_username})"
+             if settings.login_enabled
+             else "OFF - the dashboard is open; set LOGIN_PASSWORD to gate it")
+    print(f"  Login       : {login}\n")
     uvicorn.run("app.main:app", host=args.host, port=args.port, reload=args.reload)
 
 

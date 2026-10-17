@@ -5,6 +5,64 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-17 — Dashboard login gate
+
+Scope: one username/password now stands between a visitor and the dashboard
+(and its data API), opt-in via `LOGIN_PASSWORD`. Separate from the Entra
+identity, which only authenticates the data plane.
+
+### Backend
+- [x] `app/config.py`: `LOGIN_USERNAME`/`LOGIN_PASSWORD`/`LOGIN_SESSION_HOURS`/
+      `LOGIN_COOKIE_SECURE` plus `Settings.login_enabled` — the gate is the
+      password alone; blank leaves the site open (local runs, the test suite).
+- [x] `app/auth.py`: constant-time credential check (both halves always
+      compared, 250 ms delay on failure, one generic 401 — no enumeration),
+      in-memory bearer-token sessions (HttpOnly cookie, single-worker process;
+      pruned on mint/check) and the public-path list (login flow, `/api/health`,
+      `/welcome`, `/unavailable`, `/docs`, `/static/*`, `/` during maintenance).
+- [x] `app/main.py`: one gate middleware — pages 307 to `/login`, `/api/*`
+      answers 401; new `GET /login`, `POST /api/login`, `POST /api/logout`;
+      `/api/health` publishes `login_enabled`.
+- [x] `run.py`: prints `Login: enabled (user=…)` or `Login: OFF …` at startup.
+
+### Frontend
+- [x] `app/static/login.html`: self-contained branded sign-in page
+      (landing.html conventions: inline style, fetch to `/api/login`).
+- [x] `app/static/index.html`: **Sign out** button in the header, hidden by
+      default.
+- [x] `app/static/app.js`: button follows health's `login_enabled`; logout
+      posts `/api/logout` and lands on `/login`; `api()` bounces any 401 to
+      `/login`, so an expired session costs one redirect, not a page of
+      failed panels.
+
+### Config / docs
+- [x] `.env` (git-ignored): LOGIN_* block with a generated password, active
+      for local runs.
+- [x] `.env.example`: LOGIN_* block documented.
+- [x] `README.md`: "Dashboard login" section, API rows for `/login` and the
+      two POSTs, the `/` row amended, testing coverage and three
+      troubleshooting rows.
+
+### Tests
+- [x] `tests/conftest.py`: autouse fixture forcing the gate off suite-wide
+      (the real `.env` now carries a password) and clearing live sessions;
+      binds `cache_clear` so `test_refresh_script`'s stubbed `get_settings`
+      cannot break the teardown.
+- [x] `tests/test_login.py`: 31 tests — the page (brand, self-contained, the
+      form), gate off (open dashboard, 403 sign-in), gate on (307 page
+      redirects, 401 API answers, forged cookie), sign-in (wrong pair,
+      no enumeration, HttpOnly cookie, dashboard + API + `/login` redirect),
+      sign-out, what stays public (health, explainer, outage, docs, static,
+      maintenance root), session expiry/revocation, the sign-out control pins.
+
+### Verification
+- [x] `python -m pytest tests -q` (clean env) → 418 passed; the 4 failures
+      are pre-existing (`test_analytics_api` needs the VM's managed identity
+      for live KQL — identical on a pristine baseline clone).
+- [x] `node --check app/static/app.js` clean
+
+---
+
 ## 2026-10-14 — Microstructure/liquidity grid reflow: OFI and volatility widened
 
 Scope: swap two cards' grid spans so each block's rows fill the 3-column grid.

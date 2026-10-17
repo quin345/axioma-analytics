@@ -244,6 +244,39 @@ Pass `--role Viewer` for a read-only grant, or `--workspaces <name>` to target o
 
 ---
 
+## Dashboard login
+
+The website itself sits behind a simple username/password login: the dashboard
+at `/` and every `/api/*` endpoint that serves data need a session cookie.
+It is user-facing, and separate from the Entra identity above, which only
+authenticates the data plane.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `LOGIN_USERNAME` | `admin` | The one account that signs in. |
+| `LOGIN_PASSWORD` | *(empty)* | **The gate exists only while this is set**; blank leaves the site open. `run.py` prints the state at startup (`Login: enabled (user=...)` / `Login: OFF`), so an open door is visible rather than silent. |
+| `LOGIN_SESSION_HOURS` | `12` | Session lifetime. Sessions live in the app process (single worker), so a restart signs everyone out. |
+| `LOGIN_COOKIE_SECURE` | `false` | `true` behind nginx/TLS so the session cookie is never sent over plain HTTP. |
+
+Flow: `/login` serves a self-contained sign-in page; `POST /api/login`
+exchanges the credentials for an `HttpOnly` (`SameSite=Lax`) session cookie;
+`POST /api/logout` ends it — the dashboard header's **Sign out** button,
+which is shown only while the gate is on. Pages answer the gate with a
+redirect to `/login`; the JSON API answers `401`, which the dashboard script
+turns into the same bounce when a session expires mid-use.
+
+Deliberately left public: `/login` itself, `/api/health` (the probe carries
+no rows — it is what uptime checks poll — and it publishes `login_enabled`),
+the explainer (`/welcome`), the outage pages, the API docs (schema only;
+every data endpoint still answers `401`) and `/static/*`. During maintenance
+mode `/` keeps serving the outage page to everyone.
+
+Credentials are compared in constant time with a short delay on failure, and a
+wrong name answers the same `401` as a wrong password. Changing the account:
+edit `.env` and restart — it is git-ignored, never commit it.
+
+---
+
 ## Deployment (production)
 
 The app is a single-process FastAPI/uvicorn server. nginx terminates TLS and is
@@ -565,10 +598,13 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
 | `GET /api/metrics` | The precomputed `metrics_5m` bundle: the pre-binned volume-at-price ladder for the symbol's chosen (default: newest) `as_of` stop, served from Redis. The dashboard overlays only that ladder; every headline tile comes from `/api/analytics` |
-| `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503. nginx sends the bare-domain and `www` roots to `/welcome` instead |
+| `GET /` | The dashboard (`index.html`); with `MAINTENANCE_MODE` on, the outage page with a 503; with `LOGIN_PASSWORD` set, a redirect to `/login` without a session. nginx sends the bare-domain and `www` roots to `/welcome` instead |
 | `GET /dashboard` | The dashboard itself, retained at its own path |
 | `GET /unavailable` | The branded outage page, retained for future maintenance windows |
 | `GET /welcome` | The front-facing explainer page (the `www` root proxies here) |
+| `GET /login` | The dashboard gate's sign-in page; an authenticated visitor is redirected to `/` |
+| `POST /api/login` | `{username, password}` → sets the `HttpOnly` session cookie; `401` on a wrong pair, `403` when no `LOGIN_PASSWORD` is configured |
+| `POST /api/logout` | Ends the session and clears the cookie; idempotent and public |
 
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
 `summary`; omitting `asset_class` returns everything.
@@ -686,7 +722,9 @@ failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest slice, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),
 the pages and routes around them (`/` serving the dashboard, the retained
-`/dashboard` alias, `/unavailable` and `/welcome`),
+`/dashboard` alias, `/unavailable` and `/welcome`), the login gate (opt-in via
+`LOGIN_PASSWORD`: page redirects, `401` API answers, the `HttpOnly` cookie and
+its expiry, sign-out, and what stays public),
 asset classification from both the pipeline category and the fallback,
 production-endpoint resolution, bar consistency, OFI bounds, volume-profile mass
 conservation, the price-change reference point, strict JSON serialisability, and
@@ -701,6 +739,9 @@ both stubbed, and the cycle is driven with a stub instead of the network.
 
 | Symptom | Cause / fix |
 |---|---|
+| The dashboard bounces to `/login` and nobody can sign in | The account is `LOGIN_USERNAME` / `LOGIN_PASSWORD` in `.env`; restart after editing. |
+| Anyone off the street can see the dashboard | `LOGIN_PASSWORD` is blank — the gate is opt-in. Check the `Login:` line `run.py` prints at startup. |
+| Everyone is signed out after every deploy | Sessions are held in the app process by design, so a restart ends them; `LOGIN_SESSION_HOURS` sets the ceiling. |
 | `Could not login because the authentication failed (18456)` | The identity has no workspace role. Grant **Contributor**. |
 | Health shows `cache_connected: false` | The Redis cache is unreachable or the identity has no data-access role on it. The dashboard still works (the read falls through to KQL); check the Redis resource's data-access policy / **Redis Data Contributor** assignment. |
 | Cached ticks look stale after a pipeline backfill | The cycle slides each entry incrementally, so rows older than the cached newest row are only picked up by a full read. Delete the keys (`axioma:ctrader_dom:agg_dom:ticks:*`, `axioma:ctrader_dom:agg_dom:catalogue`) and the next cycle re-reads the whole window; the TTL (`REDIS_TTL_SECONDS`) bounds it anyway. |

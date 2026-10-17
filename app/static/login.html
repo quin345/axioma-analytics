@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AXIOMA Analytics &middot; sign in</title>
+<meta name="description" content="Sign in to AXIOMA Analytics - tick microstructure dashboards over the production aggregate DOM feed." />
+<!-- The branding set is shared with the dashboard: same mark, same favicons. -->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/static/favicon.ico" sizes="16x16 32x32 48x48 64x64 128x128 256x256" />
+<link rel="icon" href="/static/icon-32.png" type="image/png" sizes="32x32" />
+<link rel="icon" href="/static/icon-180.png" type="image/png" sizes="180x180" />
+<link rel="apple-touch-icon" href="/static/icon-180.png" />
+<link rel="mask-icon" href="/static/favicon.svg" color="#4c9aff" />
+<meta name="theme-color" content="#0b0f17" />
+<!--
+  The gate's front door. Self-contained on purpose: like the explainer and the
+  holding page it must render even if the dashboard's own assets (styles.css,
+  app.js) are unavailable, so it depends on nothing but the favicon files. The
+  tokens below mirror :root in styles.css. The form posts to /api/login as
+  JSON and follows the session cookie to the dashboard on success.
+-->
+<style>
+:root{
+  --bg:#0b0f17; --panel:#121826; --panel2:#182032; --line:#232d42;
+  --fg:#e6ecf7; --muted:#8798b4; --accent:#4c9aff; --down:#ef4444;
+  --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:15px/1.6 "Inter",-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:flex;flex-direction:column;min-height:100vh;
+  -webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+.topbar{display:flex;justify-content:space-between;align-items:center;gap:16px;
+  padding:16px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:38px;height:38px;flex:0 0 38px;display:block}
+h1{font-size:19px;margin:0}
+.sub{margin:2px 0 0;color:var(--muted);font-size:12px}
+
+main{flex:1;display:flex;align-items:center;justify-content:center;padding:48px 24px}
+.card{width:100%;max-width:380px;background:var(--panel);border:1px solid var(--line);
+  border-radius:var(--radius);padding:30px 30px 26px}
+.pill{display:inline-block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;
+  padding:4px 12px;border-radius:20px;background:rgba(76,154,255,.14);color:var(--accent);
+  border:1px solid rgba(76,154,255,.32)}
+.card h2{margin:14px 0 6px;font-size:22px;font-weight:700;letter-spacing:-.01em}
+.card h2 .grad{background:linear-gradient(90deg,#4f9dff,#22d3a7);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.lede{margin:0 0 22px;color:var(--muted);font-size:13.5px}
+form{display:grid;gap:14px}
+label{display:grid;gap:6px;font-size:11px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em}
+input{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+  padding:10px 12px;border-radius:9px;font-size:14px;font-family:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{margin-top:4px;padding:11px 18px;border-radius:9px;font-size:14px;font-weight:600;
+  cursor:pointer;border:1px solid transparent;background:var(--accent);color:#04101f;
+  font-family:inherit}
+button:hover{filter:brightness(1.1)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.err{margin:2px 0 0;padding:9px 12px;border-radius:9px;font-size:13px;
+  border:1px solid var(--down);background:rgba(239,68,68,.09);color:#f8c9c9}
+.err[hidden]{display:none}
+.note{margin:16px 0 0;color:var(--muted);font-size:12px}
+
+footer{display:flex;flex-wrap:wrap;gap:8px 14px;justify-content:center;
+  padding:18px 24px;border-top:1px solid var(--line);color:var(--muted);font-size:12.5px}
+.sep{width:1px;height:12px;background:var(--line);align-self:center}
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 40 40" role="img" aria-label="AXIOMA logo">
+      <title>AXIOMA</title>
+      <!-- Diamond: the market instrument. Flat top, converging to a point. -->
+      <path d="M20 3 L33 20 L20 37 L7 20 Z" fill="none"
+            stroke="url(#ax-g)" stroke-width="2.5" stroke-linejoin="round" />
+      <!-- Ascending bar pair: the analytics readout behind the mark. -->
+      <path d="M14 25 L14 19 M20 25 L20 14" fill="none"
+            stroke="url(#ax-g)" stroke-width="3" stroke-linecap="round" />
+      <defs>
+        <linearGradient id="ax-g" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#4f9dff" />
+          <stop offset="100%" stop-color="#22d3a7" />
+        </linearGradient>
+      </defs>
+    </svg>
+    <div>
+      <h1>AXIOMA</h1>
+      <p class="sub">Tick microstructure &middot; market data analytics</p>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="card" aria-labelledby="h-signin">
+    <span class="pill">Members</span>
+    <h2 id="h-signin">Sign in to <span class="grad">AXIOMA</span></h2>
+    <p class="lede">The dashboard and its data are for account holders.</p>
+    <form id="loginForm" novalidate>
+      <label>Username
+        <input id="user" name="username" type="text" autocomplete="username"
+               autocapitalize="none" autocorrect="off" spellcheck="false" required />
+      </label>
+      <label>Password
+        <input id="pass" name="password" type="password"
+               autocomplete="current-password" required />
+      </label>
+      <p id="loginErr" class="err" role="alert" hidden></p>
+      <button id="signin" type="submit">Sign in</button>
+    </form>
+    <p class="note">Access questions? Contact the data platform team.</p>
+    <noscript><p class="note">This sign-in form needs JavaScript.</p></noscript>
+  </section>
+</main>
+
+<footer>
+  <strong>AXIOMA Analytics</strong>
+  <span class="sep" aria-hidden="true"></span>
+  <span>Tick microstructure &middot; market data analytics</span>
+  <span class="sep" aria-hidden="true"></span>
+  <span><a href="/welcome">What it measures</a></span>
+</footer>
+
+<script>
+(function () {
+  var form = document.getElementById("loginForm");
+  var err = document.getElementById("loginErr");
+  var btn = document.getElementById("signin");
+  form.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    err.hidden = true;
+    btn.disabled = true;
+    try {
+      var r = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: document.getElementById("user").value,
+          password: document.getElementById("pass").value
+        })
+      });
+      if (r.ok) { location.href = "/"; return; }
+      var msg = "Sign-in failed (" + r.status + ").";
+      try { msg = (await r.json()).detail || msg; } catch (_) {}
+      err.textContent = msg;
+      err.hidden = false;
+    } catch (_) {
+      err.textContent = "The server could not be reached. Try again shortly.";
+      err.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
