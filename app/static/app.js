@@ -255,7 +255,7 @@ async function loadHealth() {
   // clock marks (+15 s), so 05:00:15, 05:01:15, ...
   REFRESH_MINUTES = Number(h.cache_refresh_minutes) || 1;
   REFRESH_OFFSET_SECONDS = Number(h.cache_refresh_offset_seconds) || 0;
-  // The cadence strip: "Data refreshes every minute", mirrored from the API.
+  // The cadence strip: "Data refreshes every 5 minutes", mirrored from the API.
   set("fbCadence", `Data refreshes every ${REFRESH_MINUTES} minutes`);
   renderCoverage(h);
   // The timeline is anchored on the newest `metrics_5m` stop - the point the
@@ -628,7 +628,7 @@ function nextRefresh(intervalMinutes, offsetSeconds) {
  * what "Last update" means: when the pipeline last wrote, whichever point in
  * time is on screen. It falls back to `meta.latest_tick` - the newest tick the
  * analytics query returned - when the probe has nothing. The time is floored to
- * the one-minute refresh step, the grid the ingest cycle lands on, and never
+ * the five-minute refresh step, the grid the ingest cycle lands on, and never
  * rounded up so the badge cannot claim an update from the future. The
  * freshness strip below still describes the loaded window.
  */
@@ -654,7 +654,7 @@ function renderFreshness(report) {
   // The strip reports the loaded window; without a report there is nothing new
   // to say about the window itself, but the cycle stamps (next refresh, cache
   // write) are about the feed and must move on a health-only poll too -
-  // otherwise an open tab never shows the one-minute updates.
+  // otherwise an open tab never shows the five-minute updates.
   const next = nextRefresh(REFRESH_MINUTES, REFRESH_OFFSET_SECONDS);
   set("fbNext", next ? stamp(next.toISOString()) : "\u2013");
   // Proof the Redis cache is moving: when the refresh cycle last finished,
@@ -1578,9 +1578,9 @@ on("calToday", "click", () => {
 document.addEventListener("DOMContentLoaded", () => {
   wireCards();
   init();
-  // Re-read /api/health every minute so an open tab picks up each one-minute
-  // refresh cycle: the header "Last update", the "Next refresh" and
-  // "Cache updated" stamps all move without a manual reload. Health-only:
+  // Re-read /api/health every 5 minutes so an open tab picks up each
+  // five-minute refresh cycle: the header "Last update", the "Next refresh"
+  // and "Cache updated" stamps all move without a manual reload. Health-only:
   // the loaded charts are left alone until the user re-runs.
   setInterval(async () => {
     try {

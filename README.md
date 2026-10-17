@@ -11,8 +11,8 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 per-tick aggregate DOM metrics (`agg_dom`), the precomputed window metrics
 (`metrics_5m`) and the instrument dimension (`symbols_icmarkets`). Results are
 cached in **Redis** (Entra ID, no access key) so a dashboard request never
-re-scans a table, and that eight-hour window is slid forward every minute
-just past the clock mark (:00:15, :01:15, …) — the earliest slice is purged, the
+re-scans a table, and that eight-hour window is slid forward every 5 minutes
+just past the clock mark (:00:15, :05:15, …) — the earliest slice is purged, the
 newest slice is read. The 15 s delay lets the upstream feed settle past the mark
 so the read never races immature data.
 
@@ -46,7 +46,7 @@ REDIS_HOST="<name>.<region>.redis.azure.net"
 REDIS_PORT="10000"
 REDIS_TTL_SECONDS="450"
 CACHE_LOOKBACK_HOURS="8"
-CACHE_REFRESH_MINUTES="1"
+CACHE_REFRESH_MINUTES="5"
 CACHE_REFRESH_OFFSET_SECONDS="15"
 
 # Authentication - see the table below.
@@ -98,8 +98,8 @@ of the cached copy.
 ### Keeping the window current
 
 A cache is only useful if it is fresh, so the app slides the fixed window on a
-schedule: **every `CACHE_REFRESH_MINUTES` (1 by default), just past the
-minute clock marks (:00:15, :01:15, … — the 15 s
+schedule: **every `CACHE_REFRESH_MINUTES` (5 by default), just past the
+five-minute clock marks (:00:15, :05:15, … — the 15 s
 `CACHE_REFRESH_OFFSET_SECONDS` delay lets the upstream feed settle so the read
 never races immature data, e.g. 4:45:15)** a background task advances each cached
 symbol's window. The cycle is scheduled against the wall clock rather than the
@@ -113,7 +113,7 @@ Each cycle slides rather than re-reads:
 * **the new slice** — only rows newer than the symbol's newest cached row are
   fetched from KQL (roughly the last minute), and
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
-  are dropped, which on a one-minute cycle is exactly the earliest slice.
+  are dropped, which on a five-minute cycle is exactly the earliest slice.
 
 A cache entry therefore never holds more than eight hours of a symbol, and the
 KQL read per cycle covers only the interval, not the whole window. The purge is
@@ -125,8 +125,8 @@ its data while no ticks arrive.
 | Window | `CACHE_LOOKBACK_HOURS="8"` | Each symbol's cache entry holds at most eight hours; the UI may narrow it. Four hours of timeline plus the widest 240-minute aggregate window. |
 | Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
 | Window | `WINDOW_CHOICES_MINUTES="60,120,180,240"` | The fixed aggregate-window choices offered at each point in time (1 h / 2 h / 3 h / 4 h), mirroring the `metrics_5m` trailing windows. Choices wider than the cache are dropped. |
-| Refresh | `CACHE_REFRESH_MINUTES="1"`, `CACHE_REFRESH_OFFSET_SECONDS="15"` | The maximum age of what a page load shows, just past the minute marks (e.g. 4:45:15). Set `0` to switch the cycle off and cache lazily, on demand. |
-| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes, many times a one-minute cycle, so a missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+| Refresh | `CACHE_REFRESH_MINUTES="5"`, `CACHE_REFRESH_OFFSET_SECONDS="15"` | The maximum age of what a page load shows, just past the five-minute marks (e.g. 4:45:15). Set `0` to switch the cycle off and cache lazily, on demand. |
+| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes, many times a five-minute cycle, so a missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 | Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
 
 The first cycle runs immediately, so a restart warms the cache instead of
@@ -382,8 +382,8 @@ came back from KQL and the instrument names came from the same KQL database.
 `cache_connected` reports the Redis cache separately — it decides whether a
 request costs a KQL query, but a cache failure is never an outage, because
 reads fall through to KQL. `cache_refreshed_at` (with `cached_symbols`) is the
-age of what the cache is serving: on a healthy one-minute cycle it moves every
-minute, and `cache_refresh_minutes` is the interval it is aiming for.
+age of what the cache is serving: on a healthy five-minute cycle it moves every
+five minutes, and `cache_refresh_minutes` is the interval it is aiming for.
 
 ### Deploying an update
 
@@ -717,7 +717,7 @@ python -m pytest tests -q
 Covers tick-metric reading (one-sided and crossed books, resting-size volume,
 pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
-the refresh cycle (clock-aligned one-minute slots with a 15 s offset, immediate first pass, repeat, a
+the refresh cycle (clock-aligned five-minute slots with a 15 s offset, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
 earliest slice, the default symbol warmed, a failing symbol keeping its
 previous entry, cancellation on shutdown, the one-shot script's exit codes),

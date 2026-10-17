@@ -532,7 +532,7 @@ def test_the_cycle_summary_describes_the_run(redis, kql_rows, catalogue):
     assert summary["rows"] == 240
     assert summary["purged"] == 0            # nothing had aged out yet
     assert summary["cache_window_minutes"] == 240
-    assert summary["interval_minutes"] == 1
+    assert summary["interval_minutes"] == 5
     assert summary["errors"] == []
     assert summary["finished_at"] >= summary["started_at"]
     assert service.last_refresh() == summary
