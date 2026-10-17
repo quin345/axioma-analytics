@@ -368,8 +368,10 @@ def test_the_headline_tiles_read_one_window_not_two():
     assert "Object.entries(s5)" not in body
     assert "r.summary[k] = v" not in body
     assert "r.summary.change = s5.close - s5.open" not in body
-    # The strip is rendered from the report's own summary, unmodified.
-    assert "renderKpis(r.summary, r.microstructure)" in body
+    # The strip is rendered from the report's own summary, unmodified. analyse()
+    # now delegates to renderReport(), which also re-paints when the zone changes.
+    assert "renderReport(r);" in body
+    assert "renderKpis(r.summary, r.microstructure)" in js
     # Both reads still go out together: the tick path feeds the panels only it
     # can fill, and `metrics_5m` still supplies the pre-binned ladder.
     assert "api(`/api/analytics?${p}`)" in body

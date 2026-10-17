@@ -90,6 +90,9 @@
     <label><span class="lab">Rolling window</span>
       <input id="window" type="number" value="50" min="2" max="5000" step="10" />
     </label>
+    <label><span class="lab">Time zone</span>
+      <select id="timeZone" title="IANA zone every wall-clock time is rendered in"></select>
+    </label>
     <!-- Point in time: type a time on the 5-minute grid that the analysis ends at.
          It sits inside the last 4 hours, so the window wraps across midnight when
          it has to; the field always shows a valid wall-clock time in the display zone.

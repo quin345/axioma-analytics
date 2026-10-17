@@ -12,6 +12,14 @@ const charts = {};
  * clock, the time badges and the hourly profile without a re-render. */
 let DISPLAY_TZ = "UTC";
 
+/** Common IANA zones the display can be switched to; the server's zone is the default. */
+const TIME_ZONES = [
+  "UTC",
+  "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+  "Europe/London", "Europe/Berlin", "Asia/Tokyo", "Asia/Kolkata", "Asia/Shanghai",
+  "Australia/Sydney",
+];
+
 /** Short zone abbreviation ("EDT", "UTC"), for the badges next to a time. */
 function tzAbbr() {
   return new Intl.DateTimeFormat("en-US", { timeZone: DISPLAY_TZ, timeZoneName: "short" })
@@ -231,6 +239,7 @@ async function loadHealth() {
   DISPLAY_TZ = h.display_timezone || "UTC";
   const hh = $("hourlyHeading");
   if (hh) hh.textContent = `Activity by hour (${tzAbbr()})`;
+  fillTimeZones(h);
   const dot = $("connDot");
   if (h.connected) {
     dot.className = "dot ok";
@@ -546,6 +555,36 @@ function fillWindows(h) {
   sel.value = String(opts.includes(keep) ? keep : (opts.includes(60) ? 60 : opts[opts.length - 1]));
 }
 
+
+/* ---------------- time-zone picker ---------------- */
+
+/** IANA zone name plus its current offset, e.g. "America/New_York (GMT-4:00)". */
+function zoneLabel(tz) {
+  let off = "";
+  try {
+    const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" })
+      .formatToParts(new Date());
+    const o = p.find((x) => x.type === "timeZoneName")?.value;
+    if (o) off = ` (${o})`;
+  } catch (_) {}
+  return `${tz}${off}`;
+}
+
+/** Fill the time-zone picker from the curated list, defaulting to the zone
+ *  /api/health published, and apply it to DISPLAY_TZ so every wall-clock
+ *  time on the page re-labels in the chosen zone. */
+function fillTimeZones(h) {
+  const sel = $("timeZone");
+  if (!sel) return;
+  const current = (h && h.display_timezone) || DISPLAY_TZ || "UTC";
+  const prev = sel.value;
+  sel.innerHTML = TIME_ZONES.map((tz) => `<option value="${esc(tz)}">${esc(zoneLabel(tz))}</option>`).join("");
+  sel.value = TIME_ZONES.includes(current) ? current
+    : TIME_ZONES.includes(prev) ? prev : "UTC";
+  DISPLAY_TZ = sel.value;
+  const hh = $("hourlyHeading");
+  if (hh) hh.textContent = `Activity by hour (${tzAbbr()})`;
+}
 
 /* ---------------- KPI tiles ---------------- */
 
@@ -1404,6 +1443,35 @@ function syncCalendarDetail() {
   el.innerHTML = DETAILS.calendar ? DETAILS.calendar(null) : "";
 }
 
+/* ---------------- time-zone rendering ---------------- */
+
+/** Re-paint every panel of the last-fetched report in the current display
+ *  zone. Used by "Run" and by the time-zone picker so switching zones re-labels
+ *  every wall-clock time without another API round trip. */
+function renderReport(r) {
+  renderKpis(r.summary, r.microstructure);
+  renderCharts(r);
+  renderTicks(r.ticks);
+  renderPriceTag(r.meta);
+  renderCalendar(r);
+  syncCalendarDetail();
+  renderDetails(r);
+  renderFreshness(r);
+  renderCoverage(window.__health || {});
+}
+
+/** The user picked a different zone: re-label every wall-clock time in the
+ *  loaded report without re-querying the API. */
+function onTimeZoneChange() {
+  const sel = $("timeZone");
+  if (!sel) return;
+  DISPLAY_TZ = sel.value;
+  const hh = $("hourlyHeading");
+  if (hh) hh.textContent = `Activity by hour (${tzAbbr()})`;
+  if (window.__lastReport) renderReport(window.__lastReport);
+}
+
+
 /* ---------------- orchestration ---------------- */
 
 /**
@@ -1487,15 +1555,7 @@ async function analyse() {
     } else if (metricsFailed) {
       banner([`Headline metrics could not be read from metrics_5m: ${metricsFailed.message}`]);
     }
-    renderKpis(r.summary, r.microstructure);
-    renderCharts(r);
-    renderTicks(r.ticks);
-    renderPriceTag(r.meta);
-    renderCalendar(r);
-    syncCalendarDetail();
-    renderDetails(r);
-    renderFreshness(r);
-    renderCoverage(window.__health || {});
+    renderReport(r);
   } catch (err) {
     bannerErr(err.message);
     $("kpis").innerHTML =
@@ -1538,6 +1598,7 @@ async function init() {
 function on(id, ev, fn) { const el = $(id); if (el) el.addEventListener(ev, fn); }
 
 on("run", "click", analyse);
+on("timeZone", "change", onTimeZoneChange);
 // End the session server-side, then land on the sign-in page. The endpoint is
 // public and idempotent, so the button works even after the session expired.
 on("logout", "click", async () => {
