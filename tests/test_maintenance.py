@@ -178,15 +178,15 @@ def test_the_header_says_last_update_not_latest_tick(client):
     assert "Data refreshes every 30 minutes" not in page
 
 
-def test_the_header_last_update_is_floored_to_the_minute_grid():
-    """`Last update` must show the 1-minute mark (14:47:12 -> 14:47), not the
-    raw feed second - and the proof-of-cache chip must exist. The refresh cycle
-    runs every 5 minutes, so the badge lands on the five-minute grid, not a 1-minute one."""
+def test_the_header_last_update_shows_the_actual_timestamp():
+    """`Last update` must show the actual timestamp with seconds (14:47:12),
+    not the raw feed second floored to the minute grid - and the proof-of-cache
+    chip must exist."""
     js = (STATIC / "app.js").read_text(encoding="utf-8")
 
-    assert "fmt.minute(feed)" in js
-    # The visible badge is on the grid; only the hover tooltip keeps seconds.
-    assert "`Last update ${fmt.minute(feed)}" in js
+    assert "fmt.hm(feed)" in js
+    # The visible badge keeps seconds; only the cache stamp stays on the grid.
+    assert "`Last update ${fmt.hm(feed)} ${tzAbbr()}`" in js
     assert 'id="fbCache"' in (STATIC / "index.html").read_text(encoding="utf-8")
     # An open tab re-reads health every 5 minutes so the five-minute cycle shows
     # without a manual reload; a fresh cache stamp pulls the new window.

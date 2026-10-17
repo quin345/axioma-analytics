@@ -666,10 +666,9 @@ function nextRefresh(intervalMinutes, offsetSeconds) {
  * The header badge reads the feed's newest row (`health.latest_tick`), which is
  * what "Last update" means: when the pipeline last wrote, whichever point in
  * time is on screen. It falls back to `meta.latest_tick` - the newest tick the
- * analytics query returned - when the probe has nothing. The time is floored to
- * the five-minute refresh step, the grid the ingest cycle lands on, and never
- * rounded up so the badge cannot claim an update from the future. The
- * freshness strip below still describes the loaded window.
+ * analytics query returned - when the probe has nothing. The badge shows the
+ * actual timestamp with seconds, never rounded to a grid step. The freshness
+ * strip below still describes the loaded window.
  */
 function renderFreshness(report) {
   const h = window.__health || {};
@@ -685,7 +684,7 @@ function renderFreshness(report) {
 
   // Only touch className when a class is supplied (see set() above).
   set("lastTick",
-      feed ? `Last update ${fmt.minute(feed)} ${tzAbbr()}` : "Last update unavailable");
+      feed ? `Last update ${fmt.hm(feed)} ${tzAbbr()}` : "Last update unavailable");
   // tickAge always gets a class: it must lose a stale highlight once cleared.
   set("tickAge", ageText ? `${ageText} ago` : "",
       ageText ? (ageMs > REFRESH_MINUTES * 60_000 ? "tickage stale" : "tickage fresh") : "tickage");
