@@ -9,7 +9,8 @@ limitations — see [`docs/methodology.md`](methodology.md).
 ## Data model at a glance
 
 The app reads a single Fabric **KQL (Eventhouse) database** — `ctrader_dom`
-(`KQL_DATABASE`) — that contains three tables plus the raw pipeline stages:
+(`KQL_DATABASE`) — that contains the metric tables plus the raw pipeline
+stages:
 
 | Table | Grain | Purpose | Env var |
 |---|---|---|---|
@@ -17,7 +18,10 @@ The app reads a single Fabric **KQL (Eventhouse) database** — `ctrader_dom`
 | `dom_book_flat` | reconstructed full order book | ingested, **not** queried | — |
 | `agg_dom` | one row per `(symbolId, tick)` | per-tick derived order-book metrics — the analytics read | `KQL_TABLE` |
 | `metrics_5m` | one row per `(symbolId, as_of)` | precomputed window metrics (1h/2h/3h/4h) incl. volume ladder | `METRICS_TABLE` |
-| `symbols_icmarkets` | one row per `symbolId` | instrument dimension (ticker, class, description) | `SYMBOL_TABLE` |
+
+Instrument metadata lives outside KQL, in local **PostgreSQL**: the
+`symbols_metadata` view (one row per `(symbolId, cTrader account)`) supplies
+ticker, category and description (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`).
 
 Two serving paths feed the dashboard:
 
@@ -112,7 +116,7 @@ cards are click/keyboard disclosures with a detail body.
 | Card (`data-card`) | Title | Report block | Table | Formula / definition |
 |---|---|---|---|---|
 | `ticks` | Latest ticks | `ticks` (`tick_table`) | `agg_dom` | The most recent raw ticks (`tail(limit)`) with `ts, bid, ask, mid, volume, spread_bps, tick_dir`. |
-| `coverage` | Instrument coverage | health + `/api/asset-classes` | `symbols_icmarkets` | Per asset-class instrument rollup. Class derived from `symbolCategoryId` via `assets.classify_asset_class` (FX sub-classed into majors/crosses/exotics). Tag shows `symbol_count` traded, `classified_count` classified. |
+| `coverage` | Instrument coverage | health + `/api/asset-classes` | `symbols_metadata` (PostgreSQL) | Per asset-class instrument rollup. Class derived from `symbolCategoryId` via `assets.classify_asset_class` (FX sub-classed into majors/crosses/exotics). Tag shows `symbol_count` traded, `classified_count` classified. |
 
 ### Calendar
 
@@ -172,12 +176,13 @@ same shape as the tick-derived profile (`bins` descending by price, `poc`,
 
 | Concern | File | Table |
 |---|---|---|
-| KQL access & column contracts | `app/kql.py` | `agg_dom`, `metrics_5m`, `symbols_icmarkets` |
+| KQL access & column contracts | `app/kql.py` | `agg_dom`, `metrics_5m` |
+| Postgres instrument metadata | `app/meta.py` | `symbols_metadata` |
 | Table names / windows / cache settings | `app/config.py` | — |
 | Per-tick reader & normalisation | `app/frames.py` | `agg_dom` |
 | Tick-derived analytics (KPIs + chart blocks) | `app/analytics.py` | `agg_dom` |
 | Precomputed window metrics lookup | `app/metrics.py` | `metrics_5m` |
 | Service/cache orchestration | `app/service.py`, `app/cache.py` | all |
-| Asset-class taxonomy | `app/assets.py` | `symbols_icmarkets` |
+| Asset-class taxonomy | `app/assets.py` | `symbols_metadata` |
 | Dashboard rendering (KPIs + cards) | `app/static/app.js`, `app/static/index.html` | — |
 | `metrics_5m` KQL reference | `docs/metrics_5m.md` | `metrics_5m` |

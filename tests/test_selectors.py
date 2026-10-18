@@ -25,7 +25,8 @@ def catalogue(monkeypatch):
         "1": _inst("1", "EURUSD", "fx_major", 500),
         "2": _inst("2", "XAUUSD", "metal", 400),
         "3": _inst("3", "BTCUSD", "crypto", 300),
-        # No row in symbols_icmarkets: traded, but nothing to classify it by.
+        # No row in the symbols_metadata dimension: traded, but nothing to
+        # classify it by.
         "99": _inst("99", "99", "", 900),
         # Present in the dimension but never traded.
         "4": _inst("4", "GBPUSD", "fx_major", 0),
@@ -149,4 +150,4 @@ def test_health_is_silent_about_the_cycle_before_it_runs(client, catalogue, monk
 def test_coverage_note_is_no_longer_surfaced(client):
     """The hidden-instrument warning was removed from the health hints."""
     hints = client.get("/api/health").json()["hints"]
-    assert not any("symbols_icmarkets" in hint for hint in hints)
+    assert not any("symbols_metadata" in hint for hint in hints)

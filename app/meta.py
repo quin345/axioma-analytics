@@ -79,7 +79,7 @@ def symbol_catalogue(settings: Settings | None = None) -> pd.DataFrame:
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
         f"SELECT {wanted} FROM {_table(s)}{where} "
-        "ORDER BY symbolId, ctrader_account_id"
+        'ORDER BY "symbolId", "ctrader_account_id"'
     )
     try:
         with _connect(s) as conn:

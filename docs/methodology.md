@@ -39,8 +39,7 @@ Out of scope: deployment topology and DNS (see `README.md`), and the KQL that
 ```
 DOM event feed ──▶ ctrader_dom (Fabric KQL / Eventhouse)
                     ├─ agg_dom            per-tick derived order-book metrics
-                    ├─ metrics_5m         precomputed window grid (ladder)
-                    └─ symbols_icmarkets  instrument dimension
+                    └─ metrics_5m         precomputed window grid (ladder)
                             │  (Entra ID: managed identity → SP → az login)
                             ▼
                    app/kql.py  ── reads ──▶ Redis (Entra ID, Parquet + JSON, TTL)
@@ -116,7 +115,10 @@ inherits the reconstruction's fidelity, not merely the exchange's last print.
 | `dom_book_flat` | reconstructed book | ingested, **not queried** | — |
 | `agg_dom` | one row per `(symbolId, tick)` | the analytics read (both for live computation and for the pipeline twin of the KQL) | `KQL_TABLE` |
 | `metrics_5m` | one row per `(symbolId, as_of)` | precomputed four-window grid; supplies the volume-at-price ladder only | `METRICS_TABLE` |
-| `symbols_icmarkets` | one row per `symbolId` | instrument dimension (ticker, category, description) | `SYMBOL_TABLE` |
+
+Instrument metadata (ticker, category, description) is **not** in KQL: it lives
+in local PostgreSQL as the `symbols_metadata` view — one row per
+`(symbolId, cTrader account)` (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`).
 
 Columns projected from `agg_dom` (`kql.METRIC_COLUMNS`): `timestamp`,
 `symbolId`, `total_bid`, `total_ask`, `best_bid`, `best_ask`, `imbalance`,
@@ -662,7 +664,7 @@ cannot change shape when the data source does.
 
 The pipeline publishes the class on each symbol row; the app **consumes the
 pipeline's classification first** rather than guessing
-(`symbols_icmarkets → assets.classify_asset_class`).
+(`symbols_metadata → assets.classify_asset_class`).
 
 1. **Broker class name** → stable client key (`assets.BROKER_CLASSES`):
    Forex→`fx`, Metals→`metal`, Indices→`index`, Oil→`energy`,
@@ -688,9 +690,9 @@ pipeline's classification first** rather than guessing
    is fixed most-liquid-first (`assets.sort_key`).
 
 Known asymmetry, surfaced rather than hidden: `agg_dom` accumulates rows from
-**every** feed that writes to it, while `symbols_icmarkets` describes only
-icmarkets — other feeds' instruments appear as bare ids with no ticker, and the
-health hint says so explicitly.
+**every** feed that writes to it, while `symbols_metadata` describes only the
+scoped account(s)/broker(s) — other feeds' instruments appear as bare ids with
+no ticker, and the health hint says so explicitly.
 
 ---
 

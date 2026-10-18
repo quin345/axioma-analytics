@@ -27,7 +27,8 @@ def _failing_conn(message: str):
 @pytest.fixture
 def settings() -> Settings:
     return Settings(kql_host="https://kql.example.invalid", kql_database="ctrader_dom",
-                    kql_table="agg_dom", symbol_table="symbols_icmarkets",
+                    kql_table="agg_dom", symbol_table="symbols_alt",
+                    pg_symbols_table="symbols_alt",
                     redis_host="cache.example.invalid", cache_lookback_hours=4)
 
 
@@ -105,13 +106,15 @@ def test_a_healthy_probe_reports_connected(monkeypatch):
     assert st.row_count == 100
     assert st.dimension_rows == 348
     assert st.server_time is not None
-    assert seen == ["connect", "symbols_icmarkets"]
+    assert seen == ["connect", "symbols_alt"]
 
 
 def test_the_probe_reads_the_configured_dimension(monkeypatch):
     """The dimension count comes from the configured table, not a hard-coded one."""
     seen: list[str] = []
-    settings = Settings(symbol_table="symbols_icmarkets", kql_host="https://kql.example.invalid")
+    settings = Settings(symbol_table="symbols_alt",
+                        pg_symbols_table="symbols_alt",
+                        kql_host="https://kql.example.invalid")
 
     @contextmanager
     def _connect(s=None):
@@ -132,7 +135,7 @@ def test_the_probe_reads_the_configured_dimension(monkeypatch):
     _patch_cache(monkeypatch)
 
     assert service.status(refresh=True).dimension_rows == 5
-    assert seen == ["symbols_icmarkets"]
+    assert seen == ["symbols_alt"]
 
 
 def test_the_fixed_window_is_echoed_on_the_probe(monkeypatch):

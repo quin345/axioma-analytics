@@ -1,7 +1,7 @@
 """Tests for the asset-class classification (no data source required).
 
 Cases mirror the broker's own class names and the instruments actually present
-in the `symbols_icmarkets` dimension.
+in the `symbols_metadata` dimension.
 """
 from __future__ import annotations
 
