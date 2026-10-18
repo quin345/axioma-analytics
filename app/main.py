@@ -155,6 +155,7 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "symbol_count": traded,
         "classified_count": classified,
         "unclassified_count": unclassified,
+        "uncovered_count": st.uncovered_count,
         "asset_class_count": classes,
         "timeframes": list(analytics.TIMEFRAMES),
         # The IANA zone the dashboard renders every wall-clock time in: the

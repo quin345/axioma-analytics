@@ -530,6 +530,53 @@ def test_a_symbol_without_a_broker_keeps_its_plain_name():
     assert unnamed.display == "8 (ACME)"
 
 
+def test_uncovered_count_reports_and_hides_orphan_instruments(monkeypatch):
+    """Instruments with tick data but no metadata row are counted, not shown."""
+    monkeypatch.setattr(service.meta, "symbol_catalogue", lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(
+        service.kql, "symbol_tick_counts",
+        lambda client, s=None: {
+            "41|100": 100,
+            "41|200": 7,
+            "42|100": 50,
+            "43|100": 200,  # no metadata row -> orphan
+            "44|": 50,      # no account -> orphan
+        },
+    )
+
+    service._build_catalogue(refresh=True)
+
+    # The two orphan data rows have no metadata -> reported, not offered.
+    assert service.uncovered_count() == 2
+    assert {i.symbol_id for i in service._sorted_instruments(only_traded=True)} == {"41", "42"}
+
+
+def test_selector_does_not_offer_instruments_without_metadata(monkeypatch):
+    """Orphans render as bare ids; they must not leak into the selector."""
+    monkeypatch.setattr(service.meta, "symbol_catalogue", lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(
+        service.kql, "symbol_tick_counts",
+        lambda client, s=None: {"41|100": 100, "43|100": 200},
+    )
+
+    service._build_catalogue(refresh=True)
+
+    symbols = service.symbol_list(only_traded=False)
+    assert {s["symbol"] for s in symbols} == {"41", "42"}
+
+
 def test_lookup_resolves_by_symbol_id_preferring_the_scoped_account(monkeypatch):
     """A bare symbol id resolves to the configured account's row, then any row."""
     service._instruments = None

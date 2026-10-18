@@ -129,6 +129,10 @@ class Status:
     metrics_rows: int | None = None
     #: Newest `as_of` stop in the precomputed table.
     metrics_latest: str | None = None
+    #: Instruments with tick data but no metadata row yet; they render as bare
+    #: symbol ids until the metadata is collected, and are not offered in the
+    #: selector. ``None`` while not probed.
+    uncovered_count: int | None = None
 
 
 _status = Status()
@@ -220,6 +224,17 @@ def status(*, refresh: bool = False) -> Status:
         st.meta_connected, st.meta_error = False, str(exc)
         st.hints.append(f"The Postgres metadata is unavailable: {exc}")
 
+    # Instruments with tick data but no metadata row: they present as bare ids
+    # in the selector and are not offered there, so surface them here so the
+    # gap is found instead of discovered by its absence.
+    st.uncovered_count = uncovered_count()
+    if st.uncovered_count:
+        st.hints.append(
+            f"{st.uncovered_count} instrument(s) have tick data but no "
+            "symbols_metadata row yet; they are not shown in the selector "
+            "until the metadata is collected."
+        )
+
     st.cache_connected = cache.ping(s)
     if not st.cache_connected:
         st.cache_error = (
@@ -244,6 +259,20 @@ def traded_count() -> int:
 def unclassified_count() -> int:
     """Traded instruments the KQL dimension does not describe."""
     return sum(1 for i in instruments().values() if i.ticks > 0 and not i.asset_class)
+
+
+def uncovered_count() -> int:
+    """Instruments with tick data but no metadata row yet.
+
+    These arrive in the selectors as bare symbol ids (they carry no broker or
+    ticker) until the broker/symbol metadata is collected. They are not
+    offered in the selectors; this count reports them so the gap stays
+    visible instead of being discovered by its absence.
+    """
+    return sum(
+        1 for i in instruments().values()
+        if i.ticks > 0 and not (i.name and i.broker)
+    )
 
 
 def coverage_note() -> str | None:
@@ -409,8 +438,17 @@ def _sorted_instruments(only_traded: bool) -> list[Instrument]:
     classified at all. The count of such instruments is still reported by
     `unclassified_count`, so the coverage gap stays visible in the health
     hints rather than in the pickers.
+
+    Instruments with tick data but no metadata row are also excluded: without a
+    metadata row they arrive in the selector as a bare symbol id (no broker,
+    no ticker), which is not a usable symbol until the metadata is collected.
+    They are counted by `uncovered_count`, so the gap stays visible rather than
+    silent.
     """
-    rows = [i for i in instruments().values() if i.asset_class]
+    rows = [
+        i for i in instruments().values()
+        if i.asset_class and i.name and i.broker
+    ]
     if only_traded:
         rows = [i for i in rows if i.ticks > 0]
     default_id = default_symbol_id(only_traded=only_traded)
