@@ -46,6 +46,11 @@ DOM event feed ──▶ ctrader_dom (Fabric KQL / Eventhouse)
                             │                     ▲
                             ▼                     │ slide every 5 min
                    app/service.py ◀──── app/refresh.py (clock-aligned cycle)
+                       ▲
+   symbols_metadata ───┘  local PostgreSQL (app/meta.py): broker-agnostic,
+   one row per (symbolId, ctrader_account_id); the KQL facts'
+   (symbolId, ctidTraderAccountId) composite key maps each
+   fact row onto its metadata row (name, class, broker)
                             │
               ┌─────────────┴──────────────┐
               ▼                            ▼
@@ -70,6 +75,7 @@ Module map:
 |---|---|
 | Settings, window geometry, display zone | `app/config.py` |
 | KQL access, column contracts, query discipline | `app/kql.py` |
+| Broker-agnostic instrument metadata (local PostgreSQL) | `app/meta.py` |
 | Tick projection to the canonical frame | `app/frames.py` |
 | Tick-derived analytics | `app/analytics.py` |
 | Precomputed ladder lookup | `app/metrics.py` |
@@ -113,22 +119,26 @@ inherits the reconstruction's fidelity, not merely the exchange's last print.
 |---|---|---|---|
 | `dom_stream_raw` | raw DOM events | ingested, **not queried** by the app | — |
 | `dom_book_flat` | reconstructed book | ingested, **not queried** | — |
-| `agg_dom` | one row per `(symbolId, tick)` | the analytics read (both for live computation and for the pipeline twin of the KQL) | `KQL_TABLE` |
-| `metrics_5m` | one row per `(symbolId, as_of)` | precomputed four-window grid; supplies the volume-at-price ladder only | `METRICS_TABLE` |
+| `agg_dom` | one row per `(symbolId, ctidTraderAccountId, tick)` | the analytics read (both for live computation and for the pipeline twin of the KQL) | `KQL_TABLE` |
+| `metrics_5m` | one row per `(symbolId, ctidTraderAccountId, as_of)` | precomputed four-window grid; supplies the volume-at-price ladder only | `METRICS_TABLE` |
 
 Instrument metadata (ticker, category, description) is **not** in KQL: it lives
 in local PostgreSQL as the `symbols_metadata` view — one row per
-`(symbolId, cTrader account)` (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`).
+`(symbolId, ctrader_account_id)` (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`). The
+feed's `(symbolId, ctidTraderAccountId)` composite key is what maps a fact row
+onto that row, and the row's `broker_name` makes the mapping broker-agnostic:
+same symbol id, different account, different metadata.
 
 Columns projected from `agg_dom` (`kql.METRIC_COLUMNS`): `timestamp`,
 `symbolId`, `total_bid`, `total_ask`, `best_bid`, `best_ask`, `imbalance`,
 `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread`, `rel_spread`,
 `rel_vwap_spread`.
 
-`symbolId` is a KQL `long`; queries therefore cast the *parameter*
-(`symbolId == tolong(sym)`), never the column. A blank or non-numeric
-parameter selects no rows instead of failing — an unknown symbol degrades to
-"no data", not to an error.
+`symbolId` and `ctidTraderAccountId` are both KQL `long`s; queries therefore
+cast the *parameters* (`symbolId == tolong(sym)`,
+`ctidTraderAccountId == tolong(acct)`), never the columns. A blank or
+non-numeric parameter selects no rows instead of failing — an unknown symbol
+or account degrades to "no data", not to an error.
 
 ### 3.4 Authentication
 
@@ -176,9 +186,15 @@ and repopulates.
 | Entry | Key shape | Payload | TTL |
 |---|---|---|---|
 | Instrument catalogue | `axioma:<db>:<table>:catalogue` | JSON | `REDIS_TTL_SECONDS` (450 s) |
-| Per-symbol tick window | `axioma:<db>:<table>:ticks:<symbol>` (or `:all`) | Parquet bytes | same |
+| Per-instrument tick window | `axioma:<db>:<table>:ticks:<symbolId>[:<account>]` (or `:all`) | Parquet bytes | same |
 | Per-symbol metrics grid | `axioma:<db>:metrics:<metrics_table>:<symbol>` | Parquet bytes | same |
 | Built ladder bundles | `…:metrics:report:<symbol>:<stop>` | JSON | same |
+
+The tick key carries the resolved `ctidTraderAccountId` half of the composite
+(`ticks:<symbolId>:<account>`) so two feeds sharing one id never share a
+window; when the account cannot be resolved (catalogue unreachable) the entry
+falls back to the bare `<symbolId>` key and reads every account for that id — a
+degradation, not an error.
 
 Frames travel as **Parquet**: timestamps and floats round-trip with dtypes
 intact and nulls lossless (`cache.get_frame`/`set_frame`), and an unreadable
@@ -237,9 +253,9 @@ reads. The cycle:
    slot still runs).
 6. **Refreshes the `metrics_5m` grids** alongside (`metrics.refresh_symbol`),
    reading only stops newer than the newest cached one, merging with
-   "newest row per `(symbolId, as_of)` wins" (`metrics.slide`), and purging
-   that symbol's built ladder bundles so a rewritten stop cannot serve a stale
-   bundle.
+   "newest row per `(symbolId, ctidTraderAccountId, as_of)` wins"
+   (`metrics.slide`), and purging that symbol's built ladder bundles so a
+   rewritten stop cannot serve a stale bundle.
 7. **Bounded participation.** The target set is read from Redis
    (`cached_symbols`), so a symbol nobody asks for drops out on its own when
    its TTL expires; the set is bounded by real use, not by the dimension size.
@@ -284,7 +300,7 @@ ts | symbol | bid | ask | last | volume | bid_depth | ask_depth | signed_volume
 | Canonical field | Definition | Note |
 |---|---|---|
 | `ts` | `timestamp` parsed as UTC | coercion failures are dropped (`dropna(subset=["ts", …])`) |
-| `symbol` | `symbolId` as a stripped string | one normalisation point for the key everything else uses |
+| `symbol` | `symbolId` as a stripped string | one normalisation point for the per-frame key — the composite's account half is resolved upstream, so a frame always holds one `(symbolId, ctidTraderAccountId)` pair's rows |
 | `bid` / `ask` | `best_bid` / `best_ask` | numeric coercion; must be `> 0` |
 | `last` | `(bid + ask) / 2` | the feed's own trade print is not used; a tick metric only guarantees the quote |
 | `bid_depth` / `ask_depth` | `total_bid` / `total_ask` | resting size at top of book |
@@ -345,7 +361,10 @@ mostly good:
 
 `/api/analytics` answers *what happened in the aggregate window ending at the
 chosen point in time*, entirely in memory over the cached rows
-(`service.load_ticks_cached` → `service._narrow`):
+(`service.load_ticks_cached` → `service._narrow`). The request's `symbol` may
+be a bare `symbolId` or the composite `symbolId|account`; either way the entry
+it hits is keyed by the resolved pair (§4.1), so two feeds sharing one id can
+never share a window. Then:
 
 1. **Clamp the window** to the fixed cache window (`clamp_window`) — never a
    rejection, never a second KQL read.
@@ -573,7 +592,7 @@ for the derived panels.
 
 ### 8.1 What the grid is
 
-One row per `(symbolId, as_of)`; `as_of` runs over the last **4 h in 5-minute
+One row per `(symbolId, ctidTraderAccountId, as_of)`; `as_of` runs over the last **4 h in 5-minute
 stops** (49 stops); each row carries the four fixed trailing windows
 **60/120/180/240 min** ending at `as_of`, as `<metric>_<1h|2h|3h|4h>` columns.
 The app projects only `vap_*` (dynamic ladder) and `poc_*` (real) —
@@ -583,11 +602,16 @@ The app projects only `vap_*` (dynamic ladder) and `poc_*` (real) —
 ### 8.2 Read discipline
 
 * Deduplication: the producer *appends*, so the read keeps the newest row per
-  stop via `arg_max(stamp, *)`, stamp discovered in order
-  `computed_at → ingested_at → none` (`kql.METRICS_STAMPS`); only an unknown
-  *column* error triggers the fallback — auth/throttle/outage errors surface.
+  composite stop — `arg_max(stamp, *) by symbolId, ctidTraderAccountId, as_of` —
+  with the stamp discovered in order `computed_at → ingested_at → none`
+  (`kql.METRICS_STAMPS`); only an unknown *column* error triggers the
+  fallback — auth/throttle/outage errors surface.
+* Account scoping: the read carries the composite's `ctidTraderAccountId`
+  half (resolved from the catalogue), so one id traded under two feeds cannot
+  return interleaved stops; blank means any account.
 * Incremental refresh: `metrics.refresh_symbol` reads only stops at/after the
-  newest cached one; `metrics.slide` merges "newest row per stop wins" and caps
+  newest cached one, scoped to that same resolved account; `metrics.slide`
+  merges "newest row per pair-stop wins" and caps
   the grid at `MAX_TICKS` rows, dropping oldest stops first.
 * A failed grid read keeps the previous entry (same partial-failure rule as
   ticks), and rewriting a grid purges that symbol's built bundles.
@@ -691,8 +715,10 @@ pipeline's classification first** rather than guessing
 
 Known asymmetry, surfaced rather than hidden: `agg_dom` accumulates rows from
 **every** feed that writes to it, while `symbols_metadata` describes only the
-scoped account(s)/broker(s) — other feeds' instruments appear as bare ids with
-no ticker, and the health hint says so explicitly.
+scoped account(s)/broker(s) — a `(symbolId, ctidTraderAccountId)` pair with no
+metadata row cannot be named or classified, so it stays out of the selectors
+instead of appearing as a bare id, and the health hint (`uncovered_count`) says
+how many there are.
 
 ---
 
@@ -791,8 +817,10 @@ Stated explicitly so no reading of the numbers overreaches:
 6. **The refresh cycle assumes a single worker.** It runs inside the one
    uvicorn process (`run.py`, no `--workers`), so there is no distributed lock;
    multiple workers would duplicate the cycle.
-7. **`agg_dom` is shared across feeds** while the dimension describes only
-   icmarkets (§10) — foreign instruments appear as bare ids by design.
+7. **`agg_dom` is shared across feeds** while the dimension is scoped to the
+   configured account(s)/broker(s) (§10) — pairs outside that scope have no
+   metadata row, so they are held out of the selectors and counted by
+   `uncovered_count` instead.
 8. **The two paths answer slightly different windows** (5-minute stop vs.
    exact instant) — which is precisely why scalar overlays between them are
    forbidden (§9).
@@ -811,6 +839,7 @@ precomputed there, described everywhere). When you change one, change all:
 
 | Concept | Where it lives |
 |---|---|
+| Composite grain `(symbolId, ctidTraderAccountId)` → broker-agnostic metadata | `app/kql.py`, `app/service.py`, `app/meta.py` **and** the grain rows in `docs/metrics_5m.md` / `docs/dashboard_metrics.md` |
 | `VOLUME_SCALE`, `mid`/`volume`/`signed_volume` definitions | `app/frames.py` **and** the Stage-1 normalisation in `docs/metrics_5m.md` (the KQL twin) |
 | Grid geometry: `TIMELINE_MINUTES`, `TIMELINE_STEP_MINUTES`, the four window minutes | `app/config.py` **and** `docs/metrics_5m.md` Stage 0 |
 | `VALUE_AREA_SHARE`, POC/HVN rules | `app/analytics.py` **and** shared into `app/metrics.py` |

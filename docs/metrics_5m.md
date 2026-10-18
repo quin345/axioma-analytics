@@ -14,7 +14,7 @@ ladder, price change, distributions — is redone each time a dashboard loads, e
 the same point in time and window.
 
 `metrics_5m` moves that work **server-side and one time per window**: a KQL table
-holds, for every instrument and every 5-minute point in time, the window metrics
+holds, for every `(symbolId, ctidTraderAccountId)` pair and every 5-minute point in time, the window metrics
 already aggregated over fixed **1 h / 2 h / 3 h / 4 h** trailing windows. That
 table is what gets pushed to **Redis**. A dashboard request becomes a lookup of a
 handful of pre-computed columns — the volume-at-price ladder is the one the
@@ -25,7 +25,7 @@ dashboard actually overlays (see *One window per strip*) — never a re-scan of
 
 | Property | Value | Mirrors |
 |---|---|---|
-| Grain | one row per `(symbolId, as_of)` | — |
+| Grain | one row per `(symbolId, ctidTraderAccountId, as_of)` | the composite key that maps each row to the broker-agnostic `symbols_metadata` dimension |
 | Point-in-time grid | last **4 h** in **5-minute** steps (49 stops, `as_of` inclusive) | `TIMELINE_MINUTES=240`, `TIMELINE_STEP_MINUTES=5` |
 | Windows (fixed) | **60 / 120 / 180 / 240** minutes, each ending at `as_of` | replaces the old 5–240 min slider |
 | Scalar columns | **6 metrics × 4 windows = 24** columns (`<metric>_1h … <metric>_4h`) | `app/analytics.py` summary/OFI/spread/vol |
@@ -33,7 +33,7 @@ dashboard actually overlays (see *One window per strip*) — never a re-scan of
 | Nested columns | `dynamic`/`real` per window (`vap_1h…`, `poc_1h…`) | `volume_profile` |
 | Source table | `ctrader_dom.agg_dom` (per-tick derived order-book metrics) | `kql.KQL_TABLE` |
 | Scan span | **8 h** of ticks (4 h timeline + 4 h widest window) | `CACHE_LOOKBACK_HOURS=8` |
-| Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=1` |
+| Refresh | rebuilt on the same clock cadence as the cache today | `CACHE_REFRESH_MINUTES=5` |
 | Row stamp | `computed_at` (`ingested_at` is the legacy fallback) | `kql.METRICS_STAMPS` |
 
 > **OHLC is not in this table.** The `open`/`high`/`low`/`close` window columns
@@ -50,11 +50,12 @@ dashboard actually overlays (see *One window per strip*) — never a re-scan of
 > in the Redis grid, so they can be dropped from this table (and this query) once
 > nothing else consumes them — see *One window per strip* below.
 
-Row shape (one 5-minute `as_of` stop for one symbol), as verified with
-`getschema`:
+Row shape (one 5-minute `as_of` stop for one `(symbolId, ctidTraderAccountId)`
+pair), as verified with `getschema`:
 
 ```
-symbolId : long
+symbolId            : long
+ctidTraderAccountId : long        // the account half of the composite key
 as_of    : datetime            // the point in time this row is "as of"
 ticks_1h … ticks_4h            : long      // 4 cols
 vwap_1h  … vwap_4h             : real      // 4
@@ -96,17 +97,19 @@ let timeline_minutes   = 240;   // TIMELINE_MINUTES
 let timeline_step_min  = 5;     // TIMELINE_STEP_MINUTES
 let win1 = 60; let win2 = 120; let win3 = 180; let win4 = 240;  // fixed windows
 
-// The 5-minute point-in-time grid, anchored on each symbol's newest tick.
+// The 5-minute point-in-time grid, anchored on each pair's newest tick.
+// The grain is the composite (symbolId, ctidTraderAccountId): one id may be
+// traded under several accounts, and each pair maps to its own metadata row.
 let steps = range k from 0 to timeline_minutes step timeline_step_min;
 let sym_anchor =
     agg_dom
-    | summarize anchor = max(timestamp) by symbolId;
+    | summarize anchor = max(timestamp) by symbolId, ctidTraderAccountId;
 let grid =
     sym_anchor
     | extend dummy = 1
     | join kind=inner (steps | extend dummy = 1) on dummy
     | extend as_of = anchor - k * 1m
-    | project symbolId, as_of, dummy
+    | project symbolId, ctidTraderAccountId, as_of, dummy
     | project-away dummy;
 
 // The four windows as rows, so one join carries all of them.
@@ -133,24 +136,27 @@ let TICKS =
     | extend spread_bps = abs(best_ask - best_bid) / mid * 10000.0
     // Directional signal: pipeline imbalance, else resting-size skew (frames.py).
     | extend signed_volume = coalesce(imbalance, total_bid - total_ask)
-    | sort by symbolId asc, timestamp asc, eventSeq asc
+    | sort by symbolId asc, ctidTraderAccountId asc, timestamp asc, eventSeq asc
     | serialize
         prev_mid = prev(mid)
     | extend ret = iif(isnull(prev_mid) or prev_mid == 0, real(null),
                        (mid - prev_mid) / prev_mid)
-    | project symbolId, timestamp, eventSeq, mid, volume,
+    | project symbolId, ctidTraderAccountId, timestamp, eventSeq, mid, volume,
               spread_bps, signed_volume, ret;
 ```
 
-`ret` is computed once per tick on the whole per-symbol stream, exactly as
-`analytics.py` computes returns on the whole prepared frame and then slices. So the
+`ret` is computed once per tick on the whole per-`(symbolId,
+ctidTraderAccountId)` stream — sorted by the pair, so `prev()` never crosses
+into another account's ticks — exactly as `analytics.py` computes returns on the
+whole prepared frame and then slices. So the
 first in-window return still uses the tick just before the window opens — matching
 the pandas `pct_change()` behaviour, and making `realized_vol_bps` faithful.
 
 
 ### Stage 2 — as-of window join (the fan-out)
 
-One inner join produces one row per `(symbolId, as_of, win, tick)`. `eventSeq`
+One inner join produces one row per `(symbolId, ctidTraderAccountId, as_of, win,
+tick)`. `eventSeq`
 breaks the sub-millisecond ties `agg_dom` shares on `timestamp`.
 
 ```kql
@@ -161,7 +167,7 @@ let JOINED =
     | project-away dummy
     | join kind=inner hint.shufflekey = symbolId (
         TICKS
-      ) on symbolId
+      ) on symbolId, ctidTraderAccountId
     | where timestamp between (as_of - minutes * 1m .. as_of);
 ```
 
@@ -172,7 +178,7 @@ let JOINED =
 
 ### Stage 3 — scalar metrics per window
 
-Aggregate to one row per `(symbolId, as_of, win)`, then **spread `win` into
+Aggregate to one row per `(symbolId, ctidTraderAccountId, as_of, win)`, then **spread `win` into
 columns with explicit conditional aggregation**. We do *not* use `evaluate pivot`
 for this: its output schema is data-dependent (per the plugin docs), whereas the
 stored column names are a hard contract the app reads by name.
@@ -204,7 +210,7 @@ let SCALARS =
                               sum(signed_volume) / sum(abs(signed_volume)), real(null)),
         sum_retsq       = sum(pow(ret, 2)),
         dur_s           = (max(timestamp) - min(timestamp)) / 1s
-      by symbolId, as_of, win
+      by symbolId, ctidTraderAccountId, as_of, win
     | extend realized_vol_bps =
         iif(dur_s > 0, sqrt(sum_retsq / dur_s) * 10000.0, real(null))
     | project-away sum_retsq, dur_s
@@ -238,7 +244,7 @@ let SCALARS =
         ofi_imbalance_2h   = take_anyif(ofi_imbalance,   win == "2h"),
         ofi_imbalance_3h   = take_anyif(ofi_imbalance,   win == "3h"),
         ofi_imbalance_4h   = take_anyif(ofi_imbalance,   win == "4h")
-      by symbolId, as_of;
+      by symbolId, ctidTraderAccountId, as_of;
 ```
 
 
@@ -261,7 +267,7 @@ let LADDER =
     JOINED
     | summarize lo = min(mid), hi = max(mid),
                 pts = make_list(pack("p", mid, "v", volume))
-      by symbolId, as_of, win
+      by symbolId, ctidTraderAccountId, as_of, win
     | extend nbins = 40, binw = iif(hi > lo, (hi - lo) / nbins, real(null))
     | mv-expand pts
     | extend idx = iif(isnull(binw), 0,
@@ -269,7 +275,7 @@ let LADDER =
     | extend idx = iif(idx >= nbins, nbins - 1, iif(idx < 0, 0, idx))
     | extend center = iif(isnull(binw), lo, lo + (idx + 0.5) * binw)
     | summarize vol = sum(todouble(pts.v)), cnt = count(), center = any(center)
-      by symbolId, as_of, win, idx
+      by symbolId, ctidTraderAccountId, as_of, win, idx
     | order by idx asc
     | summarize ladder = make_list(pack("price", center, "volume", vol, "ticks", cnt)),
                 // `arg_max(ExprToMaximize, ExprToReturn)`: maximize the *volume*
@@ -277,13 +283,13 @@ let LADDER =
                 // put a volume in the `poc_*` column, i.e. a point of control
                 // that was not the busiest price bin.
                 poc    = arg_max(vol, center)
-      by symbolId, as_of, win
+      by symbolId, ctidTraderAccountId, as_of, win
     // spread the four ladders into vap_1h … vap_4h (nested dynamic columns)
     | summarize vap_1h = take_anyif(ladder, win == "1h"), vap_2h = take_anyif(ladder, win == "2h"),
                 vap_3h = take_anyif(ladder, win == "3h"), vap_4h = take_anyif(ladder, win == "4h"),
                 poc_1h = take_anyif(poc,    win == "1h"), poc_2h = take_anyif(poc,    win == "2h"),
                 poc_3h = take_anyif(poc,    win == "3h"), poc_4h = take_anyif(poc,    win == "4h")
-      by symbolId, as_of;
+      by symbolId, ctidTraderAccountId, as_of;
 ```
 
 `dist_*` (return-distribution histogram) follows the identical shape on `ret`
@@ -297,7 +303,7 @@ resamples can be stored the same way — the ladder is the template.
 // The stored function body:
 let Metrics5m() {
     SCALARS
-    | join kind=inner (LADDER) on symbolId, as_of
+    | join kind=inner (LADDER) on symbolId, ctidTraderAccountId, as_of
     // ---- derived columns (cheap; functions of the stored scalars) ----
     // OHLC (open/high/low/close) are computed above only as *intermediates*
     // for change_pct; they are not stored in the table (see the contract at the
@@ -306,7 +312,7 @@ let Metrics5m() {
     | extend change_pct_2h = iif(open_2h > 0, (close_2h - open_2h) / open_2h * 100.0, real(null))
     | extend change_pct_3h = iif(open_3h > 0, (close_3h - open_3h) / open_3h * 100.0, real(null))
     | extend change_pct_4h = iif(open_4h > 0, (close_4h - open_4h) / open_4h * 100.0, real(null))
-    | project symbolId, as_of,
+    | project symbolId, ctidTraderAccountId, as_of,
               ticks_1h, ticks_2h, ticks_3h, ticks_4h,
               vwap_1h, vwap_2h, vwap_3h, vwap_4h,
               total_volume_1h, total_volume_2h, total_volume_3h, total_volume_4h,
@@ -319,14 +325,15 @@ let Metrics5m() {
     ;
 };
 
-// Refresh: replace the recent slice, keyed by (symbolId, as_of).
+// Refresh: replace the recent slice, keyed by (symbolId, ctidTraderAccountId, as_of).
 // Run on the cache cadence (CACHE_REFRESH_MINUTES) or backfill with a wider range.
 .set-or-append metrics_5m <|
     Metrics5m()
     | where as_of >= ago(4h);
 ```
 
-**Dedup.** Every cycle recomputes the same `(symbolId, as_of)` stops, so the table
+**Dedup.** Every cycle recomputes the same `(symbolId, ctidTraderAccountId,
+as_of)` stops, so the table
 accumulates versions. Either
 - `.set-or-append` only the newest slice and let the reader keep the latest per
   `as_of`, or
@@ -336,7 +343,7 @@ accumulates versions. Either
   ```kql
   .create function Metrics5mLatest() {
       metrics_5m
-      | summarize arg_max(computed_at, *) by symbolId, as_of
+      | summarize arg_max(computed_at, *) by symbolId, ctidTraderAccountId, as_of
   }
   ```
 
@@ -365,7 +372,7 @@ raw ticks, recompute" to "cache the finished metrics, look up":
    It lands under `<prefix>:<database>:metrics_5m:metrics:<symbol>`, keyed apart
    from the raw `agg_dom` ticks: the two hold different shapes under the same
    symbol, so one key namespace for both would let a stale tick frame be read back
-   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (one-minute
+   as metrics. Same TTL (`REDIS_TTL_SECONDS=450`), same clock cadence (five-minute
    slots, 15 s past the mark). A cache miss still falls back to reading
    `metrics_5m` directly, preserving the existing "KQL failure sets
    `connected:false`, cache failure does not" contract in `app/service.py`.
@@ -476,10 +483,10 @@ microstructure panels, so dropping the scalar read costs no extra work.
 - **Realised vol** uses simple per-tick returns and `Σret²/duration_s`, identical
   to `analytics.summary`. Annualisation (`× sqrt(252·24·3600)`) is a multiply and
   is applied on read, not stored.
-- **`summarize ... by symbolId, as_of, win` then re-`summarize`.** The second
-  summarize assumes one row per `(symbolId, as_of, win)` — true here because each
+- **`summarize ... by symbolId, ctidTraderAccountId, as_of, win` then re-`summarize`.** The second
+  summarize assumes one row per `(symbolId, ctidTraderAccountId, as_of, win)` — true here because each
   group is a distinct window. If a symbol has zero ticks in a window, that
-  `(symbolId, as_of, win)` group simply produces no row and its `*_Xh` column is
+  `(symbolId, ctidTraderAccountId, as_of, win)` group simply produces no row and its `*_Xh` column is
   null — the same "no usable rows" case the app already surfaces.
 - **Keep in sync.** `timeline_minutes`, `timeline_step_min`, the four window
   minutes, `VOLUME_SCALE`, and the `mid`/`volume`/`signed_volume` definitions are

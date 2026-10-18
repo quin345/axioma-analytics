@@ -16,12 +16,15 @@ stages:
 |---|---|---|---|
 | `dom_stream_raw` | raw DOM events | ingested, **not** queried by the dashboard | — |
 | `dom_book_flat` | reconstructed full order book | ingested, **not** queried | — |
-| `agg_dom` | one row per `(symbolId, tick)` | per-tick derived order-book metrics — the analytics read | `KQL_TABLE` |
-| `metrics_5m` | one row per `(symbolId, as_of)` | precomputed window metrics (1h/2h/3h/4h) incl. volume ladder | `METRICS_TABLE` |
+| `agg_dom` | one row per `(symbolId, ctidTraderAccountId, tick)` | per-tick derived order-book metrics — the analytics read | `KQL_TABLE` |
+| `metrics_5m` | one row per `(symbolId, ctidTraderAccountId, as_of)` | precomputed window metrics (1h/2h/3h/4h) incl. volume ladder | `METRICS_TABLE` |
 
 Instrument metadata lives outside KQL, in local **PostgreSQL**: the
-`symbols_metadata` view (one row per `(symbolId, cTrader account)`) supplies
-ticker, category and description (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`).
+`symbols_metadata` view (one row per `(symbolId, ctrader_account_id)`) supplies
+ticker, category and description (`SYMBOL_TABLE` / `PG_SYMBOLS_TABLE`). Each
+feed row's `(symbolId, ctidTraderAccountId)` composite key maps onto one of
+those rows, so the metadata it resolves to is broker-agnostic — name, category
+and broker come from the account's own row, never from a per-broker table.
 
 Two serving paths feed the dashboard:
 
@@ -38,6 +41,11 @@ Two serving paths feed the dashboard:
 `timestamp`, `symbolId`, `total_bid`, `total_ask`, `best_bid`, `best_ask`,
 `imbalance`, `imbalance_ratio`, `vwap_bid`, `vwap_ask`, `vwap_spread`, `rel_spread`,
 `rel_vwap_spread`.
+
+The read itself is scoped by the composite key: `symbolId` and
+`ctidTraderAccountId` travel as declarative query parameters
+(`kql._SYMBOL_MATCH` / `kql._ACCOUNT_MATCH`), so one id traded under two feeds
+can never mix rows inside a single frame.
 
 ### Canonical tick frame (`frames.from_ticks` -> `analytics`)
 
@@ -127,7 +135,7 @@ cards are click/keyboard disclosures with a detail body.
 ---
 ## `metrics_5m` volume-at-price ladder (`/api/metrics`, table `metrics_5m`)
 
-`metrics_5m` holds, per `(symbolId, as_of)` stop and per fixed window
+`metrics_5m` holds, per `(symbolId, ctidTraderAccountId, as_of)` stop and per fixed window
 (`1h/2h/3h/4h`, suffixes `_1h`...`_4h`), the **pre-binned volume-at-price ladder**
 (`vap_<w>`) and its point of control (`poc_<w>`). A dashboard request is a lookup:
 pick the row for the `as_of` stop and the `vap_*` column for the chosen window
@@ -161,7 +169,7 @@ same shape as the tick-derived profile (`bins` descending by price, `poc`,
 
 | Property | Value |
 |---|---|
-| Grain | one row per `(symbolId, as_of)` |
+| Grain | one row per `(symbolId, ctidTraderAccountId, as_of)` |
 | Point-in-time grid | last 4 h in 5-minute steps (49 stops, `as_of` inclusive) |
 | Windows (fixed) | 60 / 120 / 180 / 240 minutes, each ending at `as_of` |
 | Columns the app reads | `vap_1h`...`vap_4h` (dynamic), `poc_1h`...`poc_4h` (real) |

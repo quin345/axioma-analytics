@@ -1,6 +1,47 @@
 # Changelog
 
 Notable changes to Axioma Analytics, newest first.
+
+## 2026-10-18 — Docs: (symbolId, ctidTraderAccountId) is the composite key onto broker-agnostic metadata
+
+Scope: documentation. Every doc now states the key the code uses — the KQL
+facts are per `(symbolId, ctidTraderAccountId)` and that composite maps onto
+`symbols_metadata(symbolId, ctrader_account_id)` → `broker_name`, the
+broker-agnostic dimension — and references that no longer match the code were
+dropped.
+
+### Composite key
+- `README.md`: intro, the metadata flow diagram and *Symbol names* document the
+  composite → `ctrader_account_id` → `broker_name` mapping; the cache section,
+  the `metrics_5m` grain and the API section document `ticks:<symbolId>[:<account>]`
+  keys, the `symbol=<symbolId>|<account>` request form and the payload's
+  `account` field; the `/api/health` row adds `meta_connected`/`meta_error`.
+- `docs/dashboard_metrics.md` / `docs/methodology.md`: table grains are
+  `(symbolId, ctidTraderAccountId, tick)` and `(symbolId, ctidTraderAccountId,
+  as_of)`; query scoping (`_SYMBOL_MATCH` / `_ACCOUNT_MATCH`), the cache-key
+  table, `metrics.slide` dedup and the §8 read discipline all key on the pair;
+  the architecture/module maps now include `app/meta.py`.
+- `docs/metrics_5m.md`: the producer contract (grain, row shape, Stage 0
+  anchor, Stage 1 sort/project, Stage 2 join, Stage 3/4 `by` clauses, Stage 5
+  assemble, the `Metrics5mLatest` dedup) groups by the composite, matching what
+  `app/kql.py` reads back.
+
+### Dead references dropped
+- icmarkets-only dimension wording (README troubleshooting, methodology §10/§14)
+  → the dimension is account/broker-scoped; instruments without a metadata row
+  are hidden from the selector and counted by the `uncovered_count` hint.
+- "instrument names came from the same KQL database" → they come from local
+  PostgreSQL, reported by `meta_connected`.
+- "the cycle also warms `DEFAULT_SYMBOL`" and the test-coverage line's "the
+  default symbol warmed" → no default warming exists (a cold cache stays empty
+  until a request lazily loads it).
+- Retired 1-minute cadence: `CACHE_REFRESH_MINUTES=1` / "one-minute slots" in
+  `docs/metrics_5m.md`, the 1-minute prose in `.env.example`, and README's
+  "at most a minute behind" / "roughly the last minute" / "many times a
+  five-minute cycle" → the shipped five-minute cycle (450 s = 1.5 cycles).
+
+---
+
 ## 2026-10-18 — Liquidity read path key on (symbolId, ctraderAccountId)
 - The tick/count read now groups `agg_dom` by `symbolId` **and** `ctidTraderAccountId`; grouping by the id alone previously folded two feeds for one id into one count and silently assigned it to whichever account row came first.
 - `app/kql.py`: `symbol_tick_counts()` builds `(symbolId | ctidTraderAccountId)` keys and `_clean_number()` normalises both halves; null/NaN bins become a blank account (``"41|"``) instead of the bare id.

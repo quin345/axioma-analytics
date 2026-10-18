@@ -10,9 +10,10 @@ The app talks to exactly one source on the production Fabric estate: the **KQL**
 (Eventhouse) database `ctrader_dom`. Every metric table it reads lives there —
 the per-tick aggregate DOM metrics (`agg_dom`) and the precomputed window
 metrics (`metrics_5m`). Instrument metadata moved out to **local PostgreSQL**
-(`symbols_metadata`): each symbol is bound to its cTrader account id
-(`ctrader_account_id`), and each account id maps to its broker name
-(`broker_name`), so the dimension is broker-agnostic. Results are cached in
+(`symbols_metadata`): the feed's own `(symbolId, ctidTraderAccountId)`
+composite key maps onto one row per `(symbolId, ctrader_account_id)` — each
+symbol bound to its cTrader account — and each account id maps to its broker
+name (`broker_name`), so the dimension is broker-agnostic. Results are cached in
 **Redis** (Entra ID, no access key) so a dashboard request never re-scans a
 table, and that eight-hour window is slid forward every 5 minutes just past the
 clock mark (:00:15, :05:15, …) — the earliest slice is purged, the newest slice
@@ -89,9 +90,11 @@ every Redis knob and the alternative credential modes). Never commit the secret.
 ### Cache and the fixed window
 
 KQL is expensive to re-scan, so query results are cached in Redis: the
-instrument catalogue under one key and each symbol's ticks as a Parquet blob
-under its own. A cache miss (or a Redis outage) reads KQL and repopulates;
-a KQL failure is what sets `connected: false`, never a cache failure.
+instrument catalogue under one key and each instrument's ticks as a Parquet
+blob under its own key — the symbol id plus the account half of the composite
+when it could be resolved. A cache miss (or a Redis outage) reads KQL and
+repopulates; a KQL failure is what sets `connected: false`, never a cache
+failure.
 
 The cache holds a **fixed window** (`CACHE_LOOKBACK_HOURS`, 8 by default).
 `/api/health` publishes it as `lookback_minutes`, and `/api/analytics` clamps
@@ -105,10 +108,11 @@ time* field spans four hours (`TIMELINE_MINUTES`) in five-minute steps
 chosen from a small fixed set — **1 h, 2 h, 3 h or 4 h**
 (`WINDOW_CHOICES_MINUTES`, 60/120/180/240). These mirror the four trailing
 windows the precomputed `metrics_5m` KQL table ships for every
-`(symbolId, as_of)` stop, so the control offers only what the table always
-precomputes. The earliest point taken back by the widest window therefore
-reaches exactly 4 h + 4 h, so every combination the controls offer is served
-from the cache. `/api/health` publishes the set as `window_choices_minutes`,
+`(symbolId, ctidTraderAccountId, as_of)` stop, so the control offers only what
+the table always precomputes. The earliest point taken back by the widest
+window therefore reaches exactly 4 h + 4 h, so every combination the controls
+offer is served from the cache. `/api/health` publishes the set as
+`window_choices_minutes`,
 and any choice wider than the cache is dropped rather than offered, so a
 shorter cache narrows the control instead of promising history it cannot fill.
 Moving the point in time or changing the window is a free, in-memory narrowing
@@ -124,13 +128,13 @@ never races immature data, e.g. 4:45:15)** a background task advances each cache
 symbol's window. The cycle is scheduled against the wall clock rather than the
 process start time, so restarts do not shift it and a systemd timer
 (`OnCalendar=*:*:15`) lines up with it. What the dashboard serves is
-therefore at most a minute behind the feed, and anything inside the window
+therefore at most five minutes behind the feed, and anything inside the window
 still costs no query at all.
 
 Each cycle slides rather than re-reads:
 
 * **the new slice** — only rows newer than the symbol's newest cached row are
-  fetched from KQL (roughly the last minute), and
+  fetched from KQL (roughly the last five minutes), and
 * **the purge** — rows older than `CACHE_LOOKBACK_HOURS` before the newest row
   are dropped, which on a five-minute cycle is exactly the earliest slice.
 
@@ -145,15 +149,14 @@ its data while no ticks arrive.
 | Timeline | `TIMELINE_MINUTES="240"`, `TIMELINE_STEP_MINUTES="5"` | The *Point in time* time field: four hours in five-minute steps. |
 | Window | `WINDOW_CHOICES_MINUTES="60,120,180,240"` | The fixed aggregate-window choices offered at each point in time (1 h / 2 h / 3 h / 4 h), mirroring the `metrics_5m` trailing windows. Choices wider than the cache are dropped. |
 | Refresh | `CACHE_REFRESH_MINUTES="5"`, `CACHE_REFRESH_OFFSET_SECONDS="15"` | The maximum age of what a page load shows, just past the five-minute marks (e.g. 4:45:15). Set `0` to switch the cycle off and cache lazily, on demand. |
-| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes, many times a five-minute cycle, so a missed cycle still leaves the cache populated. Keep the TTL above the interval. |
+| TTL | `REDIS_TTL_SECONDS="450"` | 7.5 minutes — 1.5 five-minute cycles — so a missed cycle still leaves the cache populated. Keep the TTL above the interval. |
 | Display | `DISPLAY_TIMEZONE="America/New_York"` | IANA zone the dashboard renders every wall-clock time in. The data stays UTC; this is the lens it is shown through, published to the browser by `/api/health`. |
 
 The first cycle runs immediately, so a restart warms the cache instead of
 leaving the next visitor to pay for it: a symbol with **no** cached entry (cold
 start, TTL expiry after the cycle was down) is read over the whole window, then
 slid incrementally on later cycles. The cycle also refreshes the instrument
-catalogue and includes the configured `DEFAULT_SYMBOL` — so the default view is
-warm too. A symbol nobody has asked for in a while drops out on its own when
+catalogue. A symbol nobody has asked for in a while drops out on its own when
 its TTL expires, so the set stays bounded by real use rather than by the size
 of the instrument dimension. A symbol whose read fails keeps its previous
 entry: a partial failure must not evict data that is merely older.
@@ -168,18 +171,21 @@ The pipeline publishes the class on each symbol row, which the app consumes
 directly rather than guessing:
 
 ```
+agg_dom / metrics_5m  (symbolId, ctidTraderAccountId)  <- the feed's composite key
 symbols_metadata      symbolId, symbolName, symbolCategoryId, description,
                       ctrader_account_id, broker_name
-  -> app/meta.py        one row per (symbol, cTrader account); account id maps
-                        to broker name (broker-agnostic)
+  -> app/meta.py        one row per (symbolId, ctrader_account_id); the KQL
+                        composite maps onto it, and each account id maps to
+                        its broker name (broker-agnostic)
   -> app/assets.py      symbolCategoryId -> broker class -> client key
 ```
 
-The dimension now lives in local PostgreSQL and is broker-agnostic: every symbol
-row is bound to the cTrader account it came from (`ctrader_account_id`), and
-each account id maps to its broker name (`broker_name`). The read can be scoped
-to one account or broker with `CTRADER_ACCOUNT_ID` / `BROKER_NAME`; blank means
-all accounts and all brokers.
+The dimension now lives in local PostgreSQL and is broker-agnostic: every KQL
+fact row carries the composite `(symbolId, ctidTraderAccountId)`, which maps
+onto one metadata row keyed `(symbolId, ctrader_account_id)` — the symbol bound
+to the cTrader account it came from — and each account id maps to its broker
+name (`broker_name`). The read can be scoped to one account or broker with
+`CTRADER_ACCOUNT_ID` / `BROKER_NAME`; blank means all accounts and all brokers.
 
 The app consumes `symbolCategoryId` the same way as before:
 `app/assets.py` maps it to stable client keys and sub-divides FX (majors /
@@ -208,8 +214,10 @@ disappears from the selector. Anything still unresolved is reported as
 
 Note that `agg_dom` is shared and accumulates rows from every feed that writes to
 it, while `symbols_metadata` describes only the scoped account(s)/broker(s).
-Any other feed's instruments therefore appear as bare ids with no ticker — the
-health hint names that explicitly rather than leaving it to be guessed at.
+Instruments whose `(symbolId, ctidTraderAccountId)` pair has no metadata row
+cannot be named or classified, so they are kept out of the selector rather than
+offered as bare ids — `/api/health` reports how many there are
+(`uncovered_count` hint).
 
 ---
 
@@ -410,7 +418,8 @@ curl -s https://axiomanalytics.info/  | grep -c "What it measures"  # front page
 ```
 
 `connected: true` with a non-zero `row_count` means the full path works: rows
-came back from KQL and the instrument names came from the same KQL database.
+came back from KQL, and `meta_connected` confirms the instrument names came
+from the local Postgres dimension.
 `cache_connected` reports the Redis cache separately — it decides whether a
 request costs a KQL query, but a cache failure is never an outage, because
 reads fall through to KQL. `cache_refreshed_at` (with `cached_symbols`) is the
@@ -581,14 +590,18 @@ the dashboard.
 `symbols_metadata` (local PostgreSQL) supplies `(symbolId, ctraderAccountId)
 -> symbolName`, so the same symbol id bound to several cTrader accounts keeps
 each account's own ticker (`XAUUSD`, `EURUSD`, `BTCUSD`) instead of raw numeric
-ids. Table names are never exposed.
+ids. Each KQL row's `(symbolId, ctidTraderAccountId)` composite maps onto one
+of these metadata rows, which is how a feed row resolves to broker-agnostic
+metadata (name, category, broker). Table names are never exposed.
 
 The name the UI shows is that ticker **with the row's broker appended** —
 `XAUUSD (Broker)`. The catalogue is keyed by the same
 `(symbolId, ctraderAccountId)` composite, so every entry is labelled with the
 broker of the account on its own row rather than whichever account's row was
 read first. The selector payload carries `name` (broker appended), plus bare
-`ticker` and `broker` fields; classification and the `DEFAULT_SYMBOL` match
+`ticker`, `broker` and `account` fields — `account` is the account half of the
+composite, which the browser sends back as `symbol=<symbolId>|<account>` so the
+read lands on that exact feed. Classification and the `DEFAULT_SYMBOL` match
 still compare the bare ticker.
 
 ---
@@ -634,7 +647,7 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_choices_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
+| `GET /api/health?refresh=true` | Connection status (`connected` from the KQL probe, `meta_connected`/`meta_error` for the Postgres dimension, `cache_connected`/`cache_error` for Redis), the published `window_minutes` aggregate window (and the raw `lookback_minutes` cache window it is capped by), the point-in-time controls (`timeline_minutes`, `timeline_step_minutes`, `window_choices_minutes`, `window_min_minutes`, `window_max_minutes`), the refresh cycle (`cache_refresh_minutes`, `cache_refreshed_at`, `cached_symbols`), coverage and hints (no storage details) |
 | `GET /api/asset-classes` | The class taxonomy plus a per-class instrument rollup |
 | `GET /api/symbols?asset_class=&family=&include_idle=` | Instruments grouped by asset class |
 | `GET /api/analytics` | Full tick-derived analytics bundle (charts, tick tape, calendar, microstructure) |
@@ -650,8 +663,11 @@ ts (datetime, UTC) | symbol | bid | ask | last | volume | mid
 `/api/symbols` returns `groups` (per asset class), a flat `symbols` list and a
 `summary`; omitting `asset_class` returns everything.
 
-`/api/analytics` parameters: `symbol`, `timeframe`, `window`, `bins`, `limit`,
-`window_minutes`, `lookback_minutes` (deprecated alias), `as_of`.
+`/api/analytics` parameters: `symbol` (a bare `symbolId` or the composite
+`symbolId|account` — the dashboard sends the composite, taken from the
+selected option's `account`, so the read lands on that exact feed),
+`timeframe`, `window`, `bins`, `limit`, `window_minutes`, `lookback_minutes`
+(deprecated alias), `as_of`.
 
 `window_minutes` is clamped to the cache's fixed window (`lookback_minutes` in
 `/api/health`), never rejected. `as_of` is the point in time the window ends at
@@ -669,7 +685,8 @@ symbol's `asset_class`.
 curl -s 'localhost:8000/api/analytics?symbol=41&window_minutes=60&as_of=2026-10-09T02:20:00Z'
 ```
 
-`/api/metrics` parameters: `symbol`, `window_minutes`, `as_of`. The dashboard
+`/api/metrics` parameters: `symbol` (bare id or `symbolId|account`, as above),
+`window_minutes`, `as_of`. The dashboard
 reads this alongside `/api/analytics` for the same symbol, window and point in
 time, and overlays only its pre-binned volume-at-price ladder; the headline
 tiles and the panels only the tick path can fill come from `/api/analytics`.
@@ -760,8 +777,8 @@ pipeline imbalance), the Redis cache path (cold read -> one KQL call, warm reads
 served from cache, per-symbol keys, cache-outage fallthrough, window clamping),
 the refresh cycle (clock-aligned five-minute slots with a 15 s offset, immediate first pass, repeat, a
 failing cycle that keeps the loop alive, the sliding window's purge of the
-earliest slice, the default symbol warmed, a failing symbol keeping its
-previous entry, cancellation on shutdown, the one-shot script's exit codes),
+earliest slice, a failing symbol keeping its previous entry, cancellation on
+shutdown, the one-shot script's exit codes),
 the pages and routes around them (`/` serving the dashboard, the retained
 `/dashboard` alias, `/unavailable` and `/welcome`), the login gate (opt-in via
 `LOGIN_PASSWORD`: page redirects, `401` API answers, the `HttpOnly` cookie and
@@ -793,5 +810,5 @@ both stubbed, and the cycle is driven with a stub instead of the network.
 | `Principal ... is not authorized to read database 'ctrader_dom'` | The identity authenticates but has no read access to the KQL database. Grant **Contributor** on the workspace (it covers read on the Eventhouse items too), or add the identity as a **Database viewer** on the Eventhouse database (→ *Manage permissions*). |
 | `The production endpoint is not configured` | Same, reached through the API. |
 | `The KQL aggregate table is empty` | The ingest pipeline has not written rows yet. |
-| Instruments show as ids with no ticker | They come from a feed other than icmarkets; see the `/api/health` hint. |
+| Instruments are missing from the selector | They have no `symbols_metadata` row yet (no ticker or broker), so they are hidden by design; the `/api/health` `uncovered_count` hint names how many. |
 | `external policy action ... was denied` | **Viewer** role: OneLake security filters Viewers and hides whole tables. Grant **Contributor**. |
