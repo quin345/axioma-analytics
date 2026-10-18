@@ -39,8 +39,12 @@ class Instrument:
 
     The catalogue is keyed by the ``(symbolId, ctraderAccountId)`` composite
     so the same symbol id bound to several cTrader accounts keeps each
-    account's own symbol name; ``symbol_id`` itself stays the plain id so
-    tick-cache keys, lookups and the selector payload keep working by symbol.
+    account's own symbol name *and* its broker; ``symbol_id`` itself stays the
+    plain id so tick-cache keys, lookups and the selector payload keep working
+    by symbol. ``name`` stays the bare ticker (classification and the
+    default-ticker match compare it exactly) while ``broker`` - read from the
+    same dimension row, hence the correct one for this account - is appended
+    in ``display``, which is what the UI shows as the symbol name.
     """
     symbol_id: str
     name: str
@@ -48,10 +52,22 @@ class Instrument:
     asset_class: str
     ticks: int
     account: str = ""
+    #: Broker of the account this row is bound to (``broker_name``), or blank
+    #: for an instrument the metadata dimension does not describe.
+    broker: str = ""
 
     @property
     def display(self) -> str:
-        return self.name or self.symbol_id
+        """The symbol name with its broker appended: ``XAUUSD (Broker)``.
+
+        The broker comes from the same ``(symbolId, ctraderAccountId)`` row as
+        the ticker, so the composite key is what makes it the *right* broker
+        for this entry; without an account scope the first row's broker would
+        label every account's symbol.
+        """
+        base = self.name or self.symbol_id
+        broker = (self.broker or "").strip()
+        return f"{base} ({broker})" if broker else base
 
     @property
     def family(self) -> str:
@@ -61,7 +77,12 @@ class Instrument:
         label = CLASS_LABELS.get(self.asset_class, "Unclassified")
         return {
             "symbol": self.symbol_id,
+            # What the UI shows: the ticker with its broker appended.
             "name": self.display,
+            # Bare ticker and broker separately, so a client that needs an
+            # exact match (the XAUUSD default) never parses the label back.
+            "ticker": self.name,
+            "broker": self.broker,
             "description": self.description,
             "asset_class": self.asset_class,
             "asset_class_label": label,
@@ -254,7 +275,9 @@ def _catalogue_key(symbol_id: str, account: str) -> str:
 
     Keeps one entry per ``(symbol, account)`` so the same symbol id bound to
     several cTrader accounts keeps each account's own symbol name instead of
-    letting the first row per id silence the rest.
+    letting the first row per id silence the rest. The broker rides on the
+    same row as the account, so the composite is also what gives every entry
+    the broker its own account belongs to.
     """
     return f"{symbol_id}|{account}"
 
@@ -265,10 +288,11 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
     Names/classification come from local ``symbols_metadata`` (broker-agnostic,
     scoped by account/broker); tick counts come from KQL. The catalogue is keyed
     by the ``(symbolId, ctraderAccountId)`` composite so the same symbol id
-    bound to several cTrader accounts keeps each account's own symbol name.
-    Both reads are whole tables, so the merged catalogue goes to Redis and the
-    next request - in this process or another - reuses it instead of repeating
-    them.
+    bound to several cTrader accounts keeps each account's own symbol name
+    *and* the broker that account belongs to - the name the UI shows is the
+    ticker with that broker appended. Both reads are whole tables, so the
+    merged catalogue goes to Redis and the next request - in this process or
+    another - reuses it instead of repeating them.
     """
     s = get_settings()
     ck = cache.key(s, "catalogue")
@@ -291,15 +315,19 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
             continue
         # Postgres returns typed nulls; normalise those to empty strings. One
         # row per (symbol, account) survives in the dimension, so keying by the
-        # composite preserves every account's symbol name; counts still come
-        # from KQL and are keyed by symbol id alone.
+        # composite preserves every account's symbol name *and* its broker -
+        # both live on the same row, so each entry is labelled with the broker
+        # its own account belongs to; counts still come from KQL and are keyed
+        # by symbol id alone.
         key = _catalogue_key(symbol_id, account)
         name = _text(row.symbolName)
+        broker = _text(getattr(row, "broker_name", ""))
         description = _text(row.description)
         category = _text(getattr(row, "symbolCategoryId", ""))
         out[key] = Instrument(
             symbol_id=symbol_id,
             account=account,
+            broker=broker,
             name=name,
             description=description,
             asset_class=classify_asset_class(name, None, category, description),

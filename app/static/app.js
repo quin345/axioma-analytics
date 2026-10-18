@@ -353,6 +353,8 @@ function fillSymbols(symbols) {
   // value (the API needs it) but is kept out of the visible label.
   // Every instrument is selectable; the default (XAUUSD) is simply sorted first
   // and the broker description sits alongside the ticker and asset class.
+  // `s.name` already carries the broker (`XAUUSD (Broker)`); `s.ticker` is the
+  // bare row for the exact-match fallbacks below.
   sel.innerHTML = symbols.map((s) => {
     const id = s.symbol ?? "";
     const label = s.name || id;
@@ -367,7 +369,9 @@ function fillSymbols(symbols) {
   const pinned = window.__defaultSymbol
     && symbols.some((s) => (s.symbol ?? "") === window.__defaultSymbol)
     ? window.__defaultSymbol : null;
-  const byName = symbols.find((s) => (s.name || "").toUpperCase() === "XAUUSD");
+  const byName = symbols.find(
+    (s) => ((s.ticker ?? s.name) || "").toUpperCase() === "XAUUSD",
+  );
   const fallback = pinned || (byName && byName.symbol) || (symbols[0].symbol ?? "");
   sel.value = stillThere ? prev : fallback;
 }

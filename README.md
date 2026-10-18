@@ -583,6 +583,14 @@ the dashboard.
 each account's own ticker (`XAUUSD`, `EURUSD`, `BTCUSD`) instead of raw numeric
 ids. Table names are never exposed.
 
+The name the UI shows is that ticker **with the row's broker appended** —
+`XAUUSD (Broker)`. The catalogue is keyed by the same
+`(symbolId, ctraderAccountId)` composite, so every entry is labelled with the
+broker of the account on its own row rather than whichever account's row was
+read first. The selector payload carries `name` (broker appended), plus bare
+`ticker` and `broker` fields; classification and the `DEFAULT_SYMBOL` match
+still compare the bare ticker.
+
 ---
 
 ## Architecture

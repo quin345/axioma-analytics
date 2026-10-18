@@ -5,6 +5,37 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-18 — Symbol name carries its broker
+
+Scope: the name a reader sees for a symbol now includes the broker it came
+from (`XAUUSD (ACME)`), resolved per account through the existing
+`(symbolId, ctraderAccountId)` composite key.
+
+### Backend
+- [x] `app/service.py`: `Instrument` gains a `broker` field (read from the
+      dimension row's `broker_name`); `display` — and therefore the payload's
+      `name` and the report's `symbol_name` — appends it as `Ticker (Broker)`.
+      The bare `name` ticker is unchanged so classification, `lookup()` and the
+      `DEFAULT_SYMBOL` match keep comparing exactly; `to_dict()` now also
+      exposes `ticker` and `broker` for clients that need an exact value.
+      The catalogue stays keyed by `(symbolId, ctraderAccountId)`, which is
+      what makes the appended broker the one belonging to that entry's own
+      account instead of the first row per symbol id.
+- [x] `app/static/app.js`: the XAUUSD exact-name fallback matches `s.ticker`
+      (bare) instead of the broker-annotated label.
+
+### Tests
+- [x] `tests/test_service.py`: pins that each composite entry appends *its*
+      account's broker and that a blank broker keeps the plain name.
+- [x] `tests/test_selectors.py`: pins the payload's `name`/`ticker`/`broker`.
+- [x] `python -m pytest tests -q` → 427 passed (3 new), 0 failures.
+
+### Docs
+- [x] `README.md`: the "Symbol names" section documents the appended broker
+      and the `ticker`/`broker` payload fields.
+
+---
+
 ## 2026-10-18 — Instrument metadata moves from Fabric KQL to local PostgreSQL
 
 Scope: the instrument dimension leaves the Fabric KQL database and is served

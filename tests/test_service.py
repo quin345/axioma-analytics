@@ -460,6 +460,53 @@ def test_catalogue_keeps_one_entry_per_symbol_and_account(monkeypatch):
     assert catalogue["42|100"].ticks == 50
 
 
+def test_symbol_name_carries_the_broker_of_its_own_account(monkeypatch):
+    """The displayed name appends the broker of the account on the same row.
+
+    The composite ``(symbolId, ctraderAccountId)`` key is what makes this the
+    *right* broker: symbol 41 lives under two accounts, so a per-id key would
+    hand both entries whichever broker's row came first.
+    """
+    monkeypatch.setattr(service.meta, "symbol_catalogue",
+                        lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(service.kql, "symbol_tick_counts",
+                        lambda client, s=None: {"41": 100, "42": 50})
+
+    catalogue = service._build_catalogue(refresh=True)
+
+    assert catalogue["41|100"].broker == "A"
+    assert catalogue["41|200"].broker == "B"
+    assert catalogue["42|100"].broker == "A"
+    # Bare ticker stays bare for classification and the default-ticker match;
+    # the broker is appended where the UI reads the name.
+    assert catalogue["41|100"].name == "XAUUSD"
+    assert catalogue["41|100"].display == "XAUUSD (A)"
+    assert catalogue["41|200"].display == "Gold (B)"
+    assert catalogue["41|100"].to_dict()["name"] == "XAUUSD (A)"
+    assert catalogue["41|200"].to_dict()["name"] == "Gold (B)"
+    # The payload also carries the bare ticker and broker separately, so a
+    # client never has to parse the label back apart.
+    assert catalogue["41|100"].to_dict()["ticker"] == "XAUUSD"
+    assert catalogue["41|100"].to_dict()["broker"] == "A"
+
+
+def test_a_symbol_without_a_broker_keeps_its_plain_name():
+    """No metadata row (or a blank broker) means no parentheses in the name."""
+    bare = service.Instrument("7", "EURUSD", "", "fx_major", 10)
+    assert bare.display == "EURUSD"
+    assert bare.to_dict()["name"] == "EURUSD"
+    assert bare.to_dict()["broker"] == ""
+
+    unnamed = service.Instrument("8", "", "", "", 0, broker="ACME")
+    assert unnamed.display == "8 (ACME)"
+
+
 def test_lookup_resolves_by_symbol_id_preferring_the_scoped_account(monkeypatch):
     """A bare symbol id resolves to the configured account's row, then any row."""
     service._instruments = None

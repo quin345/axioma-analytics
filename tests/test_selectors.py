@@ -74,6 +74,18 @@ def test_idle_instruments_still_need_a_class(client):
     assert "99" not in [s["symbol"] for s in body["symbols"]]
 
 
+def test_the_payload_name_appends_the_instrument_broker(catalogue):
+    """The selector label is the ticker plus its broker, ticker kept bare."""
+    catalogue["2"].broker = "ACME"
+
+    gold = [s for s in service.symbol_list(only_traded=True)
+            if s["symbol"] == "2"][0]
+
+    assert gold["name"] == "XAUUSD (ACME)"
+    assert gold["ticker"] == "XAUUSD"
+    assert gold["broker"] == "ACME"
+
+
 # ----------------------------------------------------------------------
 # The asset-class picker must not collapse when a class is selected
 # ----------------------------------------------------------------------
