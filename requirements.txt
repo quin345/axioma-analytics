@@ -8,3 +8,4 @@ python-dotenv>=1.0
 pydantic>=2.9
 azure-identity>=1.17
 azure-kusto-data>=5.0
+psycopg2-binary>=2.9

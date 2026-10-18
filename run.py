@@ -59,8 +59,10 @@ def main() -> None:
         raise SystemExit(1)
 
     print(f"\n  Axioma Analytics  \u2192  http://{args.host}:{args.port}")
-    print(f"  Data (KQL)  : {settings.kql_database}.{settings.kql_table} "
-          f"+ {settings.symbol_table}")
+    print(f"  Data (KQL)  : {settings.kql_database}.{settings.kql_table}")
+    meta = (f"{settings.pg_host}:{settings.pg_port}/{settings.pg_database}"
+            f" ({settings.pg_symbols_table})")
+    print(f"  Metadata (PG): {meta}")
     cache = (f"{settings.redis_host}:{settings.redis_port}"
              if settings.redis_configured else "not configured - reading KQL per request")
     print(f"  Cache       : {cache}, window {settings.cache_lookback_hours} h")

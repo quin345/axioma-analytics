@@ -418,6 +418,77 @@ def catalogue(monkeypatch):
     return build
 
 
+# ----------------------------------------------------------------------
+# Symbol catalogue: keyed by the (symbolId, ctraderAccountId) composite
+# ----------------------------------------------------------------------
+
+def _symbol_dimension() -> pd.DataFrame:
+    """symbols_metadata rows: one symbol id bound to two accounts, plus a lone symbol."""
+    return pd.DataFrame([
+        {"symbolId": 41, "symbolName": "XAUUSD", "symbolCategoryId": "metals",
+         "description": "Gold vs US Dollar", "ctrader_account_id": "100", "broker_name": "A"},
+        {"symbolId": 41, "symbolName": "Gold", "symbolCategoryId": "metals",
+         "description": "Gold vs US Dollar", "ctrader_account_id": "200", "broker_name": "B"},
+        {"symbolId": 42, "symbolName": "EURUSD", "symbolCategoryId": "forex",
+         "description": "Euro vs US Dollar", "ctrader_account_id": "100", "broker_name": "A"},
+    ])
+
+
+def test_catalogue_keeps_one_entry_per_symbol_and_account(monkeypatch):
+    """The same symbol id under two accounts keeps both symbol names."""
+    monkeypatch.setattr(service.meta, "symbol_catalogue",
+                        lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(service.kql, "symbol_tick_counts",
+                        lambda client, s=None: {"41": 100, "42": 50})
+
+    catalogue = service._build_catalogue(refresh=True)
+
+    assert set(catalogue) == {"41|100", "41|200", "42|100"}
+    assert catalogue["41|100"].symbol_id == "41"
+    assert catalogue["41|100"].account == "100"
+    assert catalogue["41|100"].name == "XAUUSD"
+    assert catalogue["41|100"].ticks == 100
+    assert catalogue["41|200"].account == "200"
+    assert catalogue["41|200"].name == "Gold"
+    assert catalogue["42|100"].name == "EURUSD"
+    assert catalogue["42|100"].ticks == 50
+
+
+def test_lookup_resolves_by_symbol_id_preferring_the_scoped_account(monkeypatch):
+    """A bare symbol id resolves to the configured account's row, then any row."""
+    service._instruments = None
+    try:
+        service._instruments = {
+            "41|100": service.Instrument("41", "XAUUSD", "", "metal", 100, account="100"),
+            "41|200": service.Instrument("41", "Gold", "", "metal", 100, account="200"),
+        }
+
+        monkeypatch.setattr(service, "get_settings",
+                            lambda: Settings(ctrader_account_id="200"))
+        inst = service.lookup("41")
+        assert inst is not None
+        assert inst.name == "Gold"
+        assert inst.account == "200"
+
+        monkeypatch.setattr(service, "get_settings",
+                            lambda: Settings(ctrader_account_id=""))
+        inst = service.lookup("41")
+        assert inst is not None
+        assert inst.name == "XAUUSD"
+        assert inst.account == "100"
+
+        assert service.lookup("99") is None
+        assert service.lookup("") is None
+    finally:
+        service._instruments = None
+
+
 def test_cached_symbols_are_listed_from_redis(redis, kql_rows):
     """The refresh set is what is stored, not a memory list that can drift."""
     service.load_ticks_cached("1", limit=100000, window_minutes=60)

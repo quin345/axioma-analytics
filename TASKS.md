@@ -5,6 +5,52 @@ Notable changes to Axioma Analytics, newest first.
 ---
 ---
 
+## 2026-10-18 — Instrument metadata moves from Fabric KQL to local PostgreSQL
+
+Scope: the instrument dimension leaves the Fabric KQL database and is served
+from local PostgreSQL (`symbols_metadata`), broker-agnostic — each symbol row is
+bound to its cTrader account id (`ctrader_account_id`) and each account id maps
+to its broker name (`broker_name`). Ticks (`agg_dom`) and the precomputed grid
+(`metrics_5m`) stay in KQL. `psycopg2-binary` added to requirements.
+
+### Backend
+- [x] `app/meta.py` (new): reads `symbols_metadata` from Postgres via psycopg2,
+      scoped by `CTRADER_ACCOUNT_ID` / `BROKER_NAME` (blank = all accounts /
+      all brokers). Returns `symbolId`, `symbolName`, `symbolCategoryId`,
+      `description` plus the account/broker scope; newest write per
+      (symbol, account) wins; `symbol_catalogue`, `symbol_count` and `ping`.
+- [x] `app/config.py`: `symbol_table` kept as a legacy alias honoring
+      `SYMBOL_TABLE`/`PG_SYMBOLS_TABLE` (default `symbols_metadata`). Adds
+      `pg_host`/`pg_port`/`pg_database`/`pg_user`/`pg_password`/
+      `pg_symbols_table`/`ctrader_account_id`/`broker_name`/`pg_timeout_seconds`.
+- [x] `app/service.py`: health probes KQL and Postgres independently
+      (`meta_connected`/`meta_error` on `/api/health`); the catalogue merges
+      Postgres metadata with KQL tick counts; a metadata outage leaves ticks
+      readable but names/classification stale. `kql.symbol_count`/`symbol_catalogue`
+      kept as deprecated wrappers over `app.meta`.
+- [x] `app/service.py`: the catalogue is keyed by the `(symbolId, ctraderAccountId)`
+      composite so the same symbol id bound to several cTrader accounts keeps each
+      account's own `symbolName` instead of the first row per id silencing the rest;
+      `lookup()` resolves a bare symbol id to the configured account's row
+      (`CTRADER_ACCOUNT_ID`) or the first match; `reset()` purges cache entries by
+      plain symbol id. New tests pin both behaviours.
+- [x] `app/kql.py`: retires the `symbol_catalogue`/`symbol_count` KQL reads;
+      both now delegate to `app.meta` with a deprecation warning.
+- [x] `app/main.py`: `/api/health` publishes `meta_connected` and `meta_error`.
+- [x] `run.py`: startup banner prints the Postgres metadata location.
+- [x] `requirements.txt`: adds `psycopg2-binary>=2.9`.
+- [x] `.env.example` / `README.md`: document the Postgres metadata block and the
+      `symbols_metadata` schema; retire `symbols_icmarkets` references.
+
+### Tests
+- [x] `tests/test_status.py`: probes `app.meta` instead of `kql.symbol_count`;
+      metadata reachability reported independently of KQL.
+- [x] `tests/test_config.py`: `symbol_table`/`pg_symbols_table` default to
+      `symbols_metadata`.
+- [x] `python -m pytest tests -q` → 424 passed (incl. 2 new composite-key
+      catalogue/lookup tests); the 4 `test_analytics_api` failures are
+      pre-existing (need the VM's managed identity for live KQL).
+
 ## 2026-10-17 — Dashboard login gate
 
 Scope: one username/password now stands between a visitor and the dashboard

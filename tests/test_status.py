@@ -1,15 +1,16 @@
-"""Tests for the health probe (no data source required).
+"""Tests for the health probe.
 
-Rows *and* names come from the one KQL database now, so there is a single
-source whose failure makes the dashboard unhealthy. Redis is reported next to
-it but never gates it: the cache is what keeps a request from re-scanning
-``agg_dom``, so losing it costs a query rather than an outage. These tests pin
-both halves of that contract.
+Rows come from the Fabric KQL database; instrument names/classification come
+from the local PostgreSQL ``symbols_metadata`` table, probed independently of
+KQL so a metadata outage never masks a KQL outage. Redis is reported next to
+both but never gates them: a cache outage costs a query rather than an outage.
+These tests pin both halves of that contract.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pandas as pd
 import pytest
 
 from app import service
@@ -43,12 +44,14 @@ def _patch_kql(monkeypatch, *, rows: int = 100,
                metrics_stops: int = 49,
                metrics_latest: str | None = "2026-10-08T01:00:00Z",
                error: str | None = None) -> list[str]:
-    """Patch the KQL probe; return the list the connection lifecycle is logged in.
+    """Patch the KQL probe and the Postgres metadata probe.
 
-    `rows=0` / `symbols=0` replay an empty-but-readable table, which is the
-    ingest-pipeline case rather than the endpoint-down case. `metrics_stops=0`
-    replays an empty `metrics_5m`, which is the stalled-metrics-job case: the
-    ticks are flowing but the precomputed grid has not been rebuilt.
+    The instrument dimension now reads from local PostgreSQL (``app.meta``),
+    so both data-plane probes are faked here. `rows=0` / `symbols=0` replay
+    an empty-but-readable table, which is the ingest-pipeline case rather than
+    the endpoint-down case. `metrics_stops=0` replays an empty `metrics_5m`,
+    which is the stalled-metrics-job case: the ticks are flowing but the
+    precomputed grid has not been rebuilt.
     """
     seen: list[str] = []
 
@@ -56,6 +59,16 @@ def _patch_kql(monkeypatch, *, rows: int = 100,
     def _connect(settings=None):
         seen.append("connect")
         yield object()
+
+    def _symbol_count(settings=None) -> int:
+        seen.append(getattr(settings, "pg_symbols_table", settings.symbol_table
+                              if settings else "symbols_metadata"))
+        return symbols
+
+    def _symbol_catalogue(settings=None) -> pd.DataFrame:
+        return pd.DataFrame(columns=["symbolId", "symbolName",
+                                     "symbolCategoryId", "description",
+                                     "ctrader_account_id", "broker_name"])
 
     if error:
         monkeypatch.setattr(service.kql, "connect",
@@ -70,6 +83,9 @@ def _patch_kql(monkeypatch, *, rows: int = 100,
                             lambda client, settings=None: symbols)
         monkeypatch.setattr(service.kql, "metrics_stats",
                             lambda client, settings=None: (metrics_stops, metrics_latest))
+    # Metadata now comes from Postgres, probed independently of KQL.
+    monkeypatch.setattr(service.meta, "symbol_count", _symbol_count)
+    monkeypatch.setattr(service.meta, "symbol_catalogue", _symbol_catalogue)
     return seen
 
 
@@ -89,7 +105,7 @@ def test_a_healthy_probe_reports_connected(monkeypatch):
     assert st.row_count == 100
     assert st.dimension_rows == 348
     assert st.server_time is not None
-    assert seen == ["connect"]
+    assert seen == ["connect", "symbols_icmarkets"]
 
 
 def test_the_probe_reads_the_configured_dimension(monkeypatch):
@@ -105,9 +121,14 @@ def test_the_probe_reads_the_configured_dimension(monkeypatch):
     monkeypatch.setattr(service.kql, "connect", _connect)
     monkeypatch.setattr(service.kql, "server_time", lambda c, s=None: "now")
     monkeypatch.setattr(service.kql, "tick_stats", lambda c, s=None: (1, None))
-    monkeypatch.setattr(service.kql, "symbol_count",
-                        lambda c, s=None: seen.append(s.symbol_table) or 5)
     monkeypatch.setattr(service.kql, "metrics_stats", lambda c, s=None: (49, "now"))
+
+    def _symbol_count(s=None):
+        seen.append(getattr(s, "pg_symbols_table", settings.symbol_table))
+        return 5
+
+    # Metadata now comes from Postgres (symbols_metadata), probed independently.
+    monkeypatch.setattr(service.meta, "symbol_count", _symbol_count)
     _patch_cache(monkeypatch)
 
     assert service.status(refresh=True).dimension_rows == 5
@@ -161,7 +182,9 @@ def test_a_failing_kql_endpoint_disconnects_the_dashboard(monkeypatch):
     assert "KQL" in st.hints[0]
     assert "403" in st.error
     assert st.row_count is None
-    assert st.dimension_rows is None
+    # Metadata is probed independently of KQL: a KQL outage does not blank the
+    # dimension count when Postgres still answers.
+    assert st.dimension_rows == 348
 
 
 def test_an_empty_metrics_table_hints_at_the_ingest_pipeline(monkeypatch):
@@ -245,7 +268,8 @@ def test_the_probe_is_cached_until_refreshed(monkeypatch):
 
     service.status(refresh=True)
     service.status()      # cached
-    assert len(seen) == 1
+    # One KQL connection plus one metadata count; the cache keeps both from
+    # being repeated.
+    assert len(seen) == 2
 
     service.status(refresh=True)
-    assert len(seen) == 2

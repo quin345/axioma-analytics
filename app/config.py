@@ -12,7 +12,12 @@ The app reads **one** source: the production Fabric **KQL** database
   what the headline metrics are served from - pushed to Redis by the refresh
   cycle and read back as a lookup, so a dashboard request never re-scans
   `agg_dom` nor re-derives anything in pandas.
-* ``symbols_icmarkets`` - the icmarkets instrument dimension.
+
+Instrument metadata (``symbols_metadata`` - id, ticker, category,
+description) lives in **local PostgreSQL**, broker-agnostic: each symbol row
+is bound to its cTrader account (``ctrader_account_id``) and each account id
+maps to its broker (``broker_name``), optionally scoped with
+``CTRADER_ACCOUNT_ID`` / ``BROKER_NAME``.
 
 Query results are cached in Redis (`REDIS_HOST`) on the same Entra identity, so
 the dashboard reads KQL once per window rather than on every request. The cache
@@ -143,10 +148,34 @@ class Settings:
     )
     #: The per-tick aggregate DOM metrics the analytics read.
     kql_table: str = field(default_factory=lambda: _env("KQL_TABLE", default="agg_dom") or "agg_dom")
-    #: The icmarkets instrument dimension, in the same KQL database.
+    #: Legacy alias for the instrument dimension, now in local PostgreSQL.
+    #: Retained (still honouring ``SYMBOL_TABLE``) so existing env files and
+    #: tests keep working; it selects the Postgres table in ``app/meta.py``.
     symbol_table: str = field(
-        default_factory=lambda: _env("SYMBOL_TABLE", default="symbols_icmarkets") or "symbols_icmarkets"
+        default_factory=lambda: _env("SYMBOL_TABLE", "PG_SYMBOLS_TABLE",
+                                      default="symbols_metadata") or "symbols_metadata"
     )
+    # --- Local PostgreSQL metadata (broker-agnostic) -------------------------
+    #: ``symbols_metadata(symbolId, symbolName, symbolCategoryId, description,
+    #: ctrader_account_id, broker_name)``. Same symbol shape as before, but one
+    #: row per (symbol, account): each symbol is bound to its cTrader account
+    #: id and each account id maps to its broker name. Only metadata moved -
+    #: ticks and ``metrics_5m`` stay in KQL.
+    pg_host: str = field(default_factory=lambda: _env("PG_HOST", default="localhost") or "localhost")
+    pg_port: int = field(default_factory=lambda: _env_int("PG_PORT", default=5432))
+    pg_database: str = field(default_factory=lambda: _env("PG_DATABASE", default="axioma") or "axioma")
+    pg_user: str = field(default_factory=lambda: _env("PG_USER", default="axioma") or "axioma")
+    pg_password: str | None = field(default_factory=lambda: _env("PG_PASSWORD"))
+    pg_symbols_table: str = field(
+        default_factory=lambda: _env("PG_SYMBOLS_TABLE", "SYMBOL_TABLE",
+                                      default="symbols_metadata") or "symbols_metadata"
+    )
+    #: Optional scope: blank means all accounts / all brokers.
+    ctrader_account_id: str = field(
+        default_factory=lambda: _env("CTRADER_ACCOUNT_ID") or ""
+    )
+    broker_name: str = field(default_factory=lambda: _env("BROKER_NAME") or "")
+    pg_timeout_seconds: int = field(default_factory=lambda: _env_int("PG_TIMEOUT_SECONDS", default=15))
     #: The precomputed window metrics: one row per `(symbolId, as_of)` stop with
     #: every metric already aggregated over the four fixed trailing windows
     #: (1 h / 2 h / 3 h / 4 h). Built by `Metrics5m()` in the metrics repo on the

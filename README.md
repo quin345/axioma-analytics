@@ -7,14 +7,17 @@ spread evolution, volume-at-price, return distribution, price change,
 autocorrelation and large-trade market impact.
 
 The app talks to exactly one source on the production Fabric estate: the **KQL**
-(Eventhouse) database `ctrader_dom`. Every table it reads lives there — the
-per-tick aggregate DOM metrics (`agg_dom`), the precomputed window metrics
-(`metrics_5m`) and the instrument dimension (`symbols_icmarkets`). Results are
-cached in **Redis** (Entra ID, no access key) so a dashboard request never
-re-scans a table, and that eight-hour window is slid forward every 5 minutes
-just past the clock mark (:00:15, :05:15, …) — the earliest slice is purged, the
-newest slice is read. The 15 s delay lets the upstream feed settle past the mark
-so the read never races immature data.
+(Eventhouse) database `ctrader_dom`. Every metric table it reads lives there —
+the per-tick aggregate DOM metrics (`agg_dom`) and the precomputed window
+metrics (`metrics_5m`). Instrument metadata moved out to **local PostgreSQL**
+(`symbols_metadata`): each symbol is bound to its cTrader account id
+(`ctrader_account_id`), and each account id maps to its broker name
+(`broker_name`), so the dimension is broker-agnostic. Results are cached in
+**Redis** (Entra ID, no access key) so a dashboard request never re-scans a
+table, and that eight-hour window is slid forward every 5 minutes just past the
+clock mark (:00:15, :05:15, …) — the earliest slice is purged, the newest slice
+is read. The 15 s delay lets the upstream feed settle past the mark so the read
+never races immature data.
 
 There is no environment switcher, no catalog discovery and no synthetic/demo
 fallback. Storage internals (endpoint host, database, table) are never sent to
@@ -34,12 +37,28 @@ python run.py             # dashboard on http://127.0.0.1:8000
 ## Configuration (`.env`)
 
 ```ini
-# The production data source: one KQL database for everything.
+# The production data source (Fabric KQL / Eventhouse): the metric tables only.
 KQL_ENDPOINT_PROD="https://<eventhouse>.z<region>.kusto.fabric.microsoft.com"
 KQL_DATABASE="ctrader_dom"
 KQL_TABLE="agg_dom"
 METRICS_TABLE="metrics_5m"
-SYMBOL_TABLE="symbols_icmarkets"
+# Instrument metadata moved out of KQL to local PostgreSQL (symbols_metadata).
+# SYMBOL_TABLE is kept as a legacy alias honoring SYMBOL_TABLE / PG_SYMBOLS_TABLE.
+SYMBOL_TABLE="symbols_metadata"
+
+# --- Local PostgreSQL metadata (broker-agnostic) -----------------------------
+# symbols_metadata(symbolId, symbolName, symbolCategoryId, description,
+# ctrader_account_id, broker_name). Scope with CTRADER_ACCOUNT_ID and/or
+# BROKER_NAME; blank means all accounts / all brokers.
+PG_HOST="localhost"
+PG_PORT="5432"
+PG_DATABASE="axioma"
+PG_USER="axioma"
+PG_PASSWORD=""
+PG_SYMBOLS_TABLE="symbols_metadata"
+CTRADER_ACCOUNT_ID=""
+BROKER_NAME=""
+PG_TIMEOUT_SECONDS="15"
 
 # Redis cache (Entra ID; there is no access key).
 REDIS_HOST="<name>.<region>.redis.azure.net"
@@ -149,13 +168,26 @@ The pipeline publishes the class on each symbol row, which the app consumes
 directly rather than guessing:
 
 ```
-symbols_icmarkets          symbolId, symbolName, symbolCategoryId, description
-  -> app/assets.py         symbolCategoryId -> broker class -> client key
+symbols_metadata      symbolId, symbolName, symbolCategoryId, description,
+                      ctrader_account_id, broker_name
+  -> app/meta.py        one row per (symbol, cTrader account); account id maps
+                        to broker name (broker-agnostic)
+  -> app/assets.py      symbolCategoryId -> broker class -> client key
 ```
 
-icmarkets names nine classes; `app/assets.py` maps them to stable client keys
-and sub-divides FX (majors / crosses / exotics), which the pipeline lumps
-together but a dashboard benefits from:
+The dimension now lives in local PostgreSQL and is broker-agnostic: every symbol
+row is bound to the cTrader account it came from (`ctrader_account_id`), and
+each account id maps to its broker name (`broker_name`). The read can be scoped
+to one account or broker with `CTRADER_ACCOUNT_ID` / `BROKER_NAME`; blank means
+all accounts and all brokers.
+
+The app consumes `symbolCategoryId` the same way as before:
+`app/assets.py` maps it to stable client keys and sub-divides FX (majors /
+crosses / exotics), which the pipeline lumps together but a dashboard benefits
+from:
+
+The broker names nine classes (Forex, Metals, Indices, Oil, Cryptocurrencies,
+Commodities, Futures, Bonds, Futures Commodities):
 
 | Broker class | Client key |
 |---|---|
@@ -175,9 +207,9 @@ disappears from the selector. Anything still unresolved is reported as
 `Unclassified`, and `/api/health` says how many instruments are affected.
 
 Note that `agg_dom` is shared and accumulates rows from every feed that writes to
-it, while `symbols_icmarkets` describes only icmarkets. Any other feed's
-instruments therefore appear as bare ids with no ticker — the health hint names
-that explicitly rather than leaving it to be guessed at.
+it, while `symbols_metadata` describes only the scoped account(s)/broker(s).
+Any other feed's instruments therefore appear as bare ids with no ticker — the
+health hint names that explicitly rather than leaving it to be guessed at.
 
 ---
 
@@ -546,9 +578,10 @@ the dashboard.
 
 ### Symbol names
 
-`symbols_icmarkets` (KQL, same database) supplies `symbolId -> symbolName`, so
-the UI shows `XAUUSD`, `EURUSD`, `BTCUSD` instead of raw numeric ids. Table names
-are never exposed.
+`symbols_metadata` (local PostgreSQL) supplies `(symbolId, ctraderAccountId)
+-> symbolName`, so the same symbol id bound to several cTrader accounts keeps
+each account's own ticker (`XAUUSD`, `EURUSD`, `BTCUSD`) instead of raw numeric
+ids. Table names are never exposed.
 
 ---
 

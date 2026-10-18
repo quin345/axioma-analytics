@@ -2,7 +2,8 @@
 
 The pipeline publishes the class on each symbol row:
 
-    symbols_icmarkets   (symbolId, symbolName, symbolCategoryId, description)
+    symbols_metadata   (symbolId, symbolName, symbolCategoryId, description,
+                        ctrader_account_id, broker_name)
 
 `classify_asset_class` reads that category first, so the dashboard groups
 instruments exactly the way the pipeline does. The broker names nine classes

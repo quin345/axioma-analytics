@@ -110,6 +110,10 @@ def health(refresh: bool = Query(False, description="Re-probe the data endpoints
         "latest_tick": st.latest,
         "row_count": st.row_count,
         "dimension_rows": st.dimension_rows,
+        # Instrument metadata now reads from local PostgreSQL; report its own
+        # reachability so operators can tell KQL "down" from metadata "down".
+        "meta_connected": st.meta_connected,
+        "meta_error": st.meta_error,
         "error": st.error,
         "hints": hints,
         "cache_connected": st.cache_connected,

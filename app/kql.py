@@ -1,10 +1,16 @@
-"""KQL access to the production order-book metrics table (Fabric Eventhouse).
+"""KQL access to the production order-book metrics (Fabric Eventhouse).
 
-``ctrader_dom`` holds the whole pipeline - ``dom_stream_raw -> dom_book_flat ->
-agg_dom`` - plus the ``symbols_icmarkets`` instrument dimension, and it is the
-dashboard's only source of data. The metric column names are unchanged from the
-old SQL table, so `app.frames.from_ticks` is untouched by the move; only the
-transport (KQL instead of T-SQL) and the endpoint differ.
+``ctrader_dom`` holds the pipeline - ``dom_stream_raw -> dom_book_flat ->
+agg_dom`` - plus the ``metrics_5m`` precomputed grid, and it is the
+dashboard's source of metric rows. The metric column names are unchanged from
+the old SQL table, so `app.frames.from_ticks` is untouched by the move; only
+the transport (KQL instead of T-SQL) and the endpoint differ.
+
+Instrument metadata moved out to local PostgreSQL (``app.meta``):
+``symbols_metadata`` keeps the same symbol columns but is broker-agnostic -
+each symbol bound to its cTrader account id, each account id to its broker
+name. The ``symbol_catalogue`` / ``symbol_count`` helpers below are kept as
+deprecated thin wrappers over ``app.meta`` so older imports keep working.
 
 Authentication is Entra ID: the VM's managed identity authenticates the client
 directly, with a service principal, then an ``az login`` session, as fallbacks.
@@ -40,10 +46,6 @@ METRIC_COLUMNS = [
     "imbalance", "imbalance_ratio", "vwap_bid", "vwap_ask", "vwap_spread",
     "rel_spread", "rel_vwap_spread",
 ]
-
-#: Columns of one ``symbols_icmarkets`` row, as the metadata notebook ingests it
-#: (``symbolId`` is written as a BIGINT, so it is projected back to a long here).
-SYMBOL_COLUMNS = ["symbolId", "symbolName", "symbolCategoryId", "description"]
 
 #: The window suffixes `metrics_5m` pins every windowed metric with, and the
 #: number of minutes each stands for. `docs/metrics_5m.md` is the contract: the
@@ -239,11 +241,17 @@ def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) ->
     return {str(r.symbolId).strip(): int(r.ticks) for r in df.itertuples()}
 
 
-def symbol_count(client: KustoClient, settings: Settings | None = None) -> int:
-    """Rows in the ``symbols_icmarkets`` dimension, for the health payload."""
-    s = settings or get_settings()
-    df = query(client, f"{table_ref(s.symbol_table)}\n| count", settings=s)
-    return int(df["Count"].iloc[0]) if not df.empty else 0
+def symbol_count(client: KustoClient | None = None, settings: Settings | None = None) -> int:
+    """Deprecated: dimension rows now come from ``app.meta.symbol_count``."""
+    import warnings
+
+    from . import meta as _meta
+
+    warnings.warn("kql.symbol_count is deprecated; use meta.symbol_count.",
+                  DeprecationWarning, stacklevel=2)
+    if isinstance(client, Settings) and settings is None:
+        settings = client
+    return _meta.symbol_count(settings=settings)
 
 
 # --------------------------------------------------------------------------
@@ -384,29 +392,23 @@ def metrics_stats(client: KustoClient, settings: Settings | None = None) -> tupl
     return int(df["stops"].iloc[0]), (None if latest is None or pd.isna(latest) else str(latest))
 
 
-def symbol_catalogue(client: KustoClient, settings: Settings | None = None) -> pd.DataFrame:
-    """One row per instrument: id, ticker, category id and description.
+def symbol_catalogue(client: KustoClient | None = None,
+                     settings: Settings | None = None) -> pd.DataFrame:
+    """Deprecated: the catalogue now comes from ``app.meta.symbol_catalogue``.
 
-    Replaces the SQL ``gold.symbols_icmarkets`` read. The table is a snapshot of
-    the cTrader symbol list, so ``take_any`` picks the single row per id; ids the
-    engine cannot cast to a long are dropped, matching the dimension's own type.
+    ``symbols_metadata`` keeps the same symbol columns but adds the
+    (account, broker) scope; the KQL dimension this used to read no longer
+    exists.
     """
-    s = settings or get_settings()
-    return query(
-        client,
-        f"""
-        {table_ref(s.symbol_table)}
-        | where isnotnull(symbolId)
-        | extend symbolId = tolong(symbolId)
-        | where isnotnull(symbolId)
-        | summarize symbolName = take_any(tostring(symbolName)),
-                    symbolCategoryId = take_any(tolong(symbolCategoryId)),
-                    description = take_any(tostring(description))
-                    by symbolId
-        | project {", ".join(SYMBOL_COLUMNS)}
-        """,
-        settings=s,
-    )
+    import warnings
+
+    from . import meta as _meta
+
+    warnings.warn("kql.symbol_catalogue is deprecated; use meta.symbol_catalogue.",
+                  DeprecationWarning, stacklevel=2)
+    if isinstance(client, Settings) and settings is None:
+        settings = client
+    return _meta.symbol_catalogue(settings=settings)
 
 
 # --------------------------------------------------------------------------

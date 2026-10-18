@@ -1,11 +1,14 @@
-"""Data access for the production KQL endpoint, with a Redis cache in front.
+"""Data access: KQL ticks with a Redis cache, metadata from local PostgreSQL.
 
-`app.kql` is the only source of rows: the per-tick aggregate metrics in
-``agg_dom`` and the instrument dimension in ``symbols_icmarkets`` live in the
-same Fabric KQL database. This module owns the connection lifecycle, the
-instrument catalogue (ticker, asset class, tick count) and the tick fetch, and
-puts every KQL result in Redis so a dashboard request never re-scans a table an
-earlier request has already read.
+`app.kql` is the source of metric rows: the per-tick aggregates in
+``agg_dom`` (and the ``metrics_5m`` grid) live in the Fabric KQL database.
+The instrument dimension moved out: ``symbols_metadata`` lives in local
+PostgreSQL (``app.meta``) - same symbol columns as before, but
+broker-agnostic, one row per (symbol, cTrader account) with each account id
+mapped to its broker name. This module owns the connection lifecycle, the
+instrument catalogue (ticker, asset class, tick count) and the tick fetch,
+and puts every result in Redis so a dashboard request never re-scans a table
+an earlier request has already read.
 
 The cache window is fixed. One KQL read covers `CACHE_LOOKBACK_HOURS` (8 by
 default) of ticks per symbol; the point in time and the aggregate window the
@@ -21,7 +24,7 @@ from dataclasses import asdict, dataclass, field
 
 import pandas as pd
 
-from . import cache, kql, metrics
+from . import cache, kql, meta, metrics
 from .assets import CLASS_LABELS, classify_asset_class, family_label, family_of, sort_key
 from .config import Settings, get_settings
 from .errors import DataSourceError
@@ -32,12 +35,19 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Instrument:
-    """One tradable instrument, with everything the UI needs to show it."""
+    """One tradable instrument, with everything the UI needs to show it.
+
+    The catalogue is keyed by the ``(symbolId, ctraderAccountId)`` composite
+    so the same symbol id bound to several cTrader accounts keeps each
+    account's own symbol name; ``symbol_id`` itself stays the plain id so
+    tick-cache keys, lookups and the selector payload keep working by symbol.
+    """
     symbol_id: str
     name: str
     description: str
     asset_class: str
     ticks: int
+    account: str = ""
 
     @property
     def display(self) -> str:
@@ -69,8 +79,11 @@ class Status:
     server_time: str | None = None
     row_count: int | None = None
     latest: str | None = None
-    #: Rows in the KQL ``symbols_icmarkets`` dimension, or ``None`` when unreadable.
+    #: Rows in the Postgres ``symbols_metadata`` dimension, or ``None`` when unreadable.
     dimension_rows: int | None = None
+    #: Postgres metadata reachability. ``None`` while it has not been probed.
+    meta_connected: bool | None = None
+    meta_error: str | None = None
     #: Redis cache reachability. ``None`` while it has not been probed.
     cache_connected: bool | None = None
     cache_error: str | None = None
@@ -155,14 +168,11 @@ def status(*, refresh: bool = False) -> Status:
         with kql.connect(s) as client:
             st.server_time = kql.server_time(client, s)
             st.row_count, st.latest = kql.tick_stats(client, s)
-            st.dimension_rows = kql.symbol_count(client, s)
             if s.use_metrics_5m:
                 st.metrics_rows, st.metrics_latest = kql.metrics_stats(client, s)
         st.connected, st.error = True, None
         if not st.row_count:
             st.hints = ["The KQL metrics table is empty. Run the ingest pipeline."]
-        elif not st.dimension_rows:
-            st.hints = ["The KQL instrument dimension is empty. Run the metadata notebook."]
         elif s.use_metrics_5m and not st.metrics_rows:
             # The headline metrics come from this table, so an empty one is a
             # real gap even while the ticks are flowing - reported as a hint
@@ -176,6 +186,18 @@ def status(*, refresh: bool = False) -> Status:
     except DataSourceError as exc:
         st.connected, st.error = False, str(exc)
         st.hints = ["The KQL endpoint is unavailable. Check the configured identity."]
+
+    # Metadata lives in local Postgres now, probed independently of KQL: a
+    # metadata outage leaves ticks readable but names/classification stale.
+    try:
+        st.dimension_rows = meta.symbol_count(s)
+        st.meta_connected, st.meta_error = True, None
+        if st.connected and not st.dimension_rows:
+            st.hints = ["The Postgres symbols_metadata dimension is empty. "
+                        "Run the metadata sync."]
+    except DataSourceError as exc:
+        st.meta_connected, st.meta_error = False, str(exc)
+        st.hints.append(f"The Postgres metadata is unavailable: {exc}")
 
     st.cache_connected = cache.ping(s)
     if not st.cache_connected:
@@ -207,8 +229,9 @@ def coverage_note() -> str | None:
     """Warning when the metrics hold instruments the dimension cannot name.
 
     ``agg_dom`` is shared and accumulates rows from every feed that has ever
-    written to it, while ``symbols_icmarkets`` describes only icmarkets. Any
-    other feed's instruments therefore cannot be named or classified. They are
+    written to it, while ``symbols_metadata`` covers only the scoped
+    account(s)/broker(s). Any other feed's instruments therefore cannot be
+    named or classified. They are
     left out of the selectors, so say so rather than leaving the count to be
     discovered by its absence.
     """
@@ -217,8 +240,8 @@ def coverage_note() -> str | None:
         return None
     return (
         f"{missing} instrument(s) in the metrics have no row in "
-        f"symbols_icmarkets and are not shown in the selectors. They come from "
-        f"a feed the icmarkets dimension does not cover."
+        f"symbols_metadata and are not shown in the selectors. They come from "
+        f"a feed the scoped metadata does not cover."
     )
 
 
@@ -226,12 +249,26 @@ def coverage_note() -> str | None:
 # Instrument catalogue
 # --------------------------------------------------------------------------
 
-def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
-    """Merge the KQL instrument dimension with the KQL tick counts.
+def _catalogue_key(symbol_id: str, account: str) -> str:
+    """Composite catalogue key: ``symbolId`` plus ``ctraderAccountId``.
 
-    Both queries scan whole tables, so the merged catalogue goes to Redis and
-    the next request - in this process or another - reuses it instead of
-    repeating them.
+    Keeps one entry per ``(symbol, account)`` so the same symbol id bound to
+    several cTrader accounts keeps each account's own symbol name instead of
+    letting the first row per id silence the rest.
+    """
+    return f"{symbol_id}|{account}"
+
+
+def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
+    """Merge the Postgres symbol dimension with the KQL tick counts.
+
+    Names/classification come from local ``symbols_metadata`` (broker-agnostic,
+    scoped by account/broker); tick counts come from KQL. The catalogue is keyed
+    by the ``(symbolId, ctraderAccountId)`` composite so the same symbol id
+    bound to several cTrader accounts keeps each account's own symbol name.
+    Both reads are whole tables, so the merged catalogue goes to Redis and the
+    next request - in this process or another - reuses it instead of repeating
+    them.
     """
     s = get_settings()
     ck = cache.key(s, "catalogue")
@@ -243,33 +280,40 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
             return {str(k): Instrument(**v) for k, v in stored.items()}
 
     with kql.connect(s) as client:
-        dim = kql.symbol_catalogue(client, s)
+        dim = meta.symbol_catalogue(s)
         counts = kql.symbol_tick_counts(client, s)
 
     out: dict[str, Instrument] = {}
     for row in dim.itertuples():
         symbol_id = _text(row.symbolId)
+        account = _text(getattr(row, "ctrader_account_id", ""))
         if not symbol_id:
             continue
-        # KQL returns typed nulls; normalise those to empty strings. The
-        # asset-class NAME is not in symbols_icmarkets (only the category id),
-        # so the classifier falls back to the description and the ticker.
+        # Postgres returns typed nulls; normalise those to empty strings. One
+        # row per (symbol, account) survives in the dimension, so keying by the
+        # composite preserves every account's symbol name; counts still come
+        # from KQL and are keyed by symbol id alone.
+        key = _catalogue_key(symbol_id, account)
         name = _text(row.symbolName)
         description = _text(row.description)
-        out[symbol_id] = Instrument(
+        category = _text(getattr(row, "symbolCategoryId", ""))
+        out[key] = Instrument(
             symbol_id=symbol_id,
+            account=account,
             name=name,
             description=description,
-            asset_class=classify_asset_class(name, None, _text(row.symbolCategoryId), description),
+            asset_class=classify_asset_class(name, None, category, description),
             ticks=int(counts.get(symbol_id, 0)),
         )
-    # A symbol present in the rows but missing from the dimension still
-    # belongs in the selector; classify it from its id alone.
+    # A symbol present in the tick rows but missing from the dimension under
+    # every account still belongs in the selector; classify it from its id
+    # alone and key it with no account scope so it stays reachable by symbol id.
+    present = {inst.symbol_id for inst in out.values()}
     for symbol_id, ticks in counts.items():
-        if symbol_id not in out:
-            out[symbol_id] = Instrument(symbol_id=symbol_id, name="", description="",
-                                        asset_class=classify_asset_class(symbol_id),
-                                        ticks=int(ticks))
+        if symbol_id not in present:
+            out[_catalogue_key(symbol_id, "")] = Instrument(symbol_id=symbol_id, account="", name="", description="",
+                                                            asset_class=classify_asset_class(symbol_id),
+                                                            ticks=int(ticks))
 
     cache.set_json(ck, {k: asdict(v) for k, v in out.items()}, s.cache_ttl_seconds, s)
     return out
@@ -400,8 +444,25 @@ def taxonomy() -> list[dict]:
 
 
 def lookup(symbol_id: str) -> Instrument | None:
-    """The instrument record for one symbol id."""
-    return instruments().get(str(symbol_id).strip())
+    """The instrument record for one symbol id.
+
+    The catalogue is keyed by the ``(symbolId, ctraderAccountId)`` composite,
+    so a bare symbol id resolves to the row bound to the configured account
+    (``CTRADER_ACCOUNT_ID``) when one is set, otherwise the first matching row.
+    """
+    want = str(symbol_id).strip()
+    if not want:
+        return None
+    account = (get_settings().ctrader_account_id or "").strip()
+    rows = instruments().values()
+    if account:
+        for inst in rows:
+            if inst.symbol_id == want and inst.account == account:
+                return inst
+    for inst in rows:
+        if inst.symbol_id == want:
+            return inst
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -681,9 +742,11 @@ def reset() -> None:
     global _instruments, _status, _last_refresh
     s = get_settings()
     cache.delete(s, cache.key(s, "catalogue"))
-    for inst in (_instruments or {}):
-        cache.delete(s, cache.key(s, "ticks", inst))
-        cache.delete(s, metrics.metrics_key(inst, s))
+    # The catalogue is keyed by (symbolId, account), but tick and metrics
+    # cache entries live under the plain symbol id, so purge by symbol_id.
+    for inst in (_instruments or {}).values():
+        cache.delete(s, cache.key(s, "ticks", inst.symbol_id))
+        cache.delete(s, metrics.metrics_key(inst.symbol_id, s))
     cache.delete(s, cache.key(s, "ticks", "all"))
     cache.delete(s, metrics.metrics_key(None, s))
     _instruments = None

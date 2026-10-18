@@ -49,9 +49,14 @@ def test_defaults_point_at_the_kql_database():
     assert s.kql_table == "agg_dom"
 
 
-def test_defaults_point_at_the_kql_dimension():
-    """The instrument dimension lives in the same KQL database, not in SQL."""
-    assert Settings().symbol_table == "symbols_icmarkets"
+def test_defaults_point_at_the_postgres_dimension():
+    """The instrument dimension now lives in local PostgreSQL, not KQL.
+
+    ``symbol_table`` remains a legacy alias honoring ``SYMBOL_TABLE`` (or
+    ``PG_SYMBOLS_TABLE``); both resolve to ``symbols_metadata`` by default.
+    """
+    assert Settings().symbol_table == "symbols_metadata"
+    assert Settings().pg_symbols_table == "symbols_metadata"
 
 
 def test_defaults_point_at_the_precomputed_metrics_table():
