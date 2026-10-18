@@ -94,7 +94,6 @@ def test_root_serves_the_dashboard_by_default(client):
     assert r.status_code == 200
     assert "Temporarily unavailable" not in r.text
     assert "Under development" not in r.text
-    assert 'id="banner"' in r.text
 
 
 def test_root_serves_the_page_with_503_in_maintenance(client, maintenance):

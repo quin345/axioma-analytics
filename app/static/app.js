@@ -153,7 +153,6 @@ async function api(path) {
   if (r.status === 401) {
     // The session expired or was revoked mid-use. The gate only shows /login
     // to someone who needs it, so one bounce beats a dashboard full of 401
-    // banners; health never 401s (it is a public probe), so the sign-in page
     // is the only place this can lead.
     location.href = "/login";
     throw new Error("Not authenticated.");
@@ -199,29 +198,6 @@ function set(id, text, cls) {
   if (cls) el.className = cls;
 }
 
-function hideBanner() {
-  const el = $("banner");
-  el.className = "banner";   // reset any state classes (and clear inline border colour)
-  el.innerHTML = "";
-  el.classList.add("hidden");
-}
-
-function banner(messages, kind = "warn") {
-  const el = $("banner");
-  if (!messages || !messages.length) { hideBanner(); return; }
-  // Use a class, not an inline style: an inline border set by bannerErr() would
-  // otherwise persist and colour every later "Heads up" banner red.
-  el.className = `banner ${kind === "bad" ? "bad" : ""}`;
-  el.innerHTML = `<b>${kind === "bad" ? "Connection problem" : "Heads up"}</b>` +
-    (kind === "bad" ? "" : `<p>Snapshots refresh every ${REFRESH_MINUTES} minutes, so results may lag the live market.</p>`) +
-    "<ul>" + messages.map((m) => `<li>${esc(m)}</li>`).join("") + "</ul>";
-  el.classList.remove("hidden");
-}
-
-function bannerErr(text) {
-  banner([text], "bad");
-}
-
 /* ---------------- health + instrument coverage ---------------- */
 
 async function loadHealth() {
@@ -258,7 +234,6 @@ async function loadHealth() {
   // symbol dimension does not cover), so surface them in both states. A cache
   // outage arrives as one of those hints: reads still work, they just cost a
   // KQL query, which is a warning rather than a failure.
-  if (h.hints && h.hints.length) banner(h.hints, h.connected ? "warn" : "bad");
   // The controls are configured from the API so they can never drift from what
   // the service actually offers. The refresh cycle runs just past the minute
   // clock marks (+15 s), so 05:00:15, 05:01:15, ...
@@ -1566,11 +1541,11 @@ async function analyse() {
       if (profile) r.volume_profile = profile;
       r.metrics_source = (m.meta || {}).source || null;
     } else if (metricsFailed) {
-      banner([`Headline metrics could not be read from metrics_5m: ${metricsFailed.message}`]);
+      $("kpis").innerHTML =
+        `<div class="kpi"><div class="label">Error</div><div class="value err">${esc(metricsFailed.message)}</div></div>`;
     }
     renderReport(r);
   } catch (err) {
-    bannerErr(err.message);
     $("kpis").innerHTML =
       `<div class="kpi"><div class="label">Error</div><div class="value err">${esc(err.message)}</div></div>`;
   } finally {
@@ -1601,7 +1576,6 @@ async function init() {
     await loadSymbols();
     renderCoverage(health);
   } catch (err) {
-    bannerErr(err.message);
   }
   await analyse();
 }
@@ -1621,7 +1595,7 @@ on("logout", "click", async () => {
 // Changing the asset class re-filters the symbol list, then re-analyses.
 on("assetClass", "change", async () => {
   try { await loadSymbols(); await analyse(); }
-  catch (err) { bannerErr(err.message); }
+  catch (err) {}
 });
 on("refresh", "click", async () => {
   setLoading(true);
@@ -1632,7 +1606,7 @@ on("refresh", "click", async () => {
     await loadSymbols();
     await analyse();
   }
-  catch (err) { bannerErr(err.message); }
+  catch (err) {}
   finally { setLoading(false); }
 });
 on("symbol", "change", analyse);
@@ -1670,6 +1644,6 @@ document.addEventListener("DOMContentLoaded", () => {
       } else if (fresh.latest_tick && fresh.latest_tick !== prevTick) {
         renderFreshness(window.__lastReport || null);
       }
-    } catch (err) { bannerErr(err.message); }
+    } catch (err) {}
   }, 60_000);
 });

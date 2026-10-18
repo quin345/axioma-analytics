@@ -412,7 +412,6 @@ sudo nginx -t && sudo systemctl reload nginx
 ```bash
 curl -s localhost:8000/api/health | python3 -m json.tool     # app, direct
 curl -sk https://app.axiomanalytics.info/api/health            # through nginx
-curl -s https://app.axiomanalytics.info/ | grep -c 'id="banner"'   # dashboard at the root
 curl -s https://www.axiomanalytics.info/ | grep -c "What it measures"  # front page (www)
 curl -s https://axiomanalytics.info/  | grep -c "What it measures"  # front page (bare)
 ```

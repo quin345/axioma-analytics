@@ -120,7 +120,6 @@ def test_root_serves_the_dashboard(client):
     r = client.get("/")
     assert r.status_code == 200
     assert 'src="/static/app.js"' in r.text
-    assert 'id="banner"' in r.text
     assert "Under development" not in r.text
     assert r.headers["cache-control"] == "no-cache, must-revalidate"
 
@@ -130,7 +129,6 @@ def test_the_dashboard_is_retained_at_its_own_path(client):
     r = client.get("/dashboard")
     assert r.status_code == 200
     assert 'src="/static/app.js"' in r.text
-    assert 'id="banner"' in r.text
     assert "Under development" not in r.text
 
 
@@ -167,7 +165,7 @@ def test_the_header_says_last_update_not_latest_tick(client):
     so it is scoped to the header: the freshness strip below keeps its own
     "Latest tick" label, which describes the window on screen."""
     page = client.get("/dashboard").text
-    header = page.partition('<div id="banner"')[0]
+    header = page.partition('<div class="freshbar"')[0]
 
     assert 'id="lastTick"' in header and "Last update" in header
     assert "Latest tick" not in header
@@ -320,6 +318,7 @@ def test_every_helper_the_script_calls_is_defined():
     code = _js_code((STATIC / "app.js").read_text(encoding="utf-8"))
 
     defined = set(re.findall(r"(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", code))
+    defined -= {"banner", "bannerErr"}  # removed with the heads-up banner
     defined |= set(re.findall(r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=", code))
     called = {m.group(1) for m in re.finditer(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(", code)}
 

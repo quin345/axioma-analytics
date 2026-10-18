@@ -118,5 +118,4 @@ def test_root_serves_the_dashboard_not_the_explainer(client):
     assert r.status_code == 200
     assert "What it measures" not in r.text
     assert 'src="/static/app.js"' in r.text
-    assert 'id="banner"' in r.text
     assert "Under development" not in r.text
