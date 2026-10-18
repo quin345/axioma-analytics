@@ -361,7 +361,7 @@ function fillSymbols(symbols) {
     const cls = s.asset_class_label || "Unclassified";
     const desc = (s.description || "").trim();
     const text = desc ? `${label} \u00b7 ${cls} \u2014 ${desc}` : `${label} \u00b7 ${cls}`;
-    return `<option value="${esc(id)}">${esc(text)}</option>`;
+    return `<option value="${esc(id)}"${s.account ? ` data-account="${esc(s.account)}"` : ""}>${esc(text)}</option>`;
   }).join("");
   const stillThere = symbols.some((s) => (s.symbol ?? "") === prev);
   // Default to XAUUSD (the pinned default from /api/symbols) on first load, so
@@ -1506,8 +1506,18 @@ async function analyse() {
     // clamps it to the cached window anyway, so a stale page or a
     // hand-edited URL still returns data rather than a 422.
     const windowMinutes = val("windowMinutes", 60) || 60;
+    // Scope the read to the selected broker's feed: symbolId is shared across
+    // brokers (the same id can name a different pair in each), so append the
+    // account carried on the selected option. Falls back to the bare id when
+    // no account is present (graceful degradation for hand-edited URLs).
+    const symbolSel = $("symbol");
+    let symbol = val("symbol");
+    if (symbolSel && symbolSel.options && symbolSel.selectedIndex >= 0) {
+      const account = symbolSel.options[symbolSel.selectedIndex].dataset.account || "";
+      if (account) symbol = `${symbol}|${account}`;
+    }
     const p = new URLSearchParams({
-      symbol: val("symbol"),
+      symbol: symbol,
       timeframe: val("timeframe", "1m") || "1m",
       window: val("window", 50) || 50,
       limit: val("limit", 50000) || 50000,
@@ -1518,7 +1528,7 @@ async function analyse() {
     // symbol, the span the `metrics_5m` table ships a column set for, and the
     // point in time.
     const mp = new URLSearchParams({
-      symbol: val("symbol"),
+      symbol: symbol,
       window_minutes: windowMinutes,
       ...(point ? { as_of: point } : {}),
     });

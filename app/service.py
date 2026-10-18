@@ -83,6 +83,10 @@ class Instrument:
             # exact match (the XAUUSD default) never parses the label back.
             "ticker": self.name,
             "broker": self.broker,
+            # The cTrader account this row is bound to. The frontend sends it
+            # back with the symbol id so the backend can scope reads to the
+            # right broker's feed - symbolId is shared across brokers.
+            "account": self.account,
             "description": self.description,
             "asset_class": self.asset_class,
             "asset_class_label": label,
@@ -518,12 +522,28 @@ def taxonomy() -> list[dict]:
 def lookup(symbol_id: str) -> Instrument | None:
     """The instrument record for one symbol id.
 
-    The catalogue is keyed by the ``(symbolId, ctraderAccountId)`` composite,
-    so a bare symbol id resolves to the row bound to the configured account
-    (``CTRADER_ACCOUNT_ID``) when one is set, otherwise the first matching row.
+    The catalogue is keyed by the ``(symbolId, ctraderAccountId)`` composite, so a
+    bare symbol id resolves to the row bound to the configured account
+    (``CTRADER_ACCOUNT_ID``) when one is set, otherwise the entry whose ticker
+    matches the configured default symbol.
+
+    `symbol_id` may be a bare symbolId or the composite ``symbolId|account``; a
+    composite resolves to the exact row and bypasses the ambiguity rules that
+    apply to a bare id (symbolId is shared across brokers).
     """
     want = str(symbol_id).strip()
     if not want:
+        return None
+    # A composite key ``symbolId|account`` resolves to the exact row directly.
+    if "|" in want:
+        sid, _, acct = want.partition("|")
+        sid = sid.strip()
+        acct = acct.strip()
+        if not sid:
+            return None
+        for inst in instruments().values():
+            if inst.symbol_id == sid and inst.account == acct:
+                return inst
         return None
     account = (get_settings().ctrader_account_id or "").strip()
     rows = list(instruments().values())
@@ -531,9 +551,22 @@ def lookup(symbol_id: str) -> Instrument | None:
         for inst in rows:
             if inst.symbol_id == want and inst.account == account:
                 return inst
-    # Without a configured account a bare id is ambiguous, so prefer the entry
-    # that actually has ticks: a metadata-only row must not shadow the traded
-    # feed's own (symbolId, ctidTraderAccountId) pair.
+    # Without a configured account a bare id resolves to the entry whose ticker
+    # matches the configured default symbol (otherwise a more heavily-traded
+    # symbol sharing the same numeric symbolId, e.g. EURCHF.pro sharing id 114
+    # with BTCUSD, can shadow the feed the user actually collects).
+    default = (get_settings().default_symbol or "").strip().upper()
+    if default:
+        matched = [
+            i for i in rows
+            if i.symbol_id == want and (i.name or "").strip().upper() == default
+        ]
+        if matched:
+            return max(matched, key=lambda i: i.ticks)
+
+    # Fall back to "prefer the entry that actually has ticks" so a metadata-only
+    # row never shadows the traded feed's own (symbolId, ctidTraderAccountId)
+    # pair.
     traded = [i for i in rows if i.symbol_id == want and i.ticks > 0]
     if traded:
         return max(traded, key=lambda i: i.ticks)
@@ -562,11 +595,15 @@ def cached_symbols(settings: Settings | None = None) -> list[str]:
     """
     s = settings or get_settings()
     marker = cache.key(s, "ticks") + ":"
-    return sorted(
-        k[len(marker):]
-        for k in cache.keys(s, s.kql_database, s.kql_table, "ticks")
-        if k.startswith(marker) and len(k) > len(marker)
-    )
+    symbols = set()
+    for k in cache.keys(s, s.kql_database, s.kql_table, "ticks"):
+        if k.startswith(marker) and len(k) > len(marker):
+            # The tick cache is keyed by ``symbolId|account``; collapse the
+            # account suffix back to the bare symbol id for the refresh set.
+            candidate = k[len(marker):].split(":", 1)[0]
+            if candidate:
+                symbols.add(candidate)
+    return sorted(symbols)
 
 
 def _slide_window(cached: pd.DataFrame, added: pd.DataFrame,
@@ -639,6 +676,9 @@ def refresh_cache(settings: Settings | None = None) -> dict:
     refreshed = rows = purged = 0
     for name in sorted(targets):
         symbol = None if name == "all" else name
+        # `name` is the cache-key suffix: either a bare symbolId or the
+        # composite ``symbolId|account`` the tick path now keys on. `load_raw`
+        # splits the composite and scopes the KQL read to the account.
         ck = cache.key(s, "ticks", name)
         cached = cache.get_frame(ck, s)
 
@@ -728,20 +768,35 @@ def load_raw(symbol: str | None = None, *, limit: int | None = None,
     explicit `start` it is only the slice after that timestamp - which is how
     the refresh cycle appends the newest half hour without re-reading the eight
     hours it already holds.
+
+    `symbol` may be a bare symbolId or the composite ``symbolId|account``.
+    symbolId is shared across brokers - the same numeric id can name a different
+    pair in each - so the read is scoped to the account, either carried in the
+    composite or resolved from the catalogue. Without scoping, an id traded
+    under two feeds returns both feeds' rows interleaved.
     """
     s = get_settings()
     if start is None and end is None and lookback_minutes is None:
         lookback_minutes = s.cache_lookback_minutes
+    symbol_id = symbol
     account = None
     if symbol:
-        try:
-            inst = lookup(str(symbol).strip())
-        except Exception:
-            inst = None
-        account = (inst.account if inst is not None else "") or None
+        symbol = str(symbol).strip()
+        if "|" in symbol:
+            # Composite key: ``symbolId|account`` - use the account directly.
+            symbol_id, account = symbol.split("|", 1)
+            symbol_id = symbol_id.strip()
+            account = account.strip() or None
+        else:
+            symbol_id = symbol
+            try:
+                inst = lookup(symbol_id)
+            except Exception:
+                inst = None
+            account = (inst.account if inst is not None else "") or None
     with kql.connect(s) as client:
         return kql.fetch_ticks(
-            client, symbol=symbol, account=account,
+            client, symbol=symbol_id, account=account,
             limit=int(limit or s.max_ticks),
             lookback_minutes=lookback_minutes, start=start, end=end,
             settings=s,
@@ -792,18 +847,57 @@ def load_ticks_cached(symbol: str | None, limit: int | None = None,
                       end_time: object = None) -> pd.DataFrame:
     """Canonical ticks, served from Redis and narrowed to the request.
 
-    The cached entry is the *whole* fixed window for a symbol, so the point in
-    time and the aggregate window only trim the in-memory copy. A second request
-    for the same symbol therefore never re-queries KQL, whatever it asks for.
+    The cached entry is the *whole* fixed window for an instrument, so the point
+    in time and the aggregate window only trim the in-memory copy. A second
+    request for the same instrument therefore never re-queries KQL, whatever it
+    asks for.
+
+    The cache key is scoped to the instrument's account, not merely its symbolId.
+    symbolId is duplicated across brokers (the same numeric id can name a pair in
+    icmarkets and a different pair in acgmarkets), so a bare symbolId key would
+    merge two different feeds under one cache entry and let a feed the dashboard
+    operator did not collect leak into a symbol it was not selected for.
+
+    `symbol` may be a bare symbolId or the composite ``symbolId|account``. When a
+    bare id is given the account is resolved from the catalogue; if that
+    resolution fails (catalogue unreachable) the request falls back to a bare
+    symbolId key and reads every account for that id - a degradation, not a
+    hard error.
     """
     s = get_settings()
     minutes = clamp_window(window_minutes, s)
     cap = int(limit or s.max_ticks)
-    ck = cache.key(s, "ticks", (symbol or "").strip() or "all")
+    symbol_id = (symbol or "").strip() or "all"
+
+    if symbol_id == "all":
+        ck = cache.key(s, "ticks", "all")
+        raw_symbol = None
+    else:
+        # Split a composite key, else resolve the account from the catalogue so
+        # the cache key distinguishes same-id instruments across brokers.
+        account = ""
+        if "|" in symbol_id:
+            symbol_id, account = symbol_id.split("|", 1)
+            account = account.strip() or ""
+        else:
+            try:
+                inst = lookup(symbol_id)
+            except Exception:
+                inst = None
+            account = (inst.account if inst is not None else "") or ""
+        # Only include a non-empty account in the key: a bare symbolId key is
+        # used when the account could not be resolved (graceful degradation).
+        if account:
+            ck = cache.key(s, "ticks", symbol_id, account)
+            raw_symbol = f"{symbol_id}|{account}"
+        else:
+            ck = cache.key(s, "ticks", symbol_id)
+            raw_symbol = symbol_id
 
     raw = cache.get_frame(ck, s)
     if raw is None:
-        raw = load_raw(symbol, limit=s.max_ticks, lookback_minutes=s.cache_lookback_minutes)
+        raw = load_raw(raw_symbol, limit=s.max_ticks,
+                       lookback_minutes=s.cache_lookback_minutes)
         cache.set_frame(ck, raw, s.cache_ttl_seconds, s)
 
     frame = from_ticks(_narrow(raw, minutes, cap, end_time))
@@ -828,10 +922,15 @@ def reset() -> None:
     global _instruments, _status, _last_refresh
     s = get_settings()
     cache.delete(s, cache.key(s, "catalogue"))
-    # The catalogue is keyed by (symbolId, account), but tick and metrics
-    # cache entries live under the plain symbol id, so purge by symbol_id.
+    # The catalogue is keyed by (symbolId, account), and the tick cache entries
+    # are keyed by that same composite, so purge by the full key. A blank account
+    # is omitted from the key (a bare symbolId key), matching how entries were
+    # written.
     for inst in (_instruments or {}).values():
-        cache.delete(s, cache.key(s, "ticks", inst.symbol_id))
+        if inst.account:
+            cache.delete(s, cache.key(s, "ticks", inst.symbol_id, inst.account))
+        else:
+            cache.delete(s, cache.key(s, "ticks", inst.symbol_id))
         cache.delete(s, metrics.metrics_key(inst.symbol_id, s))
     cache.delete(s, cache.key(s, "ticks", "all"))
     cache.delete(s, metrics.metrics_key(None, s))
