@@ -317,8 +317,9 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
         # row per (symbol, account) survives in the dimension, so keying by the
         # composite preserves every account's symbol name *and* its broker -
         # both live on the same row, so each entry is labelled with the broker
-        # its own account belongs to; counts still come from KQL and are keyed
-        # by symbol id alone.
+        # its own account belongs to. The tick counts are keyed by the same
+        # (symbolId, ctidTraderAccountId) composite out of KQL, so each entry
+        # takes only its own account's ticks, plus the legacy null-account rows.
         key = _catalogue_key(symbol_id, account)
         name = _text(row.symbolName)
         broker = _text(getattr(row, "broker_name", ""))
@@ -331,17 +332,22 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
             name=name,
             description=description,
             asset_class=classify_asset_class(name, None, category, description),
-            ticks=int(counts.get(symbol_id, 0)),
+            ticks=int(counts.get(key, 0) + counts.get(_catalogue_key(symbol_id, ""), 0)),
         )
-    # A symbol present in the tick rows but missing from the dimension under
-    # every account still belongs in the selector; classify it from its id
-    # alone and key it with no account scope so it stays reachable by symbol id.
-    present = {inst.symbol_id for inst in out.values()}
-    for symbol_id, ticks in counts.items():
-        if symbol_id not in present:
-            out[_catalogue_key(symbol_id, "")] = Instrument(symbol_id=symbol_id, account="", name="", description="",
-                                                            asset_class=classify_asset_class(symbol_id),
-                                                            ticks=int(ticks))
+    # A KQL pair whose composite key is missing from the dimension has no
+    # broker row to name it, but it still belongs in the selector: the traded
+    # feed's own (symbolId, ctidTraderAccountId) pair is what the tick and
+    # metrics reads resolve to. So surface one entry per *missing pair* - a
+    # bare-id `present` check would let a metadata-only row (e.g. 41 under the
+    # icmarkets/pepperstone accounts) swallow the actually-traded pair
+    # (41|48449283) and leave its ~470k ticks unreachable.
+    for pair, pair_ticks in counts.items():
+        if pair in out or not int(pair_ticks or 0):
+            continue
+        symbol_id, _, acct = pair.partition("|")
+        out[pair] = Instrument(symbol_id=symbol_id, account=acct, name="", description="",
+                               asset_class=classify_asset_class(symbol_id),
+                               ticks=int(pair_ticks))
 
     cache.set_json(ck, {k: asdict(v) for k, v in out.items()}, s.cache_ttl_seconds, s)
     return out
@@ -482,11 +488,17 @@ def lookup(symbol_id: str) -> Instrument | None:
     if not want:
         return None
     account = (get_settings().ctrader_account_id or "").strip()
-    rows = instruments().values()
+    rows = list(instruments().values())
     if account:
         for inst in rows:
             if inst.symbol_id == want and inst.account == account:
                 return inst
+    # Without a configured account a bare id is ambiguous, so prefer the entry
+    # that actually has ticks: a metadata-only row must not shadow the traded
+    # feed's own (symbolId, ctidTraderAccountId) pair.
+    traded = [i for i in rows if i.symbol_id == want and i.ticks > 0]
+    if traded:
+        return max(traded, key=lambda i: i.ticks)
     for inst in rows:
         if inst.symbol_id == want:
             return inst
@@ -682,9 +694,17 @@ def load_raw(symbol: str | None = None, *, limit: int | None = None,
     s = get_settings()
     if start is None and end is None and lookback_minutes is None:
         lookback_minutes = s.cache_lookback_minutes
+    account = None
+    if symbol:
+        try:
+            inst = lookup(str(symbol).strip())
+        except Exception:
+            inst = None
+        account = (inst.account if inst is not None else "") or None
     with kql.connect(s) as client:
         return kql.fetch_ticks(
-            client, symbol=symbol, limit=int(limit or s.max_ticks),
+            client, symbol=symbol, account=account,
+            limit=int(limit or s.max_ticks),
             lookback_minutes=lookback_minutes, start=start, end=end,
             settings=s,
         )

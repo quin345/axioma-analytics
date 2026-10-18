@@ -196,14 +196,23 @@ def test_tick_stats_reports_an_empty_table_as_no_latest(settings):
     assert kql.tick_stats(client, settings) == (0, None)
 
 
-def test_symbol_tick_counts_keys_on_the_stringified_symbol_id(settings):
-    client = _FakeClient([[{"symbolId": "7701", "ticks": 5},
-                           {"symbolId": 42, "ticks": 3}]])
+def test_symbol_tick_counts_keys_on_the_symbol_and_account_composite(settings):
+    """Tick counts join the broker dimension on the composite, not the id."""
+    client = _FakeClient([[{"symbolId": "7701", "ctidTraderAccountId": 111, "ticks": 5},
+                           {"symbolId": 42, "ctidTraderAccountId": None, "ticks": 3}]])
     counts = kql.symbol_tick_counts(client, settings)
-    assert counts == {"7701": 5, "42": 3}
-    # The grouping key is the column itself - `symbolId` is a long in KQL.
-    assert "by symbolId" in client.calls[0][1]
+    assert counts == {"7701|111": 5, "42|": 3}
+    # The grouping key is the columns themselves - both are longs in KQL.
+    assert "by symbolId, ctidTraderAccountId" in client.calls[0][1]
     assert "tostring" not in client.calls[0][1]
+
+
+def test_accounts_for_symbol_lists_the_feeds_that_traded_it(settings):
+    client = _FakeClient([[{"ctidTraderAccountId": 111},
+                           {"ctidTraderAccountId": "222"},
+                           {"ctidTraderAccountId": None}]])
+    assert kql.accounts_for_symbol(client, "41", settings) == ["111", "222"]
+    assert "by ctidTraderAccountId" in client.calls[0][1]
 
 
 # --------------------------------------------------------------------------
@@ -297,12 +306,12 @@ def test_fetch_metrics_dedupes_on_computed_at(settings):
     kql.fetch_metrics(client, symbol="41", settings=_metrics_settings(settings))
 
     csl = client.calls[0][1]
-    assert "summarize arg_max(computed_at, *) by symbolId, as_of" in csl
+    assert "summarize arg_max(computed_at, *) by symbolId, ctidTraderAccountId, as_of" in csl
     # Only the consumed columns come back: the named projection drops the stamp
     # (and any column the app never reads) rather than a blanket `project-away`.
-    assert "project symbolId, as_of," in csl
+    assert "project symbolId, ctidTraderAccountId, as_of," in csl
     assert "project-away" not in csl
-    assert "order by symbolId asc, as_of asc" in csl
+    assert "order by symbolId asc, ctidTraderAccountId asc, as_of asc" in csl
     # One read: the first stamp resolved, so there was nothing to fall back to.
     assert len(client.calls) == 1
 
@@ -317,7 +326,7 @@ def test_fetch_metrics_falls_back_to_the_older_stamp_then_to_a_plain_scan(settin
     # With no stamp column at all there is nothing to dedupe: a plain ordered
     # scan is the correct read, and it must still return rows.
     assert "arg_max" not in client.calls[2][1]
-    assert "order by symbolId asc, as_of asc" in client.calls[2][1]
+    assert "order by symbolId asc, ctidTraderAccountId asc, as_of asc" in client.calls[2][1]
     assert client.served
     assert len(client.calls) == 3          # no further probing
     assert not df.empty

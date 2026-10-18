@@ -252,7 +252,7 @@ def kql_rows(monkeypatch) -> dict:
         """A KQL connection for the metrics read the cycle now makes."""
         yield object()
 
-    def fetch_metrics(client, *, symbol=None, start=None, settings=None):
+    def fetch_metrics(client, *, symbol=None, account=None, start=None, settings=None):
         """The precomputed grid, sliced from `start` the way the real read is.
 
         Stubbed at the KQL layer rather than at `metrics.refresh_symbol`, so the
@@ -445,7 +445,7 @@ def test_catalogue_keeps_one_entry_per_symbol_and_account(monkeypatch):
 
     monkeypatch.setattr(service.kql, "connect", connect)
     monkeypatch.setattr(service.kql, "symbol_tick_counts",
-                        lambda client, s=None: {"41": 100, "42": 50})
+                        lambda client, s=None: {"41|100": 100, "41|200": 7, "42|100": 50})
 
     catalogue = service._build_catalogue(refresh=True)
 
@@ -456,8 +456,31 @@ def test_catalogue_keeps_one_entry_per_symbol_and_account(monkeypatch):
     assert catalogue["41|100"].ticks == 100
     assert catalogue["41|200"].account == "200"
     assert catalogue["41|200"].name == "Gold"
+    # Each entry takes only its own account pair ticks: the id-level
+    # total (107) must not leak onto either row.
+    assert catalogue["41|200"].ticks == 7
     assert catalogue["42|100"].name == "EURUSD"
     assert catalogue["42|100"].ticks == 50
+
+
+def test_catalogue_counts_fold_in_legacy_null_account_rows(monkeypatch):
+    """Rows stamped with no account still count toward their symbol entry."""
+    import contextlib
+    monkeypatch.setattr(service.meta, "symbol_catalogue",
+                        lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(service.kql, "symbol_tick_counts",
+                        lambda client, s=None: {"41|100": 100, "41|": 9})
+
+    catalogue = service._build_catalogue(refresh=True)
+
+    assert catalogue["41|100"].ticks == 109
+    assert catalogue["41|200"].ticks == 9
 
 
 def test_symbol_name_carries_the_broker_of_its_own_account(monkeypatch):
@@ -476,7 +499,7 @@ def test_symbol_name_carries_the_broker_of_its_own_account(monkeypatch):
 
     monkeypatch.setattr(service.kql, "connect", connect)
     monkeypatch.setattr(service.kql, "symbol_tick_counts",
-                        lambda client, s=None: {"41": 100, "42": 50})
+                        lambda client, s=None: {"41|100": 100, "41|200": 7, "42|100": 50})
 
     catalogue = service._build_catalogue(refresh=True)
 

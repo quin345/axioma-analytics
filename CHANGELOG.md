@@ -1,6 +1,15 @@
 # Changelog
 
 Notable changes to Axioma Analytics, newest first.
+## 2026-10-18 — Liquidity read path key on (symbolId, ctraderAccountId)
+- The tick/count read now groups `agg_dom` by `symbolId` **and** `ctidTraderAccountId`; grouping by the id alone previously folded two feeds for one id into one count and silently assigned it to whichever account row came first.
+- `app/kql.py`: `symbol_tick_counts()` builds `(symbolId | ctidTraderAccountId)` keys and `_clean_number()` normalises both halves; null/NaN bins become a blank account (``"41|"``) instead of the bare id.
+- `app/metrics.py`: `load()` takes an `account` (the `ctidTraderAccountId` half) so the cached precomputed grid is read per-account; `slide()` dedupes per `(symbolId, ctidTraderAccountId, _ts)` so one id traded under two feeds cannot interleave stops.
+- `app/service.py`: `_build_catalogue()` keys the catalogue by the composite; legacy null-account KQL rows still fold into their symbol entry. A KQL pair missing from the dimension under **every** account stays reachable as its own bare pair entry (rather than being swallowed by a metadata-only row for the same symbol id) so a ~470k-tick trade is never orphaned.
+- `app/service.py`: `lookup()` prefers the entry with ticks when no cTrader account is configured, so a metadata-only row cannot shadow the traded feed's own pair.
+- Tests pin the composite-key behaviour in `test_service.py`, `test_kql.py`, `test_metrics.py`.
+
+
 
 ---
 ---

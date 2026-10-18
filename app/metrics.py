@@ -275,6 +275,13 @@ def report(symbol: str | None = None, *, window_minutes: int | None = None,
             f"No precomputed metrics for {symbol or 'any instrument'}. "
             "The metrics_5m refresh may not have run yet."
         )
+    acct = _account_for(symbol, s)
+    if acct and "ctidTraderAccountId" in frame.columns:
+        scoped = frame.loc[
+            frame["ctidTraderAccountId"].astype(str).str.strip() == acct
+        ]
+        if not scoped.empty:
+            frame = scoped
 
     row = pick_stop(frame, as_of)
     if row is None:
@@ -353,21 +360,28 @@ def metrics_key(symbol: str | None, settings: Settings | None = None) -> str:
     return metrics_prefix(s) + ":" + ((symbol or "").strip() or "all")
 
 
-def load(symbol: str | None = None, *, settings: Settings | None = None) -> pd.DataFrame:
-    """One symbol's precomputed grid, served from Redis.
+def load(symbol: str | None = None, *, account: str | None = None,
+         settings: Settings | None = None) -> pd.DataFrame:
+    """One composite pair's precomputed grid, served from Redis.
 
     The cached entry is the *whole* grid, so a point-in-time or window change is a
     lookup against what is already in the process. A miss reads KQL and writes
     back, which is what warms the cache on a cold start or after a TTL expiry; a
     cache failure simply falls through to the KQL read rather than erroring.
+    `account` is the ``ctidTraderAccountId`` half of the composite the broker
+    dimension keys on; blank means any account. When it is blank the KQL read
+    is narrowed to the account the catalogue resolved the id to, so an id
+    traded under two feeds does not interleave both feeds' stops.
     """
     s = settings or get_settings()
     ck = metrics_key(symbol, s)
 
     raw = cache.get_frame(ck, s)
     if raw is None:
+        acct = (account or "").strip() or _account_for(symbol, s)
         with kql.connect(s) as client:
-            raw = kql.fetch_metrics(client, symbol=symbol, settings=s)
+            raw = kql.fetch_metrics(client, symbol=symbol,
+                                    account=acct or None, settings=s)
         if raw is not None and not raw.empty:
             cache.set_frame(ck, raw, s.cache_ttl_seconds, s)
     return raw if raw is not None else pd.DataFrame()
@@ -409,9 +423,29 @@ def slide(frame: pd.DataFrame, added: pd.DataFrame, limit: int) -> pd.DataFrame:
         return frame
     merged = frame.assign(_ts=_times(frame))
     merged = merged.loc[merged["_ts"].notna()]
-    merged = merged.drop_duplicates(subset=["symbolId", "_ts"], keep="last")
+    if "ctidTraderAccountId" in merged.columns:
+        merged = merged.drop_duplicates(subset=["symbolId", "ctidTraderAccountId", "_ts"], keep="last")
+    else:
+        merged = merged.drop_duplicates(subset=["symbolId", "_ts"], keep="last")
     merged = merged.sort_values("_ts", kind="stable")
     return merged.drop(columns="_ts").tail(int(limit)).reset_index(drop=True)
+
+
+def _account_for(symbol: str | None, s) -> str:
+    """The account the catalogue resolved one symbol id to, or blank.
+
+    Imported lazily so ``app.service`` (which imports this module) does not
+    become a circular import at module load.
+    """
+    sid = (symbol or "").strip()
+    if not sid:
+        return ""
+    try:
+        from . import service as _service
+        inst = _service.lookup(sid)
+    except Exception:
+        return ""
+    return (inst.account if inst is not None else "") or ""
 
 
 def refresh_symbol(symbol: str | None = None,
@@ -422,7 +456,8 @@ def refresh_symbol(symbol: str | None = None,
     newer than the newest cached one are read, so a cycle does not re-read the
     whole grid every half hour. The caller catches a failed read - a symbol whose
     KQL read fails keeps its previous entry, because the cycle is an optimisation
-    and a partial failure must not throw away data that is merely older.
+    and a partial failure must not throw away data that is merely older. The
+    read is scoped to the catalogue-resolved account, as in :func:`load`.
     """
     s = settings or get_settings()
     ck = metrics_key(symbol, s)
@@ -434,8 +469,11 @@ def refresh_symbol(symbol: str | None = None,
         if times:
             start = max(times).isoformat()
 
+    acct = _account_for(symbol, s)
     with kql.connect(s) as client:
-        added = kql.fetch_metrics(client, symbol=symbol, start=start, settings=s)
+        added = kql.fetch_metrics(client, symbol=symbol,
+                                  account=acct or None,
+                                  start=start, settings=s)
     grid = slide(cached if cached is not None else pd.DataFrame(), added, s.max_ticks)
     if not grid.empty:
         cache.set_frame(ck, grid, s.cache_ttl_seconds, s)

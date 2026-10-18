@@ -189,6 +189,33 @@ def query(client: KustoClient, csl: str, params: dict[str, Any] | None = None,
     return pd.DataFrame([row.to_dict() for row in table], columns=columns)
 
 
+def _clean_number(value: object) -> str:
+    """A KQL long as the string the catalogue keys on; null/NaN becomes blank.
+
+    Both `symbolId` and `ctidTraderAccountId` arrive as longs (or their
+    string forms through the fake client), so one normaliser keeps the
+    composite key `"<symbolId>|<account>"` consistent between the count
+    query, the per-symbol account listing, and the Postgres dimension rows.
+    """
+    if value is None:
+        return ""
+    try:
+        if value != value:      # NaN is the only value unequal to itself
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
+
+
+clean_account = _clean_number  #: public alias for the service-layer join
+
+
 def _kusto_datetime(value: Any) -> str:
     """An ISO-8601 string Kusto casts to `datetime`, normalised to UTC."""
     ts = pd.Timestamp(value)
@@ -222,12 +249,14 @@ def tick_stats(client: KustoClient, settings: Settings | None = None) -> tuple[i
     return count, (None if latest is None or pd.isna(latest) else str(latest))
 
 
-def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) -> dict[str, int]:
-    """{symbolId: tick metric rows} for the whole table.
+def accounts_for_symbol(client: KustoClient, symbol: str,
+                        settings: Settings | None = None) -> list[str]:
+    """Distinct ``ctidTraderAccountId`` values ``agg_dom`` holds for one symbol.
 
-    ``symbolId`` is a ``long``, so the grouping key is the column itself; the
-    string form the rest of the app keys on is applied in Python, which keeps a
-    single place responsible for normalising it.
+    Stringified with the same ``""/"nan"`` filtering the composite count key
+    uses, so the caller maps the key the KQL facts carry to the key the broker
+    dimension rows carry. A symbol nobody traded (or a KQL outage) reads as no
+    accounts.
     """
     s = settings or get_settings()
     df = query(
@@ -235,10 +264,56 @@ def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) ->
         f"""
         {table_ref(s.kql_table)}
         | where isnotnull(symbolId)
-        | summarize ticks = count() by symbolId""",
+        {_SYMBOL_MATCH}
+        | summarize by ctidTraderAccountId
+        | project ctidTraderAccountId""",
+        {"sym": str(symbol).strip()},
         settings=s,
     )
-    return {str(r.symbolId).strip(): int(r.ticks) for r in df.itertuples()}
+    if df.empty or "ctidTraderAccountId" not in df.columns:
+        return []
+    return sorted(
+        {
+            cleaned
+            for v in df["ctidTraderAccountId"].dropna()
+            if (cleaned := _clean_number(v))
+        }
+    )
+
+
+def symbol_tick_counts(client: KustoClient, settings: Settings | None = None) -> dict[str, int]:
+    """{``"<symbolId>|<ctidTraderAccountId>"``: tick metric rows} for the table.
+
+    ``symbolId`` and ``ctidTraderAccountId`` are both ``long``, so the grouping
+    key is the columns themselves; the string form the rest of the app keys on
+    is applied in Python, which keeps a single place responsible for
+    normalising it. This composite is what the broker dimension
+    (``symbols_metadata``) joins on, so grouping by the id alone would fold two
+    feeds' counts for one id into a single number and attach it to whichever
+    account row came first. Rows stamped with no account keep the trailing
+    separator (``"114|"``) rather than collapsing to the bare id.
+    """
+    s = settings or get_settings()
+    df = query(
+        client,
+        f"""
+        {table_ref(s.kql_table)}
+        | where isnotnull(symbolId)
+        | summarize ticks = count() by symbolId, ctidTraderAccountId""",
+        settings=s,
+    )
+    counts: dict[str, int] = {}
+    for row in df.itertuples():
+        sid = _clean_number(getattr(row, "symbolId", None))
+        if not sid:
+            continue
+        acct = _clean_number(getattr(row, "ctidTraderAccountId", None))
+        key = f"{sid}|{acct}"
+        try:
+            counts[key] = counts.get(key, 0) + int(row.ticks)
+        except (TypeError, ValueError):
+            continue
+    return counts
 
 
 def symbol_count(client: KustoClient | None = None, settings: Settings | None = None) -> int:
@@ -269,10 +344,11 @@ METRICS_STAMPS: tuple[str, ...] = ("computed_at", "ingested_at")
 #: newest row per stop, which is what makes "latest" well-defined - see the
 #: *Dedup* note in `docs/metrics_5m.md`.
 _METRICS_ANCHOR = """
-declare query_parameters(sym:string = "");
+declare query_parameters(sym:string = "", acct:string = "");
 {obj}
 | where isnotnull(symbolId) and isnotnull(as_of)
 {symbol_match}
+{account_match}
 | summarize mx = max(as_of)
 """
 
@@ -286,7 +362,7 @@ declare query_parameters(sym:string = "");
 #: which is the failure mode the pinned set exists to produce, instead of
 #: silently handing back a panel of nulls. The stamp is dropped by this
 #: projection (it is not listed), so there is no separate `project-away`.
-_METRICS_PROJECTION = ("symbolId", "as_of", *window_columns())
+_METRICS_PROJECTION = ("symbolId", "ctidTraderAccountId", "as_of", *window_columns())
 
 
 def _metrics_fetch(obj: str, stamp: str | None) -> str:
@@ -301,35 +377,42 @@ def _metrics_fetch(obj: str, stamp: str | None) -> str:
     to dedupe, so a plain ordered scan is the correct read rather than a failure.
     """
     head = (
-        'declare query_parameters(sym:string = "", start:datetime = datetime(null));\n'
+        'declare query_parameters(sym:string = "", acct:string = "", start:datetime = datetime(null));\n'
         f"{obj}\n"
         "| where isnotnull(symbolId) and isnotnull(as_of)\n"
         "{symbol_match}\n"
+        "{account_match}\n"
         "| where isnull(start) or as_of >= start\n"
     )
     projection = ", ".join(_METRICS_PROJECTION)
     if not stamp:
-        return head + f"| project {projection}\n| order by symbolId asc, as_of asc"
+        return head + f"| project {projection}\n| order by symbolId asc, ctidTraderAccountId asc, as_of asc"
     return (
         head
-        + f"| summarize arg_max({stamp}, *) by symbolId, as_of\n"
+        + f"| summarize arg_max({stamp}, *) by symbolId, ctidTraderAccountId, as_of\n"
         + f"| project {projection}\n"
-        + "| order by symbolId asc, as_of asc"
+        + "| order by symbolId asc, ctidTraderAccountId asc, as_of asc"
     )
 
 def metrics_anchor(client: KustoClient, *, symbol: str | None = None,
+                   account: str | None = None,
                    settings: Settings | None = None) -> object:
-    """The newest `as_of` stop in `metrics_5m` for one symbol, or None.
+    """The newest `as_of` stop in `metrics_5m` for one composite pair, or None.
 
     Anchoring on the table's own newest stop rather than the wall clock is what
     keeps the grid aligned with the data: the table is rebuilt on the cache
     cadence, so a stalled job leaves the newest stop where it was and the
-    dashboard steps back from there instead of offering empty slots.
+    dashboard steps back from there instead of offering empty slots. `account`
+    is the ``ctidTraderAccountId`` half of the composite the broker dimension
+    keys on; blank means any account, otherwise only that account's newest stop
+    anchors the read.
     """
     s = settings or get_settings()
     obj = table_ref(s.metrics_table)
-    params = {"sym": str(symbol).strip() if symbol else ""}
-    df = query(client, _METRICS_ANCHOR.format(obj=obj, symbol_match=_SYMBOL_MATCH),
+    params = {"sym": str(symbol).strip() if symbol else "",
+              "acct": str(account).strip() if account else ""}
+    df = query(client, _METRICS_ANCHOR.format(obj=obj, symbol_match=_SYMBOL_MATCH,
+                                              account_match=_ACCOUNT_MATCH),
                params, settings=s)
     if df.empty or pd.isna(df["mx"].iloc[0]):
         return None
@@ -337,8 +420,9 @@ def metrics_anchor(client: KustoClient, *, symbol: str | None = None,
 
 
 def fetch_metrics(client: KustoClient, *, symbol: str | None = None,
+                  account: str | None = None,
                   start: str | None = None, settings: Settings | None = None) -> pd.DataFrame:
-    """Precomputed window-metric rows for one symbol, oldest `as_of` first.
+    """Precomputed window-metric rows for one composite pair, oldest `as_of` first.
 
     The whole point-in-time grid comes back in one read - 49 stops by default,
     every window already aggregated - so the dashboard's point-in-time and
@@ -347,8 +431,13 @@ def fetch_metrics(client: KustoClient, *, symbol: str | None = None,
     timestamp, which is how the refresh cycle pulls only the newest slice
     instead of re-reading the grid it already holds.
 
+    `account` is the ``ctidTraderAccountId`` half of the composite the broker
+    dimension keys on; blank means any account. Without it, an id traded under
+    two feeds returns both feeds' stops interleaved, and the ladder overlay
+    would mix two brokers' books.
+
     The table is rebuilt by appending, so the newest row per `(symbolId,
-    as_of)` is kept - which is why the read deduplicates on a stamp column
+    ctidTraderAccountId, as_of)` is kept - which is why the read deduplicates on a stamp column
     rather than assuming one row per stop. The stamp is discovered by trying
     `METRICS_STAMPS` in order and falling back to the plain ordered scan: a
     missing stamp is a schema difference, not an outage, and a table appended
@@ -357,12 +446,14 @@ def fetch_metrics(client: KustoClient, *, symbol: str | None = None,
     """
     s = settings or get_settings()
     obj = table_ref(s.metrics_table)
-    params: dict[str, Any] = {"sym": str(symbol).strip() if symbol else ""}
+    params: dict[str, Any] = {"sym": str(symbol).strip() if symbol else "",
+                             "acct": str(account).strip() if account else ""}
     if start:
         params["start"] = _kusto_datetime(start)
 
     for stamp in (*METRICS_STAMPS, None):
-        csl = _metrics_fetch(obj, stamp).format(symbol_match=_SYMBOL_MATCH)
+        csl = _metrics_fetch(obj, stamp).format(symbol_match=_SYMBOL_MATCH,
+                                                account_match=_ACCOUNT_MATCH)
         try:
             return query(client, csl, params, settings=s)
         except DataSourceError as exc:
@@ -420,20 +511,23 @@ def symbol_catalogue(client: KustoClient | None = None,
 #: column's own type for the engine while a non-numeric or blank parameter
 #: simply yields no rows instead of failing.
 _SYMBOL_MATCH = '| where sym == "" or symbolId == tolong(sym)'
+_ACCOUNT_MATCH = '| where acct == "" or ctidTraderAccountId == tolong(acct)'
 
 _ANCHOR = f"""
-declare query_parameters(sym:string = "");
+declare query_parameters(sym:string = "", acct:string = "");
 {{obj}}
 | where isnotnull(symbolId)
 {_SYMBOL_MATCH}
+{_ACCOUNT_MATCH}
 | summarize mx = max(timestamp)
 """
 
 _FETCH = f"""
-declare query_parameters(sym:string = "", start:datetime = datetime(null), end:datetime = datetime(null));
+declare query_parameters(sym:string = "", acct:string = "", start:datetime = datetime(null), end:datetime = datetime(null));
 {{obj}}
 | where isnotnull(symbolId)
 {_SYMBOL_MATCH}
+{_ACCOUNT_MATCH}
 | where isnull(start) or timestamp >= start
 | where isnull(end) or timestamp <= end
 | top {{limit}} by timestamp asc
@@ -442,18 +536,27 @@ declare query_parameters(sym:string = "", start:datetime = datetime(null), end:d
 
 
 def fetch_ticks(client: KustoClient, *, symbol: str | None = None,
+                account: str | None = None,
                 start: str | None = None, end: str | None = None,
                 limit: int = 50_000, lookback_minutes: int | None = None,
                 settings: Settings | None = None) -> pd.DataFrame:
-    """Read raw tick-metric rows for one symbol, oldest first.
+    """Read raw tick-metric rows for one ``(symbolId, ctidTraderAccountId)`` pair.
+
+    ``account`` is the KQL ``ctidTraderAccountId`` half of the composite the
+    broker dimension keys on; blank means any account (the legacy single-feed
+    read). Without it, an id traded under two feeds returns both feeds' rows
+    interleaved, and the analytics would blend two brokers' prices.
 
     With ``lookback_minutes`` and no explicit range, the window is anchored on
-    the newest row so the result is the most recent session rather than an
-    arbitrary slice of history.
+    the newest row *for that pair* so the result is the most recent session
+    rather than an arbitrary slice of history.
     """
     s = settings or get_settings()
     obj = table_ref(s.kql_table)
-    params: dict[str, Any] = {"sym": str(symbol).strip() if symbol else ""}
+    params: dict[str, Any] = {
+        "sym": str(symbol).strip() if symbol else "",
+        "acct": str(account).strip() if account else "",
+    }
 
     if lookback_minutes and not start and not end:
         try:

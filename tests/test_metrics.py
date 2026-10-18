@@ -336,7 +336,7 @@ def fake_kql(monkeypatch):
 
     monkeypatch.setattr(kql, "connect", connect)
     monkeypatch.setattr(kql, "fetch_metrics",
-                        lambda client, symbol=None, start=None, settings=None:
+                        lambda client, symbol=None, account=None, start=None, settings=None:
                         calls.__setitem__("fetch", calls["fetch"] + 1) or _grid())
     return calls
 
@@ -525,7 +525,7 @@ def test_a_grid_with_no_rows_is_reported_rather_than_a_broken_panel(
     """An empty table means the metrics job has not run - named in the error so
     it is not read as a feed outage."""
     monkeypatch.setattr(kql, "fetch_metrics",
-                        lambda client, symbol=None, start=None, settings=None:
+                        lambda client, symbol=None, account=None, start=None, settings=None:
                         pd.DataFrame())
 
     with pytest.raises(DataSourceError) as exc:
