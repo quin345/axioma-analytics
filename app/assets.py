@@ -26,7 +26,14 @@ import re
 # --------------------------------------------------------------------------
 
 #: Broker asset-class name -> stable client key.
+#:
+#: Each broker publishes its own catalogue (``symbols_category`` ->
+#: ``asset_classes``), so the same client class is spelled several ways. The
+#: account qualifier is removed by :func:`_broker_class_key` ("Metals (Pro)" ->
+#: "metals"), but brokers also use different nouns for one class ("Oil" vs
+#: "Energies"), so every label seen in ``asset_classes`` is listed here.
 BROKER_CLASSES: dict[str, str] = {
+    # The canonical cTrader class names.
     "forex": "fx",
     "metals": "metal",
     "indices": "index",
@@ -36,7 +43,25 @@ BROKER_CLASSES: dict[str, str] = {
     "futures": "future",
     "bonds": "bond",
     "futures commodities": "future",
+    # Broker-specific spellings of the same classes.
+    "energies": "energy",              # "Energies (Spot)"    - pepperstone
+    "energy": "energy",                # "Energy (Spot)"      - pepperstone
+    "crypto currency": "crypto",       # "Crypto Currency (Spot)"
+    "perpetual cryptocurrency": "crypto",
+    "currency index": "index",         # "Currency Index (Spot)"
+    "commodities indices": "index",    # "Commodities Indices (Spot)"
+    "perpetual index": "index",        # "Perpetual Index"
+    "perpetual commodity": "commodity",
+    "treasuries": "bond",              # "Treasuries"
+    "forwards": "future",              # "Forwards"
+    "forwards - indices": "future",
+    "forwards - commodities": "future",
+    "forwards - treasuries": "future",
 }
+# Equity/ETF classes ("US Equities (CFDs)", "ETFs", "Perpetual Stock") have no
+# client key on purpose: the taxonomy groups instruments, not single-name
+# shares, so those fall through to the name-based signals below.
+
 
 #: Client key -> display label, ordered most-liquid-first.
 ASSET_CLASSES: tuple[tuple[str, str], ...] = (
@@ -72,6 +97,21 @@ FAMILY_LABELS: dict[str, str] = {
     "fx": "FX", "commodities": "Commodities", "indices": "Indices",
     "rates": "Rates", "crypto": "Crypto", "derivatives": "Derivatives",
 }
+
+
+#: Extract the flat client asset-class key a broker uses for one of its
+#: instruments. Brokers label their classes differently (for example
+#: "Metals (Pro)", "Metals (Raw)", "Metals (Spot)", "Oil"), but the client
+#: keys are flat ("metal", "energy", ...), so the parenthetical broker
+#: qualifier is stripped before the label is looked up in :data:`BROKER_CLASSES`.
+def _broker_class_key(asset_class_name: object) -> str:
+    label = str(asset_class_name or "").strip()
+    if not label:
+        return ""
+    name = re.split(r"\s*\([^)]*\)\s*", label, maxsplit=1)[0].strip().lower()
+    return BROKER_CLASSES.get(name, "")
+
+
 # --------------------------------------------------------------------------
 # FX sub-classification
 # --------------------------------------------------------------------------
@@ -93,12 +133,20 @@ INR KRW TWD IDR PHP MYR CLP COP ARS
 
 
 def _fx_subclass(symbol_name: object) -> str:
-    """Split an FX instrument into majors / crosses / exotics."""
+    """Split an FX instrument into majors / crosses / exotics.
+
+    The pair is read off the base ticker: brokers suffix their account flavours
+    onto it ("EURUSD.pro", "EURUSD.raw"), and a suffix must not demote a major
+    to a cross.
+    """
     name = str(symbol_name or "").strip().upper()
     if name in _FX_MAJORS:
         return "fx_major"
-    if len(name) == 6 and name.isalpha():
-        if name[:3] in _EXOTIC_LEGS or name[3:] in _EXOTIC_LEGS:
+    base = re.split(r"[.\-]", name, maxsplit=1)[0].strip()
+    if base in _FX_MAJORS:
+        return "fx_major"
+    if len(base) == 6 and base.isalpha():
+        if base[:3] in _EXOTIC_LEGS or base[3:] in _EXOTIC_LEGS:
             return "fx_exotic"
         return "fx_cross"
     # An FX instrument that is not a plain pair (a forward, an index) stays
@@ -207,7 +255,7 @@ def classify_asset_class(symbol_name: object, asset_class_name: object = None,
     the pipeline does not do but a dashboard benefits from. Never raises - an
     unrecognised instrument yields ``""`` and the caller groups it separately.
     """
-    base = BROKER_CLASSES.get(str(asset_class_name or "").strip().lower(), "")
+    base = _broker_class_key(asset_class_name)
     if not base:
         base = classify_by_name(symbol_name, category_id, description)
     if base == "fx":

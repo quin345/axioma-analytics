@@ -358,13 +358,19 @@ def _build_catalogue(*, refresh: bool = False) -> dict[str, Instrument]:
         broker = _text(getattr(row, "broker_name", ""))
         description = _text(row.description)
         category = _text(getattr(row, "symbolCategoryId", ""))
+        # The broker's own class label, joined from its category catalogue. It
+        # is absent when the dimension comes from a fake/legacy frame, in which
+        # case classification falls back to the raw cTrader signals.
+        asset_class_name = getattr(row, "asset_class_name", None)
         out[key] = Instrument(
             symbol_id=symbol_id,
             account=account,
             broker=broker,
             name=name,
             description=description,
-            asset_class=classify_asset_class(name, None, category, description),
+            asset_class=classify_asset_class(
+                name, asset_class_name, category, description
+            ),
             ticks=int(counts.get(key, 0) + counts.get(_catalogue_key(symbol_id, ""), 0)),
         )
     # A KQL pair whose composite key is missing from the dimension has no

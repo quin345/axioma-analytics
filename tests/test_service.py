@@ -530,6 +530,76 @@ def test_a_symbol_without_a_broker_keeps_its_plain_name():
     assert unnamed.display == "8 (ACME)"
 
 
+def _broker_dimension() -> pd.DataFrame:
+    """Dimension rows as the join produces them, each with its broker's own
+    ``asset_classes.name`` label (the values the catalogues actually ship)."""
+    return pd.DataFrame([
+        {"symbolId": 136, "symbolName": "XAUUSD.pro", "symbolCategoryId": 10,
+         "description": "Gold vs US Dollar", "ctrader_account_id": "49208255",
+         "broker_name": "acgmarkets", "asset_class_id": 10,
+         "asset_class_name": "Metals (Pro)"},
+        {"symbolId": 140, "symbolName": "USOIL.pro", "symbolCategoryId": 11,
+         "description": "WTI Crude Oil", "ctrader_account_id": "49208255",
+         "broker_name": "acgmarkets", "asset_class_id": 11,
+         "asset_class_name": "Oil (Pro)"},
+        {"symbolId": 41, "symbolName": "XAUUSD", "symbolCategoryId": 2,
+         "description": "Gold vs US Dollar", "ctrader_account_id": "48935994",
+         "broker_name": "pepperstone", "asset_class_id": 2,
+         "asset_class_name": "Metals (Spot)"},
+    ])
+
+
+def test_catalogue_classifies_from_the_brokers_own_catalogue(monkeypatch):
+    """Regression: the broker's own class label decides, not a numeric id.
+
+    acgmarkets files ``XAUUSD.pro`` under its category 10 - Metals - while the
+    built-in ``symbolCategoryId`` fallback reads 10 as the Oil id, which is how
+    gold used to reach the Energy group.
+    """
+    monkeypatch.setattr(service.meta, "symbol_catalogue",
+                        lambda s=None: _broker_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(service.kql, "symbol_tick_counts",
+                        lambda client, s=None: {"136|49208255": 900,
+                                                "140|49208255": 400,
+                                                "41|48935994": 100})
+
+    catalogue = service._build_catalogue(refresh=True)
+
+    gold = catalogue["136|49208255"]
+    assert gold.asset_class == "metal"
+    assert gold.to_dict()["asset_class_label"] == "Metals"
+    # The other acgmarkets row keeps its own class, so the fix is not a
+    # blanket reclassification.
+    assert catalogue["140|49208255"].asset_class == "energy"
+    assert catalogue["41|48935994"].asset_class == "metal"
+
+
+def test_catalogue_without_a_class_label_still_classifies(monkeypatch):
+    """A dimension read with no catalogue join (legacy/fake frame) must not
+    raise - classification falls back to the raw cTrader signals."""
+    monkeypatch.setattr(service.meta, "symbol_catalogue",
+                        lambda s=None: _symbol_dimension())
+
+    @contextlib.contextmanager
+    def connect(settings=None):
+        yield object()
+
+    monkeypatch.setattr(service.kql, "connect", connect)
+    monkeypatch.setattr(service.kql, "symbol_tick_counts",
+                        lambda client, s=None: {"41|100": 100})
+
+    catalogue = service._build_catalogue(refresh=True)
+
+    assert catalogue["41|100"].asset_class == "metal"
+
+
+
 def test_uncovered_count_reports_and_hides_orphan_instruments(monkeypatch):
     """Instruments with tick data but no metadata row are counted, not shown."""
     monkeypatch.setattr(service.meta, "symbol_catalogue", lambda s=None: _symbol_dimension())

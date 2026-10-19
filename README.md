@@ -176,8 +176,11 @@ symbols_metadata      symbolId, symbolName, symbolCategoryId, description,
                       ctrader_account_id, broker_name
   -> app/meta.py        one row per (symbolId, ctrader_account_id); the KQL
                         composite maps onto it, and each account id maps to
-                        its broker name (broker-agnostic)
-  -> app/assets.py      symbolCategoryId -> broker class -> client key
+                        its broker name (broker-agnostic). The row is
+                        left-joined to the broker's own catalogue
+                        (symbols_category -> asset_classes) so it also carries
+                        that broker's class label ("Metals (Pro)")
+  -> app/assets.py      broker class label -> client key
 ```
 
 The dimension now lives in local PostgreSQL and is broker-agnostic: every KQL
@@ -187,27 +190,36 @@ to the cTrader account it came from — and each account id maps to its broker
 name (`broker_name`). The read can be scoped to one account or broker with
 `CTRADER_ACCOUNT_ID` / `BROKER_NAME`; blank means all accounts and all brokers.
 
-The app consumes `symbolCategoryId` the same way as before:
-`app/assets.py` maps it to stable client keys and sub-divides FX (majors /
-crosses / exotics), which the pipeline lumps together but a dashboard benefits
-from:
+The app consumes the broker's **own** class label, so a broker that numbers its
+categories differently from another still lands in the right group:
+`symbols_category` maps the broker-specific `symbolCategoryId` to its
+`assetClassId` and `asset_classes` names it ("Metals (Pro)", "Oil", "Indices
+(Spot)"). `app/assets.py` maps that label to a stable client key — stripping the
+account qualifier in parentheses — and sub-divides FX (majors / crosses /
+exotics), which the pipeline lumps together but a dashboard benefits from:
 
-The broker names nine classes (Forex, Metals, Indices, Oil, Cryptocurrencies,
-Commodities, Futures, Bonds, Futures Commodities):
+The brokers name nine classes (Forex, Metals, Indices, Oil, Cryptocurrencies,
+Commodities, Futures, Bonds, Futures Commodities), each of them spelled
+differently per broker ("Energies (Spot)" for Oil, "Crypto Currency (Spot)" for
+Cryptocurrencies, "Forwards" for Futures):
 
 | Broker class | Client key |
 |---|---|
 | Forex | `fx_major`, `fx_cross`, `fx_exotic` |
 | Metals | `metal` |
-| Oil | `energy` |
+| Oil / Energies | `energy` |
 | Commodities | `commodity` |
 | Indices | `index` |
-| Cryptocurrencies | `crypto` |
-| Bonds | `bond` |
-| Futures / Futures Commodities | `future` |
+| Cryptocurrencies / Crypto Currency | `crypto` |
+| Bonds / Treasuries | `bond` |
+| Futures / Forwards / Futures Commodities | `future` |
 
-Where the chain has no row — an archive entry, or a new listing — the classifier
-falls back to the same cTrader signals present in the symbol rows
+Equity and ETF classes ("US Equities (CFDs)", "ETFs") have no client key: the
+taxonomy groups instruments, not single-name shares, so those stay
+`Unclassified` unless the ticker itself says otherwise.
+
+Where the catalogue has no row — an archive entry, or a new listing — the
+classifier falls back to the same cTrader signals present in the symbol rows
 (`symbolCategoryId`, the ticker and the description), so no instrument silently
 disappears from the selector. Anything still unresolved is reported as
 `Unclassified`, and `/api/health` says how many instruments are affected.

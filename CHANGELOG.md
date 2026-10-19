@@ -2,6 +2,81 @@
 
 Notable changes to Axioma Analytics, newest first.
 
+## 2026-10-18 — Classification reads each broker's own class catalogue
+
+Scope: the asset class is taken from the instrument's **own broker**'s catalogue
+(`symbols_category` → `asset_classes`) instead of one broker's numeric
+`symbolCategoryId` codes. acgmarkets files `XAUUSD.pro` under its category 10 =
+*Metals*, but the numeric fallback read 10 as the Oil id, so gold was grouped
+under Energy.
+
+### Backend
+- [x] `app/meta.py`: `symbol_catalogue()` left-joins `symbols_category` and
+      `asset_classes` — on the account (`ctrader_account_id` =
+      `ctidTraderAccountId`) **and** the category/class id, since the same
+      `symbolCategoryId` means different things per account — and projects
+      `asset_class_id` + `asset_class_name` (the broker's label, e.g.
+      `"Metals (Pro)"`). Every projected column is qualified because the join
+      brings in colliding names. The configured table (`symbols_metadata` by
+      default) stays the FROM target, so the `enabled` filter is unchanged, and
+      an empty read keeps the two new columns.
+- [x] `app/meta.py`: the `symbolId` int cast now lands after the
+      dedup/`reset_index`, so the read no longer raises pandas'
+      `SettingWithCopyWarning`.
+- [x] `app/assets.py`: `BROKER_CLASSES` now also carries the labels the brokers
+      actually ship — `Energies (Spot)`/`Energy (Spot)`, `Crypto Currency
+      (Spot)`, `Currency Index (Spot)`, `Commodities Indices (Spot)`,
+      `Treasuries`, `Forwards…`, `Perpetual …`, `Perpetual Cryptocurrency` —
+      each mapped to the same client key as its canonical name, with the
+      account qualifier in parentheses stripped by `_broker_class_key()`.
+      Equity/ETF labels stay unmapped on purpose (the taxonomy has no
+      single-name share class).
+- [x] `app/assets.py`: `_fx_subclass()` reads the pair off the base ticker, so a
+      broker account suffix (`EURUSD.pro`, `GBPUSD.raw`) no longer demotes a
+      major to a cross.
+- [x] `app/service.py`: `_build_catalogue()` passes `row.asset_class_name` into
+      `classify_asset_class()`, read with `getattr(row, "asset_class_name",
+      None)` so a metadata frame without the join (legacy/fake) still
+      classifies from the raw cTrader signals instead of raising.
+
+### Measured effect on the live dimension
+- acgmarkets: `XAUUSD.pro`/`XAGUSD.pro` Energy → **Metals**; `USOIL.pro`/
+      `UKOIL.pro` Commodities → **Energy**; 28 `Forex (Pro)` rows were landing
+      in Metals/Energy → **FX**. All 41 enabled acgmarkets instruments now
+      follow `symbols_category`/`asset_classes`.
+- pepperstone: 86 `Forex (Spot)` rows (energy/index/metal) → **FX**;
+      `Forwards` (energy/index/metal) → **Futures & Forwards**;
+      `Perpetual Commodity` → **Commodities**.
+- icmarketssc: 5 gold futures (`GCM25`…) stay with the broker's own **Metals**
+      class rather than the name-pattern `future`.
+
+### Tests
+- [x] `tests/test_assets.py`: every broker label resolves to the right class;
+      `XAUUSD.pro` + `"Metals (Pro)"` + category 10 is a **metal** (with the
+      numeric-only read asserted as the old misread); energy labels stay energy;
+      equity/ETF labels stay unclassified; each `BROKER_CLASSES` entry maps to a
+      displayable class; a broker suffix keeps majors majors and exotics
+      exotics.
+- [x] `tests/test_meta.py` (new): pins the projection, the join keys, the
+      configured FROM target, the scope parameters, the unusable-id drop and the
+      empty-read shape — no server required.
+- [x] `tests/test_service.py`: the catalogue classifies from the broker label,
+      and a metadata frame without the column still classifies.
+- [x] `python -m pytest tests -q` → 12 failed, 477 passed (58 new; 419 passed
+      before). The 12 failures are the pre-existing environment ones (live KQL
+      answers `403 Forbidden`, the Redis host in `.env` is unreachable); the
+      failure set is byte-identical on the previous commit.
+
+### Docs
+- [x] `README.md` §Asset classification / `docs/methodology.md` §10 /
+      `docs/dashboard_metrics.md` coverage row: the class comes from the
+      broker's own catalogue label, the qualifier is stripped, the extra
+      per-broker spellings are listed, and the numeric `symbolCategoryId` map is
+      described as the last-resort fallback.
+
+---
+
+
 ## 2026-10-18 — Docs: (symbolId, ctidTraderAccountId) is the composite key onto broker-agnostic metadata
 
 Scope: documentation. Every doc now states the key the code uses — the KQL

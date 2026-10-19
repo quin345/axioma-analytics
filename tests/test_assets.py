@@ -63,6 +63,71 @@ def test_chain_name_is_case_insensitive():
 
 
 # ----------------------------------------------------------------------
+# Each broker's own catalogue wording
+# ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("label,symbol,expected", [
+    # acgmarkets files its account flavours as "Metals (Pro)" / "Oil (Raw)".
+    ("Metals (Pro)", "XAUUSD.pro", "metal"),
+    ("Metals (Raw)", "XAUUSD.raw", "metal"),
+    ("Oil (Pro)", "USOIL.pro", "energy"),
+    ("Oil (Raw)", "UKOIL.raw", "energy"),
+    ("Indices (Pro)", "US500.pro", "index"),
+    ("Indices (Raw)", "HK50.raw", "index"),
+    ("Forex (Pro)", "EURUSD.pro", "fx_major"),
+    # pepperstone uses different nouns for the same client classes.
+    ("Metals (Spot)", "XAUUSD", "metal"),
+    ("Energies (Spot)", "XTIUSD", "energy"),
+    ("Energy (Spot)", "NATGAS", "energy"),
+    ("Crypto Currency (Spot)", "BTCUSD", "crypto"),
+    ("Commodities (Cash)", "Wheat_K6", "commodity"),
+    ("Currency Index (Spot)", "USDX", "index"),
+    ("Treasuries", "USTN10YR", "bond"),
+    ("Forwards", "US30-F", "future"),
+    ("Perpetual Commodity", "GOLD-PERP", "commodity"),
+    ("Perpetual Index", "US500-PERP", "index"),
+    # icmarketssc ships the canonical names, unqualified.
+    ("Metals", "XAUUSD", "metal"),
+    ("Oil", "XBRUSD", "energy"),
+])
+def test_each_broker_label_resolves(label, symbol, expected):
+    assert classify_asset_class(symbol, label) == expected
+
+
+@pytest.mark.parametrize("broker_class,key", sorted(BROKER_CLASSES.items()))
+def test_every_broker_label_maps_to_a_displayable_class(broker_class, key):
+    """Any label added for a broker must land on a class the UI can show:
+    either a leaf it labels, or a parent that owns at least one leaf."""
+    leaves = [k for k in CLASS_LABELS if CLASS_PARENT.get(k, k) == key]
+    assert key in CLASS_LABELS or leaves, f"'{broker_class}' -> '{key}' has no leaf"
+
+
+def test_acgmarkets_gold_is_not_energy():
+    """Regression: acgmarkets' category 10 is Metals, not the Oil id that
+    ``_FALLBACK_CATEGORY`` assumes - the broker's own label must win."""
+    assert classify_asset_class("XAUUSD.pro", "Metals (Pro)", 10,
+                                "Gold vs US Dollar") == "metal"
+    assert classify_asset_class("XAGUSD.pro", "Metals (Pro)", 10) == "metal"
+    # The same numeric id under the broker whose Oil really is 10.
+    assert classify_asset_class("USOIL.pro", "Oil (Pro)", 11) == "energy"
+    assert classify_by_name("XAUUSD.pro", 10) == "energy"  # the old misread
+
+
+def test_energy_labels_alone_do_not_move_gold():
+    assert classify_asset_class("XTIUSD", "Oil") == "energy"
+    assert classify_asset_class("XBRUSD", "Oil") == "energy"
+    assert classify_asset_class("UKOIL", "Oil") == "energy"
+
+
+def test_equity_classes_stay_unclassified():
+    """Single-name shares have no client class, so they fall through to the
+    name-based signals rather than being misfiled as something they are not."""
+    assert classify_asset_class("AAPL", "US Equities (CFDs)") == ""
+    assert classify_asset_class("SAP", "DE Equities (CFDs)") == ""
+    assert classify_asset_class("SPY", "ETFs") == ""
+
+
+# ----------------------------------------------------------------------
 # FX sub-classification
 # ----------------------------------------------------------------------
 
@@ -70,6 +135,17 @@ def test_chain_name_is_case_insensitive():
                                   "USDCHF", "USDCAD", "NZDUSD"])
 def test_the_seven_majors(pair):
     assert classify_asset_class(pair, "Forex") == "fx_major"
+
+
+@pytest.mark.parametrize("pair", ["EURUSD.pro", "GBPUSD.raw", "USDJPY.pro",
+                                  "AUDUSD.pro"])
+def test_a_broker_suffix_does_not_demote_a_major(pair):
+    """acgmarkets suffixes its flavours; the pair underneath is still a major."""
+    assert classify_asset_class(pair, "Forex (Pro)") == "fx_major"
+
+
+def test_a_broker_suffix_keeps_the_exotic_bucket():
+    assert classify_asset_class("USDTRY.pro", "Forex (Pro)") == "fx_exotic"
 
 
 @pytest.mark.parametrize("pair", ["EURGBP", "EURJPY", "GBPAUD", "AUDCHF",

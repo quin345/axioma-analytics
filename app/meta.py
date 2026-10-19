@@ -65,21 +65,43 @@ def _table(settings: Settings) -> str:
 
 
 def symbol_catalogue(settings: Settings | None = None) -> pd.DataFrame:
-    """One row per (symbol, account): id, ticker, category, description + scope."""
+    """One row per (symbol, account): id, ticker, category, description + scope.
+
+    The broker's own category catalogue (``symbols_category``) maps the
+    broker-specific ``symbolCategoryId`` to an asset class id, and
+    ``asset_classes`` maps that id to the broker's asset-class label (for
+    example "Metals (Pro)"). Including both keeps every broker's classification
+    authoritative instead of reusing one broker's numeric category codes.
+    """
     s = settings or get_settings()
-    wanted = ", ".join(f'"{c}"' for c in SYMBOL_COLUMNS + SCOPE_COLUMNS)
+    # ``symbols`` may be the configured view/table; the broker catalogues are
+    # always the two physical tables. The view exposes the account as
+    # ``ctrader_account_id`` (the same value as ``ctidTraderAccountId``), so the
+    # category join can key on it directly.
+    symbols = _table(s)
+    wanted = (
+        ", ".join(f'symbols."{c}"' for c in SYMBOL_COLUMNS + SCOPE_COLUMNS)
+        + ', sc."assetClassId" AS asset_class_id, ac."name" AS asset_class_name'
+    )
     clauses: list[str] = []
     params: list[object] = []
     if (s.ctrader_account_id or "").strip():
-        clauses.append("ctrader_account_id = %s")
+        clauses.append('symbols."ctrader_account_id" = %s')
         params.append(s.ctrader_account_id.strip())
     if (s.broker_name or "").strip():
-        clauses.append("LOWER(broker_name) = LOWER(%s)")
+        clauses.append('LOWER(symbols."broker_name") = LOWER(%s)')
         params.append(s.broker_name.strip())
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
-        f"SELECT {wanted} FROM {_table(s)}{where} "
-        'ORDER BY "symbolId", "ctrader_account_id"'
+        f"SELECT {wanted} FROM {symbols} AS symbols "
+        "LEFT JOIN symbols_category sc "
+        '  ON symbols."ctrader_account_id" = sc."ctidTraderAccountId" '
+        '  AND symbols."symbolCategoryId" = sc."symbolCategoryId" '
+        "LEFT JOIN asset_classes ac "
+        '  ON sc."ctidTraderAccountId" = ac."ctidTraderAccountId" '
+        '  AND sc."assetClassId" = ac."assetClassId" '
+        f"{where} "
+        'ORDER BY symbols."symbolId", symbols."ctrader_account_id"'
     )
     try:
         with _connect(s) as conn:
@@ -89,14 +111,18 @@ def symbol_catalogue(settings: Settings | None = None) -> pd.DataFrame:
     except Exception as exc:
         raise DataSourceError(f"Postgres metadata read failed: {exc}.") from exc
     if frame.empty:
-        return pd.DataFrame(columns=SYMBOL_COLUMNS + SCOPE_COLUMNS)
+        return pd.DataFrame(
+            columns=SYMBOL_COLUMNS + SCOPE_COLUMNS + ["asset_class_id", "asset_class_name"]
+        )
     frame["symbolId"] = pd.to_numeric(frame["symbolId"], errors="coerce")
     frame = frame.dropna(subset=["symbolId"])
-    frame["symbolId"] = frame["symbolId"].astype("int64")
-    # Newest write per (symbol, account) wins; rows arrive oldest-first.
+    # Newest write per (symbol, account) wins; rows arrive oldest-first. The
+    # cast lands after the reset so the column is replaced on a frame pandas
+    # no longer tracks as a filtered view of the read.
     frame = frame.drop_duplicates(
         subset=["symbolId", "ctrader_account_id"], keep="last"
     ).reset_index(drop=True)
+    frame["symbolId"] = frame["symbolId"].astype("int64")
     return frame
 
 

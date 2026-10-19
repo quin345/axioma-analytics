@@ -690,14 +690,23 @@ The pipeline publishes the class on each symbol row; the app **consumes the
 pipeline's classification first** rather than guessing
 (`symbols_metadata → assets.classify_asset_class`).
 
-1. **Broker class name** → stable client key (`assets.BROKER_CLASSES`):
-   Forex→`fx`, Metals→`metal`, Indices→`index`, Oil→`energy`,
-   Cryptocurrencies→`crypto`, Commodities→`commodity`, Futures/Futures
-   Commodities→`future`, Bonds→`bond`.
+1. **Broker class label** → stable client key (`assets.BROKER_CLASSES`). The
+   label is the broker's own wording, read from its catalogue
+   (`symbols_category.assetClassId` → `asset_classes.name`, joined on the
+   account so each broker keeps its own numbering), with the account qualifier
+   in parentheses stripped: Forex→`fx`, Metals→`metal`, Indices→`index`,
+   Oil/Energies→`energy`, Cryptocurrencies/Crypto Currency→`crypto`,
+   Commodities→`commodity`, Futures/Forwards/Futures Commodities→`future`,
+   Bonds/Treasuries→`bond`, Currency Index/Commodities Indices→`index`. This is
+   what makes a broker-specific number safe: acgmarkets' category 10 is
+   *Metals* ("Metals (Pro)") even though the numeric fallback below reads 10 as
+   the Oil id. Equity and ETF labels are deliberately unmapped — the taxonomy
+   has no single-name share class.
 2. **FX is sub-divided** (the pipeline lumps it; a dashboard benefits from the
    split): `fx_major` (the seven majors: EURUSD, GBPUSD, USDJPY, AUDUSD,
    USDCHF, USDCAD, NZDUSD), `fx_exotic` (any leg in the exotic set), else
-   `fx_cross`.
+   `fx_cross`. The pair is read off the base ticker, so a broker's account
+   suffix (`EURUSD.pro`) cannot demote a major to a cross.
 3. **Fallback** (`classify_by_name`) when the dimension row carries no usable
    category — archive entries, new listings, an unreloaded dimension — using
    the same signals cTrader exposes, in order: raw `symbolCategoryId` map →

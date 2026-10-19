@@ -124,7 +124,7 @@ cards are click/keyboard disclosures with a detail body.
 | Card (`data-card`) | Title | Report block | Table | Formula / definition |
 |---|---|---|---|---|
 | `ticks` | Latest ticks | `ticks` (`tick_table`) | `agg_dom` | The most recent raw ticks (`tail(limit)`) with `ts, bid, ask, mid, volume, spread_bps, tick_dir`. |
-| `coverage` | Instrument coverage | health + `/api/asset-classes` | `symbols_metadata` (PostgreSQL) | Per asset-class instrument rollup. Class derived from `symbolCategoryId` via `assets.classify_asset_class` (FX sub-classed into majors/crosses/exotics). Tag shows `symbol_count` traded, `classified_count` classified. |
+| `coverage` | Instrument coverage | health + `/api/asset-classes` | `symbols_metadata` (PostgreSQL) + `symbols_category` / `asset_classes` (the broker's own catalogue) | Per asset-class instrument rollup. Class derived from the instrument's own broker class label (joined via `symbols_category.assetClassId` → `asset_classes.name`, e.g. `Metals (Pro)`) by `assets.classify_asset_class`, falling back to `symbolCategoryId` / the ticker when the catalogue has no row (FX sub-classed into majors/crosses/exotics). Tag shows `symbol_count` traded, `classified_count` classified. |
 
 ### Calendar
 
