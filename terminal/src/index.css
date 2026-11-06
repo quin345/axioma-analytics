@@ -1,0 +1,145 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    background: #0b0e12;
+  }
+
+  body {
+    min-width: 1180px;
+    min-height: 100vh;
+    background: #0b0e12;
+    color: #e7edf3;
+  }
+
+  button,
+  [data-name="Selection"],
+  [data-name="Window option"],
+  [data-name="Action"],
+  [data-name="Chart title"],
+  [data-name="maximize-2"],
+  [data-name="ellipsis"],
+  [data-node-id="2007:7124"],
+  [data-node-id="2007:7125"],
+  [data-node-id="2007:7126"] {
+    cursor: pointer;
+  }
+}
+
+.terminal-shell {
+  min-height: 100vh;
+}
+
+.terminal-shell [data-node-id="2007:7124"],
+.terminal-shell [data-node-id="2007:7125"],
+.terminal-shell [data-node-id="2007:7126"] {
+  color: #94a3b3;
+  transition: color 150ms ease;
+}
+
+.terminal-shell[data-active-tab="analytics"] [data-node-id="2007:7124"],
+.terminal-shell[data-active-tab="instruments"] [data-node-id="2007:7125"],
+.terminal-shell[data-active-tab="research"] [data-node-id="2007:7126"] {
+  color: #79d9ee;
+}
+
+.terminal-shell [data-name="Window option"] {
+  background: #11161d;
+  transition: background 150ms ease;
+}
+
+.terminal-shell [data-name="Window option"] p {
+  color: #94a3b3;
+}
+
+.terminal-shell[data-active-window="1h"] [data-node-id="2007:7158"],
+.terminal-shell[data-active-window="2h"] [data-node-id="2007:7160"],
+.terminal-shell[data-active-window="3h"] [data-node-id="2007:7162"],
+.terminal-shell[data-active-window="4h"] [data-node-id="2007:7164"] {
+  background: #163b47;
+}
+
+.terminal-shell[data-active-window="1h"] [data-node-id="2007:7158"] p,
+.terminal-shell[data-active-window="2h"] [data-node-id="2007:7160"] p,
+.terminal-shell[data-active-window="3h"] [data-node-id="2007:7162"] p,
+.terminal-shell[data-active-window="4h"] [data-node-id="2007:7164"] p {
+  color: #79d9ee;
+}
+
+[data-name="Selection"],
+[data-name="Action"],
+[data-name="maximize-2"],
+[data-name="ellipsis"] {
+  transition:
+    filter 150ms ease,
+    transform 150ms ease;
+}
+
+[data-name="Selection"]:hover,
+[data-name="maximize-2"]:hover,
+[data-name="ellipsis"]:hover {
+  filter: brightness(1.35);
+}
+
+[data-name="Action"]:hover {
+  filter: brightness(1.08);
+}
+
+[data-name="Action"]:active,
+[data-name="maximize-2"]:active,
+[data-name="ellipsis"]:active {
+  transform: scale(0.96);
+}
+
+.terminal-shell[data-running="true"] [data-name="Action"] {
+  filter: saturate(0.65);
+}
+
+[data-name="Analytics card"] {
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+[data-name="Analytics card"].is-highlighted {
+  border-color: #79d9ee !important;
+  box-shadow: 0 0 0 1px rgb(121 217 238 / 16%);
+}
+
+[data-name="Analytics card"].is-collapsed {
+  height: 46px !important;
+}
+
+[data-name="Analytics card"].is-collapsed > :not(:first-child) {
+  display: none !important;
+}
+
+[data-name="Analytics card"].is-expanded {
+  position: fixed !important;
+  inset: 24px !important;
+  z-index: 50;
+  width: auto !important;
+  height: auto !important;
+  background: #11161d;
+  box-shadow: 0 24px 80px rgb(0 0 0 / 60%);
+}
+
+[data-name="Analytics card"].is-expanded [data-name="Analytical plot"] {
+  transform-origin: top left;
+}
+
+@media (max-width: 1300px) {
+  body {
+    min-width: 1024px;
+  }
+
+  .terminal-shell {
+    transform-origin: top left;
+  }
+}
