@@ -26,10 +26,22 @@ cfg = load_config()
 reader = KustoReader(cfg)
 # Built assets (Vite writes them to dist/assets) are served at /assets.
 app = Flask(__name__, static_folder=os.path.join(cfg.frontend_dist, "assets"), static_url_path="/assets")
+# The holding page lives next to this module, not in the built bundle, so it
+# still renders while the dashboard is being worked on.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
 def _scale(value):
     return None if value is None else value / cfg.price_scale
+
+
+def _holding_page():
+    """The 'service not available' page, sent with a 503.
+
+    503 rather than 200 so proxies and uptime checks do not treat the holding
+    page as a healthy dashboard.
+    """
+    return send_from_directory(STATIC_DIR, "maintenance.html"), 503
 
 
 def _symbol_arg():
@@ -51,7 +63,20 @@ def _int_arg(name, default, low, high):
 
 @app.get("/")
 def index():
+    # While we are still working on the terminal, `/` is the holding page with
+    # a 503; the API routes below stay up so the refresh job and any tooling
+    # keep working. Flip MAINTENANCE_MODE off in .env and restart to serve the
+    # dashboard again.
+    if cfg.maintenance:
+        return _holding_page()
     return send_from_directory(cfg.frontend_dist, "index.html")
+
+
+@app.get("/unavailable")
+def unavailable():
+    """The holding page at its own path, so it can be previewed even when the
+    dashboard is live (`/` only swaps to it under MAINTENANCE_MODE)."""
+    return send_from_directory(STATIC_DIR, "maintenance.html")
 
 
 @app.get("/favicon.png")

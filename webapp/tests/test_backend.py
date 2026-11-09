@@ -1,4 +1,5 @@
 """Run from the webapp folder:  python -m tests.test_backend"""
+import dataclasses
 import math
 import os
 import sys
@@ -329,6 +330,53 @@ def test_vap_routes_local_then_refresh():
         posted = client.post("/api/volume-at-price/refresh?symbol=136")
         assert posted.status_code == 200
         assert set(posted.json["windows"]) == {"60", "120", "180", "240"}
+
+
+# --- Maintenance / holding page ----------------------------------------------
+
+def test_holding_page_when_maintenance_on():
+    """MAINTENANCE_MODE serves the holding page at / with a 503, so proxies and
+    uptime checks do not cache an under-construction site as healthy."""
+    maintenance_cfg = dataclasses.replace(app_module.cfg, maintenance=True)
+    with mock.patch.object(app_module, "cfg", maintenance_cfg):
+        client = app_module.app.test_client()
+        r = client.get("/")
+        assert r.status_code == 503
+        assert b"Service not available" in r.data
+        assert b"still working on it" in r.data
+
+
+def test_dashboard_served_when_maintenance_off():
+    """With the flag off, / is the built dashboard again."""
+    live_cfg = dataclasses.replace(app_module.cfg, maintenance=False)
+    with mock.patch.object(app_module, "cfg", live_cfg):
+        client = app_module.app.test_client()
+        r = client.get("/")
+        # The stub FRONTEND_DIST does not exist, so this is a 404 from the
+        # static send - the point is that it is no longer the 503 holding page.
+        assert r.status_code != 503
+        assert b"Service not available" not in r.data
+
+
+def test_unavailable_page_is_always_reachable():
+    """The page is served at its own path regardless of the flag, so it can be
+    previewed while the dashboard is live."""
+    live_cfg = dataclasses.replace(app_module.cfg, maintenance=False)
+    with mock.patch.object(app_module, "cfg", live_cfg):
+        r = app_module.app.test_client().get("/unavailable")
+        assert r.status_code == 200
+        assert b"Service not available" in r.data
+
+
+def test_holding_page_is_self_contained():
+    """It must render while the dashboard is being worked on, so it carries no
+    dependency on the built bundle."""
+    page = os.path.join(app_module.STATIC_DIR, "maintenance.html")
+    with open(page, encoding="utf-8") as handle:
+        html = handle.read()
+    assert "<style>" in html
+    assert "/assets/" not in html          # no built JS/CSS
+    assert "AXIOMA" in html
 
 
 if __name__ == "__main__":
