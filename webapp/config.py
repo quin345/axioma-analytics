@@ -20,6 +20,10 @@ class Config:
     maintenance: bool    # serve the holding page at / instead of the dashboard
     vap_keep_runs: int | None       # cap stops per (symbol, window); None = keep all
     vap_level_hours: float | None   # hours of vap_level bins to keep; None = all
+    sql_server: str      # Fabric SQL database host; blank = export disabled
+    sql_database: str    # the database (catalog) to write into
+    sql_schema: str      # schema for the mirrored table
+    sql_table: str       # the mirrored table name
 
 
 def _require(name):
@@ -69,6 +73,22 @@ def load_config():
     # and is trimmed to the last VAP_LEVEL_HOURS hours by default (48).
     keep_runs = _opt_int("VAP_KEEP_RUNS") or _opt_int("VAP_KEEP")
 
+    # The Fabric SQL database mirror of `vap_run`. All of it is optional: with
+    # SQL_SERVER blank the daily export is simply off, so the dashboard and the
+    # 5-minute recorder keep running on a box with no SQL target configured.
+    sql_server = os.environ.get("SQL_SERVER", "").strip()
+    sql_database = os.environ.get("SQL_DATABASE", "").strip()
+    sql_schema = os.environ.get("SQL_SCHEMA", "").strip() or "dbo"
+    sql_table = os.environ.get("SQL_TABLE", "").strip() or "vap_run"
+    if sql_server:
+        if not sql_database:
+            raise RuntimeError("SQL_DATABASE is required when SQL_SERVER is set")
+        # Schema and table are interpolated into DDL/DML, so they are held to
+        # the same plain-identifier rule as KUSTO_TABLE rather than quoted.
+        for label, value in (("SQL_SCHEMA", sql_schema), ("SQL_TABLE", sql_table)):
+            if not NAME_PATTERN.match(value):
+                raise RuntimeError(f"{label} must be a plain identifier, e.g. {value!r}")
+
     return Config(
         cluster_uri=_require("KUSTO_CLUSTER_URI"),
         database=_require("KUSTO_DATABASE"),
@@ -79,4 +99,8 @@ def load_config():
         maintenance=_flag("MAINTENANCE_MODE"),
         vap_keep_runs=keep_runs,
         vap_level_hours=_opt_float("VAP_LEVEL_HOURS", 48.0),
+        sql_server=sql_server,
+        sql_database=sql_database,
+        sql_schema=sql_schema,
+        sql_table=sql_table,
     )

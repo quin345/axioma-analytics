@@ -141,3 +141,76 @@ A daily cron for the reclamation is enough:
 30 3 * * * azureuser set -a; . /home/azureuser/axioma-analytics/.env; set +a; cd /home/azureuser/axioma-analytics/webapp && /home/azureuser/axioma-analytics/venv/bin/python build_vap.py --prune && /home/azureuser/axioma-analytics/venv/bin/python build_vap.py --vacuum >> /var/log/axioma-vap.log 2>&1
 ```
 
+## Mirroring `vap_run` into the Fabric SQL database
+
+`vap_run` also lives in the Fabric-managed SQL database `ctrader_metadata`,
+where the rest of the platform's state is kept, so it can be joined from T-SQL.
+
+| Piece | Where |
+|---|---|
+| Client | `webapp/sql_mirror.py` |
+| Job | `webapp/export_vap_run.py` |
+| Target | `[dbo].[vap_run]` in `ctrader_metadata` |
+| Auth | the VM's **system-assigned managed identity** - no password, no secret |
+
+The endpoint is in `.env`; the identity and the database are the only things
+that identify the target:
+
+```ini
+SQL_SERVER=fhfvfrbmgnsefmb4zhszgcb6qe-2ufy5ahlkr5ephu52va2lfsbsi.database.fabric.microsoft.com
+SQL_DATABASE=ctrader_metadata-2ff97c6f-c20c-4f54-89e1-af77b3e1e9b6
+SQL_SCHEMA=dbo
+SQL_TABLE=vap_run
+```
+
+Leave `SQL_SERVER` blank to turn the mirror off; the dashboard and the
+5-minute recorder do not depend on it.
+
+### The identity has to be provisioned in the database
+
+The managed identity can reach the server on its own, but a login is refused
+until it is a *user inside the database*. `Login failed for user '' (18456)` is
+that state, and the job prints the fix rather than a bare ODBC error. An
+administrator runs it once:
+
+```sql
+CREATE USER [axiomavm01] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_datareader ADD MEMBER [axiomavm01];
+ALTER ROLE db_datawriter ADD MEMBER [axiomavm01];
+ALTER ROLE db_ddladmin  ADD MEMBER [axiomavm01];  -- only to let it create its own table
+```
+
+`axiomavm01` is the VM's name, which is also its managed-identity principal.
+
+### Idempotent by natural key
+
+The mirror's unique key is `(symbol_id, window_minutes, as_of)` - the same
+triple `db.py` makes unique locally - and the copy is a `MERGE` on it. So
+running the job twice in a day, or backfilling a range already sent, updates
+rows in place instead of appending duplicates.
+
+The local `id` column is carried purely for provenance. It is a SQLite
+`AUTOINCREMENT` value that **can be reused** after `prune_runs` deletes rows, so
+it is never used as the key.
+
+`high_volume_nodes` is stored as `NVARCHAR(MAX)` holding the same JSON document
+the local table keeps, so a reader parses it exactly as it does today.
+
+### Running it
+
+```bash
+cd webapp
+python export_vap_run.py              # mirror every recorded stop
+python export_vap_run.py --list       # local count + target, write nothing
+python export_vap_run.py --dry-run    # count what would move
+python export_vap_run.py --create     # create the table/index first
+python export_vap_run.py --limit 50   # only the newest N stops
+```
+
+Daily cron, **after** the retention job so the mirror reflects what is kept:
+
+```cron
+45 3 * * * azureuser set -a; . /home/azureuser/axioma-analytics/.env; set +a; cd /home/azureuser/axioma-analytics/webapp && /home/azureuser/axioma-analytics/venv/bin/python export_vap_run.py >> /var/log/axioma-vap.log 2>&1
+```
+
+

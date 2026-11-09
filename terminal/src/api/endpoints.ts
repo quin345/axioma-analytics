@@ -1,9 +1,21 @@
 // Named API calls. Components never build URLs themselves.
 import { getJson } from "./client";
-import type { SeriesPoint, SpreadSummary, VolumeAtPriceProfile } from "./types";
+import type {
+  AssetClassCount,
+  Instrument,
+  SeriesPoint,
+  SpreadSummary,
+  VolumeAtPriceProfile,
+} from "./types";
 
-export function fetchSymbols(): Promise<string[]> {
-  return getJson<string[]>("/api/symbols");
+// Every collected instrument, with its broker/account/class metadata.
+export function fetchSymbols(): Promise<Instrument[]> {
+  return getJson<Instrument[]>("/api/symbols");
+}
+
+// The canonical asset classes and their collected-instrument counts.
+export function fetchAssetClasses(): Promise<AssetClassCount[]> {
+  return getJson<AssetClassCount[]>("/api/asset-classes");
 }
 
 export function fetchSeries(

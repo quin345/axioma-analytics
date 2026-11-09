@@ -1,5 +1,5 @@
-import { fetchSeries, fetchSpread, fetchSymbols, fetchVolumeAtPrice } from "../api/endpoints";
-import type { SeriesPoint, SpreadSummary, VolumeAtPriceProfile } from "../api/types";
+import { fetchAssetClasses, fetchSeries, fetchSpread, fetchSymbols, fetchVolumeAtPrice } from "../api/endpoints";
+import type { AssetClassCount, Instrument, SeriesPoint, SpreadSummary, VolumeAtPriceProfile } from "../api/types";
 import { BIN_SECONDS } from "../lib/window";
 import { usePoll, type PollState } from "./usePoll";
 
@@ -9,8 +9,14 @@ const SERIES_REFRESH_MS = 5_000;
 // polling it faster than that only repeats the same row.
 const VAP_REFRESH_MS = 300_000;
 
-export function useSymbols(): PollState<string[]> {
+export function useSymbols(): PollState<Instrument[]> {
   return usePoll(fetchSymbols, [], SYMBOL_REFRESH_MS);
+}
+
+// The canonical asset classes and their counts. Rides the symbol cadence - it is
+// derived from the same collected set and the same mapping snapshot.
+export function useAssetClasses(): PollState<AssetClassCount[]> {
+  return usePoll(fetchAssetClasses, [], SYMBOL_REFRESH_MS);
 }
 
 export function useSeries(symbolId: string | null, minutes: number): PollState<SeriesPoint[]> {

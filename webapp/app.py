@@ -20,6 +20,22 @@ WINDOWS = (60, 120, 180, 240)
 # The refresh grid: the cron/systemd job runs every this many minutes.
 REFRESH_MINUTES = int(os.environ.get("CACHE_REFRESH_MINUTES", "5") or 5) or 5
 
+# The feed's broker spelling -> the metadata catalogue's spelling.
+#
+# The two surfaces do not agree on how a broker's name is written: the order-book
+# feed ships `icmarkets` while the Fabric `ctrader_metadata` catalogue records the
+# same broker as `icmarketssc`. The catalogue is the authority on identity (it
+# owns the account and symbol catalogue), so the feed's spelling is normalised to
+# it before the join - a raw string comparison would silently fail to match and
+# every one of that broker's instruments would come through unmapped.
+#
+# Only spellings that are *known* variants belong here; an unmapped name is left
+# as-is, so a genuinely new broker shows up as unmapped rather than being guessed
+# onto an existing one. Keys are the feed's (lowercased) spelling.
+BROKER_ALIASES = {
+    "icmarkets": "icmarketssc",
+}
+
 cfg = load_config()
 reader = KustoReader(cfg)
 # Built assets (Vite writes them to dist/assets) are served at /assets.
@@ -92,8 +108,141 @@ def favicon_svg():
 
 @app.get("/api/symbols")
 def symbols():
-    rows = reader.run(queries.symbols(cfg.table))
-    return jsonify([row["symbolId"] for row in rows])
+    """The collected instruments, enriched with the broker/symbol mapping.
+
+    The feed is the source of truth for *what is collected*, and it carries the
+    same triple the metadata catalogue is keyed on -
+    `(broker, ctidTraderAccountId, symbolId)`. The local `symbol_mapping`
+    snapshot (from the Fabric `ctrader_metadata` database) is what turns that
+    triple into an instrument: its broker name, the standardized name and the
+    canonical asset class.
+
+    The join is on the **full triple**, never on `symbolId` alone: a symbol id is
+    shared across brokers and means a different instrument on each - the same
+    id is `XAUUSD.pro` on one broker and something else on another - so matching
+    on the id by itself would mislabel instruments. A collected triple with no
+    mapping row still comes through, with null metadata rather than being
+    dropped: that is the honest answer for an instrument the catalogue does not
+    (yet) describe.
+    """
+    collected = _collected_instruments()
+
+    conn = db.connect(cfg.db_path)
+    try:
+        mapping = _mapping_by_triple(conn)
+    finally:
+        conn.close()
+
+    return jsonify([_instrument(row, mapping.get(_triple(row)))
+                    for row in collected])
+
+
+def _collected_instruments():
+    """The collected (broker, account, symbol) rows from the feed."""
+    return reader.run(queries.symbols(cfg.table))
+
+
+def _triple(row):
+    """The join key: broker + account + symbol id, all as text.
+
+    Works on both sides of the join, which name the columns differently: the
+    feed (Kusto) says `ctidTraderAccountId` / `symbolId`, the local snapshot says
+    `ctid_trader_account` / `symbol_id`. Either spelling is accepted so the two
+    produce the same key. Everything is normalised to text, so an integer id on
+    one side matches the string on the other, and the broker is normalised
+    through `BROKER_ALIASES` so the feed's spelling meets the catalogue's.
+    """
+    return (
+        canonical_broker(_first(row, "broker")),
+        _text(_first(row, "ctidTraderAccountId", "ctid_trader_account", "account")),
+        _text(_first(row, "symbolId", "symbol_id")),
+    )
+
+
+def canonical_broker(name):
+    """A broker's catalogue name for its feed spelling.
+
+    The feed and the catalogue write some brokers differently (`icmarkets` vs
+    `icmarketssc`); the catalogue owns identity, so the feed's spelling is mapped
+    onto it. A name with no alias is returned as it stands - normalised to text
+    but otherwise untouched - so an unknown broker is left to come through
+    unmapped rather than being guessed onto a known one.
+    """
+    text = _text(name)
+    if text is None:
+        return None
+    return BROKER_ALIASES.get(text.strip().lower(), text)
+
+
+def _first(row, *names):
+    for name in names:
+        if row.get(name) is not None:
+            return row[name]
+    return None
+
+
+def _text(value):
+    return None if value is None else str(value)
+
+
+def _mapping_by_triple(conn):
+    """The snapshot keyed by (broker, account, symbol id) - the catalogue's key."""
+    return {_triple(row): row for row in db.load_symbol_mapping(conn)}
+
+
+def _instrument(row, mapped):
+    """One `/api/symbols` entry: the collected triple plus whatever the map knows."""
+    out = {
+        "symbolId": _text(_first(row, "symbolId", "symbol_id")),
+        # Provenance: the canonical broker name and the account. Reported from
+        # the feed when there is no catalogue row, so an unmapped instrument
+        # still shows where it came from.
+        "broker": canonical_broker(_first(row, "broker")),
+        "account": _text(_first(row, "ctidTraderAccountId", "ctid_trader_account", "account")),
+        "name": None,
+        "standardizedName": None,
+        "assetClass": None,
+    }
+    if mapped is not None:
+        out["name"] = mapped["symbol_name"]
+        # The display name the UI shows; falls back to the broker's own name.
+        out["standardizedName"] = mapped["standardized_name"] or mapped["symbol_name"]
+        out["assetClass"] = mapped["asset_class"]
+    return out
+
+
+@app.get("/api/asset-classes")
+def asset_classes():
+    """The canonical asset classes and how many collected instruments are in each.
+
+    Counted over the same collected triples `/api/symbols` serves, so the two
+    agree. The canonical order is fixed so the UI does not reshuffle between
+    polls; a class with no instruments still appears, with a zero, and anything
+    unmapped is reported under its own key rather than being hidden.
+    """
+    collected = _collected_instruments()
+
+    conn = db.connect(cfg.db_path)
+    try:
+        mapping = _mapping_by_triple(conn)
+    finally:
+        conn.close()
+
+    names = list(db.ASSET_CLASSES)
+    counts = {name: 0 for name in names}
+    for row in collected:
+        mapped = mapping.get(_triple(row))
+        key = mapped["asset_class"] if mapped else None
+        if key not in counts:
+            # Unmapped, or a class the map did not recognise (e.g. "Other").
+            key = key or db.ASSET_CLASS_UNKNOWN
+            counts.setdefault(key, 0)
+            if key not in names:
+                names.append(key)
+        counts[key] += 1
+
+    return jsonify([{"assetClass": name, "count": counts[name]} for name in names])
+
 
 
 @app.get("/api/series")

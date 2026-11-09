@@ -1,9 +1,14 @@
 def symbols(table):
+    # The feed carries the same triple the metadata catalogue is keyed on -
+    # (broker, ctidTraderAccountId, symbolId) - and a symbolId alone is shared
+    # across brokers, so all three are projected and the caller joins on all
+    # three. Collapsing to `distinct symbolId` here would reintroduce exactly
+    # the cross-broker ambiguity this query exists to avoid.
     return f"""
 {table}
 | where timestamp > ago(1d)
-| distinct symbolId
-| order by symbolId asc
+| summarize events = count() by broker, ctidTraderAccountId, symbolId
+| order by broker asc, ctidTraderAccountId asc, symbolId asc
 """
 
 

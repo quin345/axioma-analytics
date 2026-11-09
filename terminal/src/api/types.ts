@@ -1,6 +1,31 @@
 // Shapes returned by the Flask API in webapp/app.py.
 // Prices are already divided by PRICE_SCALE on the server.
 
+// One collected instrument, from /api/symbols. The broker, account and symbol
+// id are the feed's own triple - the same key the metadata catalogue is stored
+// under - so they are always present. The catalogue fields (`name`,
+// `standardizedName`, `assetClass`) are null when the catalogue has no row for
+// that exact triple: a symbol id means a different instrument on each broker,
+// so the app never guesses across brokers.
+export interface Instrument {
+  symbolId: string;
+  broker: string | null;
+  account: string | null;
+  // The broker's own name for the instrument, e.g. "XAUUSD.pro" (catalogue).
+  name: string | null;
+  // `name` with the account-tier suffix stripped, e.g. "XAUUSD"; the display name.
+  standardizedName: string | null;
+  // A canonical class: FX | Equities | Index | Commodities | Crypto | Other.
+  assetClass: string | null;
+}
+
+// One row of /api/asset-classes: a canonical class and how many collected
+// instruments are in it.
+export interface AssetClassCount {
+  assetClass: string;
+  count: number;
+}
+
 export interface SeriesPoint {
   bucket: string;
   best_bid: number | null;

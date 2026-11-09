@@ -1,7 +1,7 @@
 import { useMarket } from "../context/MarketContext";
 import { imgCalendarDays, imgChevronDown, imgPlay } from "../assets";
 
-type Props = { assetClass: string; instrument: string; running: boolean };
+type Props = { assetClass: string | null; instrument: string; running: boolean };
 
 export default function ControlBar({ assetClass, instrument, running }: Props) {
   const { actions } = useMarket();
@@ -32,7 +32,7 @@ export default function ControlBar({ assetClass, instrument, running }: Props) {
             className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[12px] whitespace-nowrap"
             data-node-id="2007:7148"
           >
-            {assetClass}
+            {assetClass ?? "All classes"}
           </p>
           <div
             className="relative shrink-0 size-[12px]"

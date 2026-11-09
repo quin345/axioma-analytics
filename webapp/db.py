@@ -31,6 +31,44 @@ import sqlite3
 
 SCHEMA_VERSION = 1
 
+# The account-tier suffixes a broker appends to a symbol name: `AUDCAD.pro` and
+# `AUDCAD.raw` are the same instrument on different accounts. Stripped when
+# deriving `symbol_mapping.standardized_name`; see `standardize_symbol`.
+SYMBOL_TIER_SUFFIXES = ("pro", "raw")
+
+# The canonical asset classes the local snapshot carries. Brokers name classes
+# their own way and in their own number of buckets ("US Equities (CFDs)",
+# "Futures Commodities", "Metals (Pro)"); the snapshot collapses each broker's
+# vocabulary onto this fixed five so a reader can group across brokers without
+# knowing any broker's catalogue.
+ASSET_CLASSES = ("FX", "Equities", "Index", "Commodities", "Crypto")
+
+# Source class name -> canonical class. Matched on the broker label with its
+# account-tier parenthesis removed, so one entry covers `Metals`, `Metals (Pro)`
+# and `Metals (Raw)`. Keys are lowercase; see `canonical_asset_class`.
+ASSET_CLASS_MAP = {
+    "forex": "FX",
+    "fx": "FX",
+    "equities": "Equities",
+    "equity": "Equities",
+    "eu equities": "Equities",
+    "us equities": "Equities",
+    "indices": "Index",
+    "index": "Index",
+    "metals": "Commodities",
+    "oil": "Commodities",
+    "commodities": "Commodities",
+    "futures commodities": "Commodities",
+    "cryptocurrencies": "Crypto",
+    "crypto": "Crypto",
+}
+
+# The canonical class for a source label the map does not name. Brokers ship
+# classes with no home in the fixed five (Bonds is the live one), and a symbol
+# whose broker has no catalogue row at all arrives NULL. Both land here rather
+# than in a wrong bucket.
+ASSET_CLASS_UNKNOWN = "Other"
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
@@ -55,6 +93,37 @@ CREATE TABLE IF NOT EXISTS vap_level (
     price  REAL    NOT NULL,
     volume REAL    NOT NULL,
     ticks  INTEGER NOT NULL
+);
+
+-- The broker -> account -> symbol lookup, snapshotted from the Fabric-managed
+-- SQL database `ctrader_metadata` (its dbo.symbols table) by snapshot_symbols.py.
+-- It is a point-in-time copy, not a synced replica: re-running the snapshot
+-- replaces the rows wholesale and stamps `captured_at` with the pull time.
+--
+-- The (broker, ctid_trader_account, symbol_id) triple is the primary key
+-- because it is the source's primary key: the same symbol_id means a different
+-- instrument on each broker account, so the account has to be part of the key.
+--
+-- `asset_class` is the instrument's class, collapsed onto the canonical set in
+-- ASSET_CLASSES (FX / Equities / Index / Commodities / Crypto), with anything
+-- the brokers ship that has no home there (and a symbol the broker has no
+-- catalogue row for) landing on ASSET_CLASS_UNKNOWN. The broker's own label is
+-- resolved through symbols_category -> asset_classes on (broker, account,
+-- category) first - the same numeric category id means a different class per
+-- account - then mapped; see `canonical_asset_class`.
+--
+-- `standardized_name` is `symbol_name` with the account-tier suffix (`.pro`,
+-- `.raw`) stripped, so the same instrument lines up across a broker's account
+-- tiers; the suffix itself is kept as the broker's own nominal name.
+CREATE TABLE IF NOT EXISTS symbol_mapping (
+    broker              TEXT    NOT NULL,
+    ctid_trader_account TEXT    NOT NULL,
+    symbol_id           INTEGER NOT NULL,
+    symbol_name         TEXT,
+    standardized_name   TEXT,
+    asset_class         TEXT,
+    captured_at         TEXT    NOT NULL,
+    PRIMARY KEY (broker, ctid_trader_account, symbol_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_vap_run_lookup
@@ -85,10 +154,30 @@ def connect(db_path):
 def init_db(conn):
     """Create the schema and stamp the version. Idempotent."""
     conn.executescript(SCHEMA)
+    _migrate(conn)
     row = conn.execute("SELECT version FROM schema_version").fetchone()
     if row is None:
         conn.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()
+
+
+def _migrate(conn):
+    """Bring a pre-existing database up to the current schema.
+
+    `SCHEMA` is all `CREATE TABLE IF NOT EXISTS`, so it creates a table but never
+    widens one that is already there. The two `symbol_mapping` columns added after
+    the first snapshot release have to be added explicitly, and the rows they
+    would apply to are a stale snapshot anyway (the next `snapshot_symbols` run
+    replaces them), so they come in nullable rather than being backfilled.
+    """
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='symbol_mapping'"
+    ).fetchone() is None:
+        return
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(symbol_mapping)")}
+    for column in ("standardized_name", "asset_class"):
+        if column not in have:
+            conn.execute(f"ALTER TABLE symbol_mapping ADD COLUMN {column} TEXT")
 
 
 def save_profile(conn, symbol_id, window_minutes, as_of, profile, computed_at=None):
@@ -318,6 +407,94 @@ def prune_levels(conn, keep_hours=None, keep_runs=None):
 
     conn.commit()
     return removed
+
+
+def canonical_asset_class(source_name):
+    """Collapse a broker's own class name onto one of `ASSET_CLASSES`.
+
+    The broker label is matched with its account-tier parenthesis removed, so
+    `Metals`, `Metals (Pro)` and `Metals (Raw)` all answer `Commodities`. A label
+    with no mapping - and a NULL, for a symbol whose broker ships no catalogue
+    row - answers `ASSET_CLASS_UNKNOWN` rather than being forced into a bucket
+    that would mislead a reader.
+    """
+    if not source_name:
+        return ASSET_CLASS_UNKNOWN
+    label = source_name.split("(", 1)[0].strip().lower()
+    if label in ASSET_CLASS_MAP:
+        return ASSET_CLASS_MAP[label]
+    # A broker may qualify a known class in free text; fall back to a token match
+    # so `Forex CFDs` still reads as FX.
+    for key, canonical in ASSET_CLASS_MAP.items():
+        if key in label:
+            return canonical
+    return ASSET_CLASS_UNKNOWN
+
+
+def standardize_symbol(symbol_name):
+    """`symbol_name` with the account-tier suffix (`.pro`, `.raw`) stripped.
+
+    Brokers ship the same instrument under a different name per account tier -
+    `AUDCAD.pro` on the pro account, `AUDCAD.raw` on the raw one - and the tier
+    is the account, not the instrument, so it is removed to line the two up.
+    The suffix is a closed set: a dot in a symbol name otherwise means something
+    real (a futures contract month, e.g. `WTI_H6`), so only these known suffixes
+    are stripped, never a blanket "everything after the last dot".
+    """
+    for suffix in SYMBOL_TIER_SUFFIXES:
+        tail = "." + suffix
+        if symbol_name.endswith(tail):
+            return symbol_name[: -len(tail)]
+    return symbol_name
+
+
+def replace_symbol_mapping(conn, rows, captured_at=None):
+    """Swap in a fresh symbol-mapping snapshot, all-or-nothing.
+
+    `rows` are `(broker, ctid_trader_account, symbol_id, symbol_name, asset_class)`
+    tuples, as `snapshot_symbols` read them - `asset_class` there is the broker's
+    own label, and it is collapsed to a canonical `ASSET_CLASSES` value here. The
+    standardized name is likewise derived here rather than carried from the
+    source. The snapshot is a point-in-time copy of the Fabric source, so this is
+    a *replace*, not a merge: the old snapshot is cleared and the new one written
+    in a single transaction, which means a failed pull can never leave the local
+    table half-updated. `captured_at` stamps every row with the pull time so a
+    reader can tell how stale the snapshot is. Returns the number of rows written.
+    """
+    captured_at = captured_at or _now()
+    conn.execute("DELETE FROM symbol_mapping")
+    conn.executemany(
+        "INSERT INTO symbol_mapping "
+        "(broker, ctid_trader_account, symbol_id, symbol_name, "
+        " standardized_name, asset_class, captured_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(broker, str(account), int(symbol_id), name,
+          standardize_symbol(name), canonical_asset_class(asset_class), captured_at)
+         for broker, account, symbol_id, name, asset_class in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def load_symbol_mapping(conn, broker=None, account=None):
+    """The snapshotted mapping, optionally narrowed to one broker and/or account.
+
+    Ordered the same way the Fabric source is read, so the local copy is
+    byte-for-byte comparable with a fresh pull.
+    """
+    sql = "SELECT broker, ctid_trader_account, symbol_id, symbol_name, " \
+          "standardized_name, asset_class, captured_at FROM symbol_mapping"
+    where, params = [], []
+    if broker is not None:
+        where.append("broker = ?")
+        params.append(broker)
+    if account is not None:
+        where.append("ctid_trader_account = ?")
+        params.append(str(account))
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY broker, ctid_trader_account, symbol_id"
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
 def _hours_ago(hours):

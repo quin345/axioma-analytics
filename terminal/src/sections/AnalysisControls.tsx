@@ -2,10 +2,14 @@ import { useMarket } from "../context/MarketContext";
 import { fmtInt } from "../lib/format";
 import ControlBar from "./ControlBar";
 
-type Props = { assetClass: string; instrument: string; running: boolean };
+type Props = { assetClass: string | null; instrument: string; running: boolean };
 
 export default function AnalysisControls({ assetClass, instrument, running }: Props) {
-  const { ticks, windowLabel, status } = useMarket();
+  const { ticks, windowLabel, status, broker, account, assetClasses } = useMarket();
+  // The selected class's instrument count, from the mapping-derived list.
+  const classCount = assetClasses.find((c) => c.assetClass === assetClass)?.count;
+  // Where the instrument came from: broker / account, when the mapping knows.
+  const provenance = [broker, account].filter(Boolean).join(" · ");
   return (
     <div
       className="content-stretch flex flex-col gap-[18px] items-start overflow-clip relative shrink-0 w-full"
@@ -34,6 +38,14 @@ export default function AnalysisControls({ assetClass, instrument, running }: Pr
           >
             {instrument}
           </p>
+          {provenance ? (
+            <p
+              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[11px] whitespace-nowrap"
+              data-name="Instrument provenance"
+            >
+              {provenance}
+            </p>
+          ) : null}
           <div
             className="bg-[#163b47] content-stretch flex items-start overflow-clip px-[7px] py-[3px] relative rounded-[3px] shrink-0"
             data-node-id="2007:7141"
@@ -43,7 +55,8 @@ export default function AnalysisControls({ assetClass, instrument, running }: Pr
               className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#79d9ee] text-[9px] whitespace-nowrap"
               data-node-id="2007:7142"
             >
-              LIVE WINDOW
+              {assetClass ?? "ALL CLASSES"}
+              {classCount === undefined ? "" : ` · ${fmtInt(classCount)}`}
             </p>
           </div>
         </div>

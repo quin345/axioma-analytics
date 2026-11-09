@@ -37,6 +37,7 @@ os.environ.update({
 import analytics  # noqa: E402
 import app as app_module  # noqa: E402
 import db as db_module  # noqa: E402
+import sql_mirror  # noqa: E402
 
 
 def bucket(i):
@@ -452,6 +453,544 @@ def test_holding_page_is_self_contained():
     assert "<style>" in html
     assert "/assets/" not in html          # no built JS/CSS
     assert "AXIOMA" in html
+
+
+# --- The Fabric SQL mirror ----------------------------------------------------
+#
+# These stay offline: the ODBC connection is faked, so the suite runs on a box
+# with no SQL target and no login. What is worth pinning down is the *statement*
+# the mirror builds - in particular that the merge is keyed on the natural
+# triple rather than the reusable local `id`, and that a login failure surfaces
+# the administrator's grant rather than a bare ODBC error.
+
+def _sql_cfg(server="sql.example.com", database="meta"):
+    return dataclasses.replace(
+        app_module.cfg, sql_server=server, sql_database=database,
+        sql_schema="dbo", sql_table="vap_run",
+    )
+
+
+class FakeCursor:
+    """Records executed statements and replays canned results.
+
+    `rowcounts` are the values `@@ROWCOUNT` should report, consumed one per
+    MERGE - 1 for an inserted row, 2 for an updated one.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.rowcount = -1
+        self._result = None
+
+    def execute(self, sql, params=None):
+        self._conn.statements.append((sql, params))
+        self.rowcount = self._conn.rowcounts.pop(0) if self._conn.rowcounts else 1
+        self._result = (self.rowcount,)
+        return self
+
+    def fetchone(self):
+        return self._result
+
+    def fetchall(self):
+        return []
+
+    def close(self):
+        pass
+
+
+class FakeConnection:
+    def __init__(self, rowcounts=None):
+        self.statements = []
+        self.rowcounts = list(rowcounts or [])
+        self.commits = 0
+
+    def execute(self, sql, params=None):
+        return FakeCursor(self).execute(sql, params)
+
+    def cursor(self):
+        return FakeCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
+def test_sql_mirror_merge_is_keyed_on_the_natural_triple():
+    """The local `id` is AUTOINCREMENT and reused after a prune, so it must
+    never be the merge key - the (symbol, window, as_of) triple must be."""
+    conn = FakeConnection(rowcounts=[1])
+    cfg = _sql_cfg()
+
+    inserted, updated = sql_mirror.upsert_runs(
+        conn, cfg, [(1, "136", 60, "2026-11-06T10:00:00+00:00", "2026-11-06T10:00:01+00:00",
+                     100.0, 99.0, 101.0, 500.0, "[]")]
+    )
+    merge, params = conn.statements[0]
+    assert "MERGE [dbo].[vap_run]" in merge
+    assert "SELECT @@ROWCOUNT;" in merge
+    assert "t.[symbol_id] = s.[symbol_id]" in merge
+    assert "t.[window_minutes] = s.[window_minutes]" in merge
+    assert "t.[as_of] = s.[as_of]" in merge
+    # The key must not include id.
+    assert "t.[id] = s.[id]" not in merge.split("WHEN MATCHED")[0]
+    # The insert reads the source alias, never a bare bracketed column list.
+    assert "VALUES (s.[id], s.[symbol_id]" in merge
+    assert inserted == 1 and updated == 0
+
+
+def test_sql_mirror_upsert_rowcount_classification():
+    """A MERGE reports 1 for an insert and 2 for an update."""
+    conn = FakeConnection(rowcounts=[2, 2, 1])
+    rows = [(i, "136", 60, f"2026-11-06T10:0{i}:00+00:00", "x", 1.0, 1.0, 1.0, 1.0, "[]")
+            for i in range(3)]
+    inserted, updated = sql_mirror.upsert_runs(conn, _sql_cfg(), rows)
+    assert updated == 2 and inserted == 1
+
+
+def test_sql_mirror_empty_write_is_a_noop():
+    conn = FakeConnection()
+    assert sql_mirror.upsert_runs(conn, _sql_cfg(), []) == (0, 0)
+    assert conn.statements == []
+
+
+def test_sql_mirror_read_runs_preserves_column_order():
+    """`read_runs` must select COLUMNS in the same order the DDL declares, so
+    the tuples it hands the MERGE line up with the parameter list."""
+    conn = FakeConnection()
+    calls = []
+    def capture(sql, params=None):
+        calls.append(sql)
+        return types.SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+    conn.execute = capture
+    sql_mirror.read_runs(conn)
+    sql = calls[0]
+    assert "FROM vap_run" in sql
+    # Order matters: id first, and the key triple present.
+    positions = [sql.index(name) for name in sql_mirror.COLUMNS]
+    assert positions == sorted(positions)
+    for name in sql_mirror.KEY_COLUMNS:
+        assert name in sql
+
+
+def test_sql_mirror_login_failure_names_the_grant():
+    """An unprovisioned identity must produce the fix, not a raw ODBC error."""
+    cfg = _sql_cfg()
+
+    class Failing:
+        def get_token(self, scope):
+            return types.SimpleNamespace(token="fake")
+
+    import pyodbc as real_pyodbc
+    original = real_pyodbc.connect
+    def boom(*a, **k):
+        raise real_pyodbc.InterfaceError(
+            "('28000', \"[28000] [Microsoft][ODBC Driver 18 for SQL Server]"
+            "[SQL Server]Login failed for user ''. (18456) (SQLDriverConnect)\")"
+        )
+    real_pyodbc.connect = boom
+    try:
+        try:
+            sql_mirror.connect(cfg, credential=Failing())
+        except sql_mirror.SqlMirrorError as exc:
+            text = str(exc)
+            assert "CREATE USER [axiomavm01] FROM EXTERNAL PROVIDER" in text
+            assert "db_datawriter" in text
+            assert cfg.sql_database in text
+        else:
+            raise AssertionError("expected SqlMirrorError")
+    finally:
+        real_pyodbc.connect = original
+
+
+def test_sql_mirror_ensure_table_creation_sql():
+    """The mirror DDL keeps the JSON column textual and keys the table.
+
+    `ensure_table` probes INFORMATION_SCHEMA and sys.indexes first; both probes
+    must answer "missing" for the DDL to be emitted.
+    """
+    conn = FakeConnection()
+    # fetchone() returning None == "not found", for the table and the index.
+    emitted = []
+    def capture(sql, params=None):
+        emitted.append(sql)
+        return types.SimpleNamespace(fetchone=lambda: None, fetchall=lambda: [])
+    conn.execute = capture
+    sql_mirror.ensure_table(conn, _sql_cfg())
+    ddl = " ".join(emitted)
+    assert "CREATE TABLE [dbo].[vap_run]" in ddl
+    assert "[high_volume_nodes] NVARCHAR(MAX) NOT NULL" in ddl
+    assert "[symbol_id] NVARCHAR(64) NOT NULL" in ddl
+    assert "CREATE UNIQUE INDEX [IX_vap_run_key]" in ddl
+    assert "ON [dbo].[vap_run] ([symbol_id], [window_minutes], [as_of])" in ddl
+
+
+def test_sql_mirror_token_is_packed_for_attrs_before():
+    """The token must be a length-prefixed UTF-16LE blob.
+
+    pyodbc's `access_token=` keyword is silently ignored against Fabric SQL
+    Database, so `connect` passes the token through `attrs_before` - which means
+    the packing itself is load-bearing: a wrong length prefix, or a NUL
+    terminator, and the server answers 18456.
+    """
+    import struct
+
+    packed = sql_mirror._token_bytes("abc")
+    encoded = "abc".encode("utf-16-le")
+    assert isinstance(packed, bytes)
+    assert packed[:4] == struct.pack("<I", len(encoded))
+    assert packed[4:] == encoded
+    # No NUL terminator.
+    assert packed[-2:] != b"\x00\x00"
+
+
+# --- The local symbol mapping snapshot ----------------------------------------
+#
+# `snapshot_symbols` reads dbo.symbols from Fabric and swaps the local
+# `symbol_mapping` table. These stay offline: the read is faked, and the point
+# worth pinning down is that the mapping is keyed on the (broker, account,
+# symbol) triple and that a re-run replaces rather than appends.
+
+def test_db_replace_symbol_mapping_is_keyed_on_the_triple():
+    """The same symbol id on two accounts is two rows, never a collision."""
+    conn = db_module.connect(":memory:")
+    rows = [
+        ("acgmarkets", "49208255", 136, "XAUUSD.pro", "Metals (Pro)"),
+        ("icmarketssc", "48664595", 136, "GOLD", "Metals"),
+    ]
+    written = db_module.replace_symbol_mapping(conn, rows, captured_at="2026-11-09T00:00:00Z")
+    assert written == 2
+    got = db_module.load_symbol_mapping(conn)
+    assert [(r["broker"], r["ctid_trader_account"], r["symbol_id"]) for r in got] == [
+        ("acgmarkets", "49208255", 136),
+        ("icmarketssc", "48664595", 136),
+    ]
+    assert all(r["captured_at"] == "2026-11-09T00:00:00Z" for r in got)
+    # The broker's own labels collapse onto the canonical classes.
+    assert [r["asset_class"] for r in got] == ["Commodities", "Commodities"]
+
+
+def test_db_replace_symbol_mapping_replaces_not_appends():
+    """A snapshot is a replace: re-running it must not accumulate old rows."""
+    conn = db_module.connect(":memory:")
+    db_module.replace_symbol_mapping(
+        conn, [("acgmarkets", "49208255", 1, "EURUSD", "Forex (Spot)"),
+               ("acgmarkets", "49208255", 2, "GBPUSD", "Forex (Spot)")])
+    # The second pull saw only one of them (a symbol was delisted upstream).
+    db_module.replace_symbol_mapping(
+        conn, [("acgmarkets", "49208255", 1, "EURUSD", "Forex (Spot)")])
+    got = db_module.load_symbol_mapping(conn)
+    assert len(got) == 1 and got[0]["symbol_name"] == "EURUSD"
+
+
+def test_db_symbol_mapping_can_be_narrowed_by_account():
+    conn = db_module.connect(":memory:")
+    db_module.replace_symbol_mapping(conn, [
+        ("acgmarkets", "49208255", 1, "EURUSD", "Forex (Spot)"),
+        ("icmarketssc", "48664595", 1, "EURUSD", "Forex"),
+    ])
+    got = db_module.load_symbol_mapping(conn, broker="icmarketssc")
+    assert len(got) == 1 and got[0]["ctid_trader_account"] == "48664595"
+
+
+def test_canonical_asset_class_maps_every_broker_label():
+    """Every class the brokers actually ship lands on a canonical value.
+
+    These are the real labels from `dbo.asset_classes`, across both brokers.
+    """
+    expected = {
+        "Forex": "FX",
+        "Forex (Pro)": "FX",
+        "Forex (Raw)": "FX",
+        "Forex (Spot)": "FX",
+        "Indices": "Index",
+        "Indices (Pro)": "Index",
+        "Indices (Raw)": "Index",
+        "Metals": "Commodities",
+        "Metals (Pro)": "Commodities",
+        "Metals (Raw)": "Commodities",
+        "Oil": "Commodities",
+        "Oil (Pro)": "Commodities",
+        "Oil (Raw)": "Commodities",
+        "Commodities": "Commodities",
+        "Futures Commodities": "Commodities",
+        "Cryptocurrencies": "Crypto",
+        "EU Equities (CFDs)": "Equities",
+        "US Equities (CFDs)": "Equities",
+    }
+    for label, want in expected.items():
+        assert db_module.canonical_asset_class(label) == want, label
+
+
+def test_canonical_asset_class_is_never_off_the_canonical_set():
+    """Whatever the broker ships - known, unknown or absent - the answer is one
+    of the five (or the explicit Other), never a raw broker label."""
+    allowed = set(db_module.ASSET_CLASSES) | {db_module.ASSET_CLASS_UNKNOWN}
+    for label in list(db_module.ASSET_CLASS_MAP) + [
+        "Bonds", "Futures", "Whatever (Pro)", None, "", "  ",
+    ]:
+        assert db_module.canonical_asset_class(label) in allowed
+
+
+def test_canonical_asset_class_leaves_bonds_and_missing_as_other():
+    """Bonds and a symbol with no catalogue row have no home in the five."""
+    assert db_module.canonical_asset_class("Bonds") == db_module.ASSET_CLASS_UNKNOWN
+    assert db_module.canonical_asset_class("Futures") == db_module.ASSET_CLASS_UNKNOWN
+    assert db_module.canonical_asset_class(None) == db_module.ASSET_CLASS_UNKNOWN
+
+
+def test_standardize_symbol_strips_the_account_tier_only():
+    """`.pro`/`.raw` are the account tier and come off; a real dot stays."""
+    assert db_module.standardize_symbol("AUDCAD.pro") == "AUDCAD"
+    assert db_module.standardize_symbol("AUDCAD.raw") == "AUDCAD"
+    # Already-standard names are untouched.
+    assert db_module.standardize_symbol("AUDCAD") == "AUDCAD"
+    assert db_module.standardize_symbol("XAUUSD") == "XAUUSD"
+    # A dot that is not a tier suffix is part of the contract, not the account:
+    # a blanket rsplit('.') would mangle every one of these.
+    for name in ("WTI_H6", "GCZ26_CFD", "Corn_H6", "VIX_F6"):
+        assert db_module.standardize_symbol(name) == name
+    # Only a trailing suffix is a tier; an interior "pro" is the instrument.
+    assert db_module.standardize_symbol("PROTON") == "PROTON"
+
+
+def test_db_standardized_name_is_derived_on_write():
+    """The stored standardized_name is derived, not carried from the source."""
+    conn = db_module.connect(":memory:")
+    db_module.replace_symbol_mapping(conn, [
+        ("acgmarkets", "49208255", 104, "AUDCAD.pro", "Forex (Pro)"),
+        ("acgmarkets", "49208255", 204, "AUDCAD.raw", "Forex (Raw)"),
+    ])
+    got = db_module.load_symbol_mapping(conn)
+    # Both tiers collapse to the same instrument.
+    assert {r["standardized_name"] for r in got} == {"AUDCAD"}
+    assert {r["symbol_name"] for r in got} == {"AUDCAD.pro", "AUDCAD.raw"}
+
+
+def test_snapshot_symbols_reads_the_source_triple_in_order():
+    """`read_symbols` selects the three key columns plus the name and class, in
+    order, and normalises a NULL name to the empty string."""
+    import snapshot_symbols
+
+    calls = []
+    def capture(sql, params=None):
+        calls.append(sql)
+        return types.SimpleNamespace(
+            fetchall=lambda: [("acgmarkets", "49208255", 136, None, "Metals (Pro)")])
+    conn = types.SimpleNamespace(execute=capture)
+    rows = snapshot_symbols.read_symbols(conn)
+
+    assert "FROM dbo.symbols" in calls[0]
+    # The class is resolved through the broker's own catalogue, on the account.
+    assert "LEFT JOIN dbo.symbols_category" in calls[0]
+    assert "LEFT JOIN dbo.asset_classes" in calls[0]
+    assert "sc.ctidTraderAccountId = s.ctidTraderAccountId" in calls[0]
+    assert "ORDER BY s.broker, s.ctidTraderAccountId, s.symbolId" in calls[0]
+    # An account id is text on the source; it stays text, and a NULL name
+    # becomes "" so the local column is never NULL.
+    assert rows == [("acgmarkets", "49208255", 136, "", "Metals (Pro)")]
+
+
+def test_db_symbol_mapping_migrates_an_older_snapshot_table():
+    """A database written before the class/name columns existed is widened.
+
+    `CREATE TABLE IF NOT EXISTS` never alters an existing table, so the older
+    `symbol_mapping` (no standardized_name / asset_class) has to be migrated or
+    every read of the new columns fails.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    # The previous release's table, already populated with a stale snapshot.
+    conn.execute(
+        "CREATE TABLE symbol_mapping ("
+        " broker TEXT NOT NULL, ctid_trader_account TEXT NOT NULL,"
+        " symbol_id INTEGER NOT NULL, symbol_name TEXT,"
+        " captured_at TEXT NOT NULL,"
+        " PRIMARY KEY (broker, ctid_trader_account, symbol_id))"
+    )
+    conn.execute(
+        "INSERT INTO symbol_mapping VALUES ('acgmarkets','49208255',104,'AUDCAD.pro','t')"
+    )
+
+    db_module.init_db(conn)  # must not raise, must add the columns
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(symbol_mapping)")}
+    assert {"standardized_name", "asset_class"} <= cols
+    # The old row survives and the new columns read as NULL until the next pull.
+    row = conn.execute(
+        "SELECT symbol_name, standardized_name, asset_class FROM symbol_mapping"
+    ).fetchone()
+    assert row["symbol_name"] == "AUDCAD.pro"
+    assert row["standardized_name"] is None and row["asset_class"] is None
+    # init_db is idempotent: a second open is a no-op, not a duplicate column.
+    db_module.init_db(conn)
+
+
+# --- The instrument mapping in the app ---------------------------------------
+#
+# `/api/symbols` and `/api/asset-classes` join the collected (broker, account,
+# symbol) triple from the feed to the local `symbol_mapping` snapshot. These stay
+# offline: the feed is faked and the mapping is written straight into a temp
+# database, so the join logic is exercised without Kusto or Fabric.
+
+class FakeSymbolReader:
+    """A feed that collects a fixed set of (broker, account, symbol) rows."""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def run(self, query):
+        return [dict(r) for r in self.rows]
+
+
+def feed_row(broker, account, symbol_id, events=1):
+    return {"broker": broker, "ctidTraderAccountId": account,
+            "symbolId": symbol_id, "events": events}
+
+
+def _mapping_db(rows):
+    """A temp database holding exactly `rows` in symbol_mapping."""
+    path = os.path.join(tempfile.gettempdir(), f"axioma-test-map-{os.getpid()}.db")
+    if os.path.exists(path):
+        os.remove(path)
+    conn = db_module.connect(path)
+    try:
+        db_module.replace_symbol_mapping(conn, rows)
+    finally:
+        conn.close()
+    return path
+
+
+def test_symbols_enriches_collected_triples_with_the_mapping():
+    """The join is on broker+account+symbol, and an unmapped triple still comes
+    through with its feed provenance rather than being dropped."""
+    feed = [
+        feed_row("acgmarkets", "49208255", 136),
+        feed_row("icmarkets", "48449283", 114),
+    ]
+    rows = [
+        ("acgmarkets", "49208255", 136, "XAUUSD.pro", "Metals (Pro)"),
+        # Same symbol id, a different broker: must not match the row above.
+        ("acgmarkets", "49208255", 114, "EURCHF.pro", "Forex (Spot)"),
+    ]
+    cfg = dataclasses.replace(app_module.cfg, db_path=_mapping_db(rows))
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        client = app_module.app.test_client()
+        out = client.get("/api/symbols").json
+
+    gold, chf = out
+    assert gold["symbolId"] == "136"
+    assert gold["standardizedName"] == "XAUUSD" and gold["assetClass"] == "Commodities"
+    assert gold["broker"] == "acgmarkets" and gold["account"] == "49208255"
+
+    # The feed's icmarkets/48449283 symbol 114 has NO catalogue row; the mapping's
+    # 114 belongs to acgmarkets. Joining on the id alone would mislabel it, so
+    # the strict triple join must leave it unmapped - but keep its provenance,
+    # with the broker reported under the catalogue's spelling.
+    assert chf["symbolId"] == "114"
+    assert chf["broker"] == "icmarketssc"  # feed said "icmarkets"
+    assert chf["account"] == "48449283"
+    assert chf["standardizedName"] is None and chf["assetClass"] is None
+
+
+def test_broker_alias_joins_the_feeds_spelling_to_the_catalogue():
+    """The feed's `icmarkets` must match the catalogue's `icmarketssc`.
+
+    Without the alias a raw string compare fails and every one of that broker's
+    instruments comes through unmapped.
+    """
+    feed = [feed_row("icmarkets", "48664595", 41)]
+    rows = [("icmarketssc", "48664595", 41, "XAUUSD", "Metals")]
+    cfg = dataclasses.replace(app_module.cfg, db_path=_mapping_db(rows))
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        client = app_module.app.test_client()
+        out = client.get("/api/symbols").json
+
+    assert out[0]["assetClass"] == "Commodities"
+    assert out[0]["standardizedName"] == "XAUUSD"
+    assert out[0]["broker"] == "icmarketssc"
+
+
+def test_canonical_broker_leaves_unknown_names_untouched():
+    """An alias is applied; anything else is returned as it stands, not guessed
+    onto a known broker."""
+    assert app_module.canonical_broker("icmarkets") == "icmarketssc"
+    assert app_module.canonical_broker("ICMarkets") == "icmarketssc"
+    assert app_module.canonical_broker("acgmarkets") == "acgmarkets"
+    assert app_module.canonical_broker("some-new-broker") == "some-new-broker"
+    assert app_module.canonical_broker(None) is None
+
+
+def test_symbols_never_matches_on_symbol_id_alone():
+    """A catalogue row for the same id on another broker must not be used."""
+    feed = [feed_row("icmarkets", "48449283", 114)]
+    rows = [("acgmarkets", "49208255", 114, "EURCHF.pro", "Forex (Spot)")]
+    cfg = dataclasses.replace(app_module.cfg, db_path=_mapping_db(rows))
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        client = app_module.app.test_client()
+        out = client.get("/api/symbols").json
+
+    assert out[0]["assetClass"] is None
+    assert out[0]["standardizedName"] is None
+
+
+def test_asset_classes_counts_the_collected_triples():
+    """Counts are over the collected triples, in canonical order, zeroes kept."""
+    feed = [
+        feed_row("acgmarkets", "49208255", 136),
+        feed_row("acgmarkets", "49208255", 137),
+        feed_row("acgmarkets", "49208255", 1),
+    ]
+    rows = [
+        ("acgmarkets", "49208255", 136, "XAUUSD.pro", "Metals (Pro)"),
+        ("acgmarkets", "49208255", 137, "XAGUSD.pro", "Metals (Pro)"),
+        ("acgmarkets", "49208255", 1, "EURUSD", "Forex (Spot)"),
+    ]
+    cfg = dataclasses.replace(app_module.cfg, db_path=_mapping_db(rows))
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        client = app_module.app.test_client()
+        out = client.get("/api/asset-classes").json
+
+    by_class = {c["assetClass"]: c["count"] for c in out}
+    assert by_class["FX"] == 1 and by_class["Commodities"] == 2
+    # The canonical order is the server's, and empty classes are still listed.
+    order = [c["assetClass"] for c in out]
+    assert order[: len(db_module.ASSET_CLASSES)] == list(db_module.ASSET_CLASSES)
+    assert by_class["Equities"] == 0 and by_class["Crypto"] == 0
+    assert sum(by_class.values()) == len(feed)
+
+
+def test_asset_classes_reports_unmapped_under_other():
+    """A collected triple the mapping lacks is counted, under the unknown key."""
+    feed = [feed_row("icmarkets", "48449283", 114)]
+    cfg = dataclasses.replace(app_module.cfg, db_path=_mapping_db([]))
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        client = app_module.app.test_client()
+        out = client.get("/api/asset-classes").json
+
+    by_class = {c["assetClass"]: c["count"] for c in out}
+    assert by_class[db_module.ASSET_CLASS_UNKNOWN] == 1
+
+
+def test_build_vap_collapses_the_triple_to_distinct_symbol_ids():
+    """The VAP job records per symbol id, so it dedupes the triple's ids."""
+    import build_vap
+
+    feed = [
+        feed_row("acgmarkets", "49208255", 136),
+        feed_row("icmarkets", "48449283", 136),  # same id, another broker
+        feed_row("acgmarkets", "49208255", 114),
+    ]
+    ids = build_vap._symbols(FakeSymbolReader(feed), "t")
+    assert ids == ["136", "114"]
 
 
 if __name__ == "__main__":
