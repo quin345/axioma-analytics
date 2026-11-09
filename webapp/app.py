@@ -19,8 +19,6 @@ SYMBOL_PATTERN = re.compile(r"^\d+$")
 WINDOWS = (60, 120, 180, 240)
 # The refresh grid: the cron/systemd job runs every this many minutes.
 REFRESH_MINUTES = int(os.environ.get("CACHE_REFRESH_MINUTES", "5") or 5) or 5
-# How many stops to keep on record per (symbol, window) before pruning.
-VAP_KEEP = int(os.environ.get("VAP_KEEP", "500") or 500)
 
 cfg = load_config()
 reader = KustoReader(cfg)
@@ -82,6 +80,14 @@ def unavailable():
 @app.get("/favicon.png")
 def favicon():
     return send_from_directory(cfg.frontend_dist, "favicon.png")
+
+
+@app.get("/favicon.svg")
+def favicon_svg():
+    # The vector mark the terminal's index.html prefers; the PNG above is the
+    # fallback for browsers that do not take SVG favicons.
+    return send_from_directory(cfg.frontend_dist, "favicon.svg",
+                               mimetype="image/svg+xml")
 
 
 @app.get("/api/symbols")
@@ -213,7 +219,10 @@ def _compute_vap(symbol_id):
     conn = db.connect(cfg.db_path)
     try:
         db.save_profiles(conn, symbol_id, profiles, as_of)
-        db.prune(conn, VAP_KEEP)
+        # `vap_run` is the durable record: never capped here. Only the ladder
+        # detail (`vap_level`) is trimmed, on the configured hour window.
+        db.prune_runs(conn, keep=cfg.vap_keep_runs)
+        db.prune_levels(conn, keep_hours=cfg.vap_level_hours)
     finally:
         conn.close()
     return symbol_id, as_of, profiles

@@ -98,6 +98,46 @@ The payload's `source` is `"local"` when it came from the database and
 
 ## Retention
 
-`VAP_KEEP` (default 500) is how many stops to keep per `(symbol, window)`; older
-rows are pruned on every run. At one stop per 5 minutes, 500 stops is about
-**41 hours** of history per window per symbol.
+The two tables have **different lifetimes**, because they play different roles.
+
+| Table | Role | Default retention |
+|---|---|---|
+| `vap_run` | The durable analytical record: one small row per stop, holding `poc`, the value area, `total_volume` and the high-volume nodes. | **Kept forever.** |
+| `vap_level` | The per-bin ladder detail behind the chart (60 rows per stop per window). | **Last `VAP_LEVEL_HOURS` hours (default 48).** |
+
+`vap_level` is ~60x the row count of `vap_run` and roughly two thirds of the
+database on disk, so it is the table that grows. It is trimmed by deleting its
+rows **directly** - never by deleting the parent `vap_run` - so an old stop keeps
+its summary and simply reports no bins (`"bins": []`). Downstream analytics reads
+`vap_run`, so nothing it depends on is ever dropped by the level trim.
+
+```ini
+# leave empty to keep every stop (default); set a number to cap per (symbol, window)
+VAP_KEEP_RUNS=
+# hours of ladder detail to keep; 0 or unset keeps all (default 48)
+VAP_LEVEL_HOURS=48
+```
+
+At one stop per 5 minutes and 60 bins per stop per window, 48 hours of
+`vap_level` for one symbol is about `48 * 12 * 4 * 60 ≈ 138k` rows; `vap_run`
+adds only `48 * 12 * 4 ≈ 2.3k` for the same span, which is why it can be kept
+indefinitely.
+
+### Maintenance commands
+
+The 5-minute job keeps only the hot path (derive + insert + the level trim). The
+heavier, less frequent work is explicit:
+
+```bash
+cd webapp
+python build_vap.py --prune    # apply retention only, no Kusto
+python build_vap.py --vacuum   # WAL checkpoint + VACUUM to reclaim file space
+python build_vap.py --list     # stops and bin counts on record per (symbol, window)
+```
+
+A daily cron for the reclamation is enough:
+
+```cron
+30 3 * * * azureuser set -a; . /home/azureuser/axioma-analytics/.env; set +a; cd /home/azureuser/axioma-analytics/webapp && /home/azureuser/axioma-analytics/venv/bin/python build_vap.py --prune && /home/azureuser/axioma-analytics/venv/bin/python build_vap.py --vacuum >> /var/log/axioma-vap.log 2>&1
+```
+

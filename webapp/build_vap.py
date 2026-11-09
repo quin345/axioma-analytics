@@ -14,6 +14,8 @@ Usage:
     python build_vap.py                # every symbol the feed lists
     python build_vap.py --symbol 136   # one symbol
     python build_vap.py --list         # show what is on record, compute nothing
+    python build_vap.py --prune        # retention only: trim vap_level, no Kusto
+    python build_vap.py --vacuum       # reclaim file space (checkpoint + VACUUM)
 """
 import argparse
 import os
@@ -26,8 +28,6 @@ from config import load_config
 from kusto_client import KustoReader
 
 WINDOWS = (60, 120, 180, 240)
-# How many stops to keep per (symbol, window). Same variable `app.py` reads.
-VAP_KEEP = int(os.environ.get("VAP_KEEP", "500") or 500)
 
 
 def _symbols(reader, table):
@@ -43,7 +43,10 @@ def refresh_one(cfg, reader, symbol_id):
     conn = db.connect(cfg.db_path)
     try:
         db.save_profiles(conn, symbol_id, profiles, as_of)
-        db.prune(conn, VAP_KEEP)
+        # Retention: `vap_run` is the durable record (only capped if
+        # VAP_KEEP_RUNS is set); `vap_level` is trimmed to the hour window.
+        db.prune_runs(conn, keep=cfg.vap_keep_runs)
+        db.prune_levels(conn, keep_hours=cfg.vap_level_hours)
     finally:
         conn.close()
     return as_of, {w: p["poc"] for w, p in profiles.items()}
@@ -78,6 +81,10 @@ def main(argv=None):
     parser.add_argument("--symbol", help="refresh only this symbol id")
     parser.add_argument("--list", action="store_true",
                         help="print the recorded stops and exit")
+    parser.add_argument("--prune", action="store_true",
+                        help="apply retention only (no Kusto) and exit")
+    parser.add_argument("--vacuum", action="store_true",
+                        help="checkpoint the WAL and VACUUM the file, then exit")
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -86,15 +93,46 @@ def main(argv=None):
         conn = db.connect(cfg.db_path)
         try:
             rows = conn.execute(
-                """SELECT symbol_id, window_minutes, MAX(as_of) AS newest, COUNT(*) AS stops
-                   FROM vap_run GROUP BY symbol_id, window_minutes
+                """SELECT symbol_id, window_minutes,
+                          MAX(as_of) AS newest,
+                          COUNT(*) AS stops,
+                          (SELECT COUNT(*) FROM vap_level l
+                            WHERE l.run_id IN (
+                                SELECT id FROM vap_run r2
+                                 WHERE r2.symbol_id = r.symbol_id
+                                   AND r2.window_minutes = r.window_minutes
+                            )) AS bins
+                   FROM vap_run r
+                   GROUP BY symbol_id, window_minutes
                    ORDER BY symbol_id, window_minutes"""
             ).fetchall()
         finally:
             conn.close()
         for r in rows:
             print(f"{r['symbol_id']} {r['window_minutes']:>4}m "
-                  f"newest={r['newest']} stops={r['stops']}")
+                  f"newest={r['newest']} stops={r['stops']} bins={r['bins']}")
+        return 0
+
+    if args.prune:
+        conn = db.connect(cfg.db_path)
+        try:
+            runs = db.prune_runs(conn, keep=cfg.vap_keep_runs)
+            bins = db.prune_levels(conn, keep_hours=cfg.vap_level_hours)
+        finally:
+            conn.close()
+        print(f"pruned runs={runs} bins={bins} "
+              f"(keep_runs={cfg.vap_keep_runs}, level_hours={cfg.vap_level_hours})")
+        return 0
+
+    if args.vacuum:
+        conn = db.connect(cfg.db_path)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+            conn.commit()
+        finally:
+            conn.close()
+        print("vacuumed")
         return 0
 
     reader = KustoReader(cfg)

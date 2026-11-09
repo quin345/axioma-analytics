@@ -282,6 +282,81 @@ def test_db_prune_keeps_newest():
     finally:
         conn.close()
 
+def test_db_prune_runs_default_keeps_everything():
+    """`prune_runs` with no bounds must not touch the durable record."""
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        for i in range(5):
+            db_module.save_profile(conn, "136", 60, f"2026-11-06T10:0{i}:00+00:00", profile)
+        assert db_module.prune_runs(conn, keep=None, before=None) == 0
+        assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == 5
+    finally:
+        conn.close()
+
+
+def test_db_prune_levels_keeps_runs_and_summary():
+    """The whole point of the split: trimming bins must NOT delete the stop.
+
+    An old stop loses its ladder (`bins == []`) but keeps its `vap_run` summary
+    (poc / value area / total_volume), which is what downstream analytics reads.
+    """
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        # Four stops, an hour apart, well in the past.
+        stamps = [f"2020-01-01T0{i}:00:00+00:00" for i in range(4)]
+        for as_of in stamps:
+            db_module.save_profile(conn, "136", 60, as_of, profile)
+
+        runs_before = conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0]
+        levels_before = conn.execute("SELECT COUNT(*) FROM vap_level").fetchone()[0]
+        assert levels_before == runs_before * len(profile["bins"])
+
+        # Keep one hour of bins: every stop is older than that, so all bins go,
+        # but not a single run may disappear.
+        removed = db_module.prune_levels(conn, keep_hours=1)
+        assert removed == levels_before
+        assert conn.execute("SELECT COUNT(*) FROM vap_level").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == runs_before
+
+        # The stop still loads, with its scalar summary intact and no ladder.
+        stored = db_module.load_profile(conn, "136", 60, as_of=stamps[-1])
+        assert stored is not None
+        assert stored["bins"] == []
+        assert close(stored["poc"], profile["poc"])
+        assert stored["value_area"] == profile["value_area"]
+    finally:
+        conn.close()
+
+
+def test_db_prune_levels_keeps_recent_runs_bins():
+    """`keep_runs` keeps the newest stops' bins per (symbol, window) regardless of age."""
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        stamps = [f"2026-11-06T10:0{i}:00+00:00" for i in range(5)]
+        for as_of in stamps:
+            db_module.save_profile(conn, "136", 60, as_of, profile)
+
+        db_module.prune_levels(conn, keep_runs=2)
+        # Only the two newest stops still have bins.
+        run_ids = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM vap_run ORDER BY as_of DESC"
+            ).fetchall()
+        ]
+        with_bins = {
+            r["run_id"] for r in conn.execute(
+                "SELECT DISTINCT run_id FROM vap_level"
+            ).fetchall()
+        }
+        assert with_bins == set(run_ids[:2])
+        # Every stop row survives - only its detail was trimmed.
+        assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == 5
+    finally:
+        conn.close()
+
 
 def test_db_empty_profile_does_not_clobber_good_stop():
     conn = db_module.connect(":memory:")

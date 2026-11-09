@@ -12,6 +12,18 @@ SQLite, from the standard library - no server and no new dependency. One row per
 in the child table `vap_level`. The unique key is what makes a re-run inside the
 same 5-minute slot an upsert rather than a duplicate: record-keeping stays one
 row per stop.
+
+The two tables have **different lifetimes on purpose**:
+
+* `vap_run` is the durable analytical record. It carries the scalar summary the
+  downstream work needs - `poc`, the value area, `total_volume` and the
+  high-volume nodes - in one row per stop, so it is kept (in the default setup,
+  every stop forever).
+* `vap_level` is the ladder *detail* behind the chart, and it is 60x the row
+  count (one row per bin per window). It is trimmed independently and never
+  drags a `vap_run` down with it: retention deletes `vap_level` rows directly
+  rather than relying on `ON DELETE CASCADE`, so an old stop keeps its summary
+  and simply reports no bins.
 """
 import json
 import os
@@ -47,6 +59,11 @@ CREATE TABLE IF NOT EXISTS vap_level (
 
 CREATE INDEX IF NOT EXISTS idx_vap_run_lookup
     ON vap_run (symbol_id, window_minutes, as_of DESC);
+
+-- Every vap_level read and every retention delete goes through run_id, and
+-- without this the child table has no index at all, so both would scan it.
+CREATE INDEX IF NOT EXISTS idx_vap_level_run
+    ON vap_level (run_id);
 """
 
 
@@ -200,22 +217,113 @@ def load_profile(conn, symbol_id, window_minutes, as_of=None):
 
 
 def prune(conn, keep=500):
-    """Keep the newest `keep` stops per (symbol, window); delete the rest."""
-    conn.execute(
-        """DELETE FROM vap_run
-           WHERE id NOT IN (
-               SELECT id FROM (
-                   SELECT id, ROW_NUMBER() OVER (
-                       PARTITION BY symbol_id, window_minutes
-                       ORDER BY as_of DESC
-                   ) AS rank
-                   FROM vap_run
-               ) WHERE rank <= ?
-           )""",
-        (int(keep),),
-    )
+    """Keep the newest `keep` stops per (symbol, window); delete the rest.
+
+    Kept for callers and tests written against the original single knob. New
+    code should use `prune_runs` (row cap and/or time cut on `vap_run`) and
+    `prune_levels` (the ladder detail) separately, because the two tables have
+    different lifetimes - see the module docstring.
+    """
+    return prune_runs(conn, keep=keep)
+
+
+def prune_runs(conn, keep=None, before=None):
+    """Trim `vap_run` itself. Both bounds are optional and neither is on by default.
+
+    `vap_run` is the durable analytical record, so the default (`keep=None,
+    before=None`) deletes nothing. Pass `keep` to cap the stops per
+    (symbol, window), and/or `before` (an ISO timestamp) to drop any stop older
+    than that instant. Returns the number of `vap_run` rows removed.
+    """
+    removed = 0
+
+    if before is not None:
+        cur = conn.execute(
+            "DELETE FROM vap_run WHERE as_of < ?", (str(before),)
+        )
+        removed += cur.rowcount or 0
+
+    if keep is not None:
+        # Only pay for the window-function sort when a partition is actually
+        # over the cap: the cheap GROUP BY below settles that on its own.
+        over = conn.execute(
+            """SELECT COUNT(*) FROM (
+                   SELECT 1 FROM vap_run
+                   GROUP BY symbol_id, window_minutes
+                   HAVING COUNT(*) > ?
+               )""",
+            (int(keep),),
+        ).fetchone()[0]
+        if over:
+            cur = conn.execute(
+                """DELETE FROM vap_run
+                   WHERE id NOT IN (
+                       SELECT id FROM (
+                           SELECT id, ROW_NUMBER() OVER (
+                               PARTITION BY symbol_id, window_minutes
+                               ORDER BY as_of DESC
+                           ) AS rank
+                           FROM vap_run
+                       ) WHERE rank <= ?
+                   )""",
+                (int(keep),),
+            )
+            removed += cur.rowcount or 0
+
     # Foreign keys cascade from vap_run, but the pragma is per-connection.
     conn.commit()
+    return removed
+
+
+def prune_levels(conn, keep_hours=None, keep_runs=None):
+    """Trim `vap_level` only - the ladder detail behind the chart.
+
+    Deletes the bins directly (never via `vap_run`), so an old stop keeps its
+    `vap_run` summary and just reports no bins. Bound it by either, or both:
+
+    * `keep_hours` - keep bins belonging to stops newer than this many hours.
+    * `keep_runs`  - keep bins for the newest `keep_runs` stops per
+      (symbol, window), regardless of age.
+
+    Returns the number of `vap_level` rows removed.
+    """
+    removed = 0
+
+    if keep_hours is not None:
+        cutoff = _hours_ago(float(keep_hours))
+        cur = conn.execute(
+            """DELETE FROM vap_level
+               WHERE run_id IN (
+                   SELECT id FROM vap_run WHERE as_of < ?
+               )""",
+            (cutoff,),
+        )
+        removed += cur.rowcount or 0
+
+    if keep_runs is not None:
+        cur = conn.execute(
+            """DELETE FROM vap_level
+               WHERE run_id NOT IN (
+                   SELECT id FROM (
+                       SELECT id, ROW_NUMBER() OVER (
+                           PARTITION BY symbol_id, window_minutes
+                           ORDER BY as_of DESC
+                       ) AS rank
+                       FROM vap_run
+                   ) WHERE rank <= ?
+               )""",
+            (int(keep_runs),),
+        )
+        removed += cur.rowcount or 0
+
+    conn.commit()
+    return removed
+
+
+def _hours_ago(hours):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
 
 def _now():
