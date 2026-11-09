@@ -21,9 +21,17 @@ slot **upserts** the same row instead of duplicating it.
 
 ## Cadence: every 5 minutes, on the grid
 
-The job runs **every 5 minutes**, 15 seconds past the mark - the same cadence
+The job runs **every 5 minutes**, on the mark - the same cadence
 the app used for its cache (`CACHE_REFRESH_MINUTES`) and the grain the old
 `metrics_5m` table was built on.
+
+It then waits `VAP_GRID_DELAY` seconds (default **1**) *inside* the script before
+it reads Kusto. The wait is not padding: the job fires on the mark, but the feed
+lands in 10-second buckets, so at `:05:00` the newest tick still belongs to the
+previous slot. A short wait lets the slot's own ticks arrive, so the recorded
+`as_of` names the stop that just closed instead of the one before it.
+`VAP_GRID_DELAY=0` (or `--delay 0`) reads immediately. Only the Kusto-reading
+path waits - `--list`, `--prune` and `--vacuum` return before it.
 
 ### cron
 
@@ -31,8 +39,8 @@ the app used for its cache (`CACHE_REFRESH_MINUTES`) and the grain the old
 # /etc/cron.d/axioma-vap
 SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
-# 5-minute grid: run at :00:15, :05:15, :10:15, ...
-0,5,10,15,20,25,30,35,40,45,50,55 * * * * azureuser sleep 15 && cd /home/azureuser/axioma-analytics/webapp && ../venv/bin/python build_vap.py >> /var/log/axioma-vap.log 2>&1
+# 5-minute grid: run at :00:00, :05:00, :10:00, ...
+0,5,10,15,20,25,30,35,40,45,50,55 * * * * azureuser cd /home/azureuser/axioma-analytics/webapp && ../venv/bin/python build_vap.py >> /var/log/axioma-vap.log 2>&1
 ```
 
 ### systemd
@@ -116,6 +124,8 @@ its summary and simply reports no bins (`"bins": []`). Downstream analytics read
 VAP_KEEP_RUNS=
 # hours of ladder detail to keep; 0 or unset keeps all (default 48)
 VAP_LEVEL_HOURS=48
+# seconds the recorder waits past the mark before reading; 0 reads immediately (default 1)
+VAP_GRID_DELAY=1
 ```
 
 At one stop per 5 minutes and 60 bins per stop per window, 48 hours of

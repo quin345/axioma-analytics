@@ -20,6 +20,7 @@ class Config:
     maintenance: bool    # serve the holding page at / instead of the dashboard
     vap_keep_runs: int | None       # cap stops per (symbol, window); None = keep all
     vap_level_hours: float | None   # hours of vap_level bins to keep; None = all
+    vap_grid_delay: float           # seconds to wait into the slot before reading
     sql_server: str      # Fabric SQL database host; blank = export disabled
     sql_database: str    # the database (catalog) to write into
     sql_schema: str      # schema for the mirrored table
@@ -73,6 +74,14 @@ def load_config():
     # and is trimmed to the last VAP_LEVEL_HOURS hours by default (48).
     keep_runs = _opt_int("VAP_KEEP_RUNS") or _opt_int("VAP_KEEP")
 
+    # How far into the 5-minute slot the recorder waits before it reads. The job
+    # fires on the mark, so the newest tick in the feed is still the previous
+    # 10s bucket; waiting lets the slot's own ticks land first, so the recorded
+    # `as_of` reflects the stop that just closed rather than the one before it.
+    # `_opt_float` maps 0/unset to None, so 0 (and an unset value) means "read
+    # immediately" and only a positive value sleeps.
+    grid_delay = _opt_float("VAP_GRID_DELAY", 1.0)
+
     # The Fabric SQL database mirror of `vap_run`. All of it is optional: with
     # SQL_SERVER blank the daily export is simply off, so the dashboard and the
     # 5-minute recorder keep running on a box with no SQL target configured.
@@ -99,6 +108,7 @@ def load_config():
         maintenance=_flag("MAINTENANCE_MODE"),
         vap_keep_runs=keep_runs,
         vap_level_hours=_opt_float("VAP_LEVEL_HOURS", 48.0),
+        vap_grid_delay=grid_delay or 0.0,
         sql_server=sql_server,
         sql_database=sql_database,
         sql_schema=sql_schema,

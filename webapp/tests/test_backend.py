@@ -993,6 +993,36 @@ def test_build_vap_collapses_the_triple_to_distinct_symbol_ids():
     assert ids == ["136", "114"]
 
 
+def test_build_vap_grid_delay_waits_only_when_positive():
+    """The slot wait is opt-in by value: 0/unset reads at once, >0 sleeps."""
+    import build_vap
+
+    with mock.patch.object(build_vap.time, "sleep") as slept:
+        build_vap._wait_for_ticks(0)
+        build_vap._wait_for_ticks(0.0)
+        build_vap._wait_for_ticks(None)
+        assert not slept.called, "a zero/None delay must not sleep"
+
+        build_vap._wait_for_ticks(5)
+        slept.assert_called_once_with(5)
+
+
+def test_build_vap_config_defaults_the_grid_delay_to_one():
+    """VAP_GRID_DELAY defaults to 1, and 0 turns the wait off. The cron line
+    sources this .env, so the value is the knob the job actually reads."""
+    import config
+
+    env = dict(os.environ, KUSTO_TABLE="agg_dom", KUSTO_CLUSTER_URI="u",
+               KUSTO_DATABASE="d", PRICE_SCALE="100000", FRONTEND_DIST="/tmp")
+    with mock.patch.dict(os.environ, env, clear=True):
+        os.environ.pop("VAP_GRID_DELAY", None)
+        assert config.load_config().vap_grid_delay == 1.0
+        os.environ["VAP_GRID_DELAY"] = "0"
+        assert config.load_config().vap_grid_delay == 0.0
+        os.environ["VAP_GRID_DELAY"] = "12.5"
+        assert config.load_config().vap_grid_delay == 12.5
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

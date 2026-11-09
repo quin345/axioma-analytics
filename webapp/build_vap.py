@@ -2,9 +2,14 @@
 
 The cron/systemd entry point, run every 5 minutes on the VM:
 
-    # /etc/cron.d/axioma-vap  (5-minute grid, 15s past the mark)
+    # /etc/cron.d/axioma-vap  (5-minute grid, on the mark)
     */5 * * * *  azureuser  cd /home/azureuser/axioma-analytics/webapp && \
-        sleep 15 && ../venv/bin/python build_vap.py >> /var/log/axioma-vap.log 2>&1
+        ../venv/bin/python build_vap.py >> /var/log/axioma-vap.log 2>&1
+
+The job fires on the mark but waits `VAP_GRID_DELAY` seconds (default 1) before
+it reads, so the slot's own ticks have landed in the feed and the recorded
+`as_of` names the stop that just closed. `--delay 0` (or VAP_GRID_DELAY=0)
+reads immediately.
 
 One `/api/volume-at-price/refresh` per symbol does exactly the same work; this
 script exists so the refresh does not depend on the web process being up, and so
@@ -20,6 +25,7 @@ Usage:
 import argparse
 import os
 import sys
+import time
 
 import analytics
 import db
@@ -88,9 +94,28 @@ def _as_of(rows):
     ).isoformat()
 
 
+def _wait_for_ticks(seconds):
+    """Wait `seconds` into the slot before reading, so the slot's ticks are in.
+
+    The job fires on the mark, but the feed lands in 10-second buckets, so at
+    :05:00 the newest tick still belongs to the previous slot - the recorded
+    `as_of` would name the stop before the one just closed. Waiting a few
+    seconds lets the new slot's first ticks arrive first.
+
+    A non-positive value returns at once, so a manual run and any mode that
+    does not read Kusto are unaffected. Under cron the wait is a no-op: the
+    crontab line carries no `sleep`, so there is no double delay.
+    """
+    if seconds and seconds > 0:
+        time.sleep(seconds)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbol", help="refresh only this symbol id")
+    parser.add_argument("--delay", type=float, default=None,
+                        help="seconds to wait into the slot before reading "
+                             "(default VAP_GRID_DELAY, 1)")
     parser.add_argument("--list", action="store_true",
                         help="print the recorded stops and exit")
     parser.add_argument("--prune", action="store_true",
@@ -146,6 +171,10 @@ def main(argv=None):
             conn.close()
         print("vacuumed")
         return 0
+
+    # Past the modes that do not read Kusto, so retention and inspection never
+    # wait. Then let the slot's ticks land before the read.
+    _wait_for_ticks(cfg.vap_grid_delay if args.delay is None else args.delay)
 
     reader = KustoReader(cfg)
     targets = [args.symbol] if args.symbol else _symbols(reader, cfg.table)
