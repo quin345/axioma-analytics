@@ -1,5 +1,6 @@
 export const assetPathPrefix = "/assets";
-export const imgAxiomaMark = `${assetPathPrefix}/ffcfa.svg`;
+// The official AXIOMA mark: diamond + ascending bars, blue-to-green gradient.
+export const imgAxiomaMark = `${assetPathPrefix}/axioma-mark.svg`;
 export const imgLiveIndicator = `${assetPathPrefix}/20d4c.svg`;
 export const imgSettings2 = `${assetPathPrefix}/d0948.svg`;
 export const imgChevronDown = `${assetPathPrefix}/870a2.svg`;

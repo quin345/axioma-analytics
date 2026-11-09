@@ -23,9 +23,11 @@ export default function TerminalHeader() {
             data-node-id="2007:7120"
             data-name="Axioma mark"
           >
-            <div className="absolute inset-[-7.99%_-3.19%_-1.6%_-3.19%]">
-              <img alt="" className="block max-w-none size-full" src={imgAxiomaMark} />
-            </div>
+            <img
+              alt="AXIOMA"
+              className="absolute block inset-0 size-full"
+              src={imgAxiomaMark}
+            />
           </div>
           <p
             className="[word-break:break-word] font-sans font-semibold leading-[normal] not-italic relative shrink-0 text-[#e7edf3] text-[20px] whitespace-nowrap"
