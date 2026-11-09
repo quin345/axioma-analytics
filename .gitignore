@@ -220,3 +220,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 .vscode/
+
+# Local volume-at-price record-keeping database (webapp/data)
+webapp/data/
+*.db-wal
+*.db-shm

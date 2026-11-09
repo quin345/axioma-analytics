@@ -53,6 +53,8 @@ export default function AxiomaMarketAnalyticsTerminal() {
   const market: Market = {
     actions,
     symbolLabel: symbolId ? `Symbol ${symbolId}` : "Loading…",
+    symbolId,
+    windowMinutes: WINDOWS[windowSize].minutes,
     series: series.data ?? [],
     summary,
     ticks: summary ? summary.ticks : null,

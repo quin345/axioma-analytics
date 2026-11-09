@@ -13,6 +13,8 @@ export interface MarketActions {
 export interface Market {
   actions: MarketActions;
   symbolLabel: string;
+  symbolId: string | null;
+  windowMinutes: number;
   series: SeriesPoint[];
   summary: Summary | null;
   ticks: number | null;
@@ -25,6 +27,8 @@ const noop = () => {};
 const defaultMarket: Market = {
   actions: { setTab: noop, setWindow: noop, cycleAssetClass: noop, cycleSymbol: noop, run: noop },
   symbolLabel: "—",
+  symbolId: null,
+  windowMinutes: 240,
   series: [],
   summary: null,
   ticks: null,

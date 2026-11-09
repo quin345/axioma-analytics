@@ -2,6 +2,7 @@
 import math
 import os
 import sys
+import tempfile
 import types
 from unittest import mock
 
@@ -23,10 +24,18 @@ os.environ.update({
     "KUSTO_TABLE": "order_book_aggregate",
     "PRICE_SCALE": "100",
     "FRONTEND_DIST": "/tmp/no-such-dist",
+    # A real file, not :memory: - each db.connect() opens its own connection, so
+    # an in-memory path would give every call an empty database. Unique per
+    # process so a re-run never sees a previous run's rows: the "no record yet,
+    # so derive from Kusto" test below would otherwise read a stale local stop.
+    "DB_PATH": os.path.join(
+        tempfile.gettempdir(), f"axioma-test-vap-{os.getpid()}.db"
+    ),
 })
 
 import analytics  # noqa: E402
 import app as app_module  # noqa: E402
+import db as db_module  # noqa: E402
 
 
 def bucket(i):
@@ -119,6 +128,8 @@ class FakeReader:
             return [{"hour": 10, "events": 5}, {"hour": 11, "events": 7}]
         if "epoch_ms" in query:
             return [{"epoch_ms": 1000, "events": 3}, {"epoch_ms": 1003, "events": 1}]
+        if "VOLUME_AT_PRICE" in query:
+            return [dict(r) for r in VAP_RAW]
         # Fresh copies each time: the route scales rows in place, as a real client gives new rows.
         return [dict(r) for r in ROWS_RAW]
 
@@ -149,6 +160,175 @@ def test_routes():
         assert client.get("/api/volatility?symbol=136&window=1").status_code == 400
         assert client.get("/api/acf?symbol=136&max_lag=500").status_code == 400
         assert client.get("/api/activity?symbol=136&days=0").status_code == 400
+        assert client.get("/api/volume-at-price?symbol=136&window=30").status_code == 400
+
+
+# --- Volume-at-price ---------------------------------------------------------
+
+def vap_row(i, mid, events):
+    return {"bucket": bucket(i), "best_bid": mid - 0.25, "best_ask": mid + 0.25,
+            "events": events, "volume": None}
+
+
+# A frame whose rows sit on two price levels, so slicing a window changes the
+# ladder and the POC: binning is over each window's own range, never one shared grid.
+VAP_ROWS = (
+    [vap_row(i, 100.0, 50) for i in range(12)]        # dense at 100
+    + [vap_row(i + 12, 102.0, 2) for i in range(12)]  # sparse at 102
+)
+
+# Raw prices x PRICE_SCALE (100), as Kusto would return them.
+VAP_RAW = [
+    {**r, "best_bid": r["best_bid"] * 100, "best_ask": r["best_ask"] * 100}
+    for r in VAP_ROWS
+]
+
+
+def test_volume_at_price_poc_and_value_area():
+    p = analytics.volume_at_price(VAP_ROWS, 1.0)
+    assert len(p["bins"]) == analytics.VAP_BINS
+    # Rows sit at 100 and 102; the POC bin is the one holding 100 (the cluster
+    # with 600 of the 624 units), labelled by its midpoint.
+    assert close(p["poc"], 100.0, 0.05)
+    assert p["total_volume"] == 12 * 50 + 12 * 2
+    prices = [b["price"] for b in p["bins"]]
+    assert prices == sorted(prices)          # ascending, as value_area requires
+    lo, hi = p["value_area"]
+    assert lo <= p["poc"] <= hi
+    # The 100 cluster alone is well past the 70% share, so the value area stays
+    # tight around the POC rather than spanning the whole 100..102 range.
+    assert close(lo, p["poc"], 0.05) and close(hi, p["poc"], 0.05)
+
+
+def test_volume_at_price_flat_window_collapses():
+    rows = [vap_row(i, 100.0, 3) for i in range(5)]
+    p = analytics.volume_at_price(rows, 1.0)
+    assert len(p["bins"]) == 1
+    assert close(p["poc"], 100.0) and p["total_volume"] == 15
+
+
+def test_volume_at_price_no_book_is_empty():
+    p = analytics.volume_at_price(
+        [{"bucket": bucket(0), "best_bid": None, "best_ask": None, "events": 5}], 1.0)
+    assert p["bins"] == [] and p["poc"] is None
+
+
+def test_profiles_by_window_are_distinct():
+    # Spread the frame over hours so a 60-minute slice genuinely drops the older
+    # rows: the newest hour holds only the 102 cluster, the full frame also holds
+    # the busier 100 cluster, so the two POCs cannot coincide.
+    def row(minute, mid, events):
+        h, m = divmod(minute, 60)
+        stamp = f"2026-11-06T{10 + h:02d}:{m:02d}:00+00:00"
+        return {"bucket": stamp, "best_bid": mid - 0.25, "best_ask": mid + 0.25,
+                "events": events, "volume": None}
+
+    rows = (
+        [row(i, 100.0, 50) for i in range(0, 180, 15)]      # 0-180 min: dense at 100
+        + [row(i, 102.0, 5) for i in range(190, 300, 15)]   # newest: sparse at 102
+    )
+    profiles = analytics.profiles_by_window(rows, 1.0, (60, 240))
+    assert set(profiles) == {60, 240}
+    # The 60-min slice sees only the 102 cluster, so its POC lands there; the
+    # 240-min slice also holds the busier 100 cluster and lands there instead.
+    assert close(profiles[60]["poc"], 102.0, 0.05)
+    assert close(profiles[240]["poc"], 100.0, 0.05)
+    assert profiles[60]["total_volume"] != profiles[240]["total_volume"]
+
+
+# --- Local record-keeping database -------------------------------------------
+
+def test_db_roundtrip_and_upsert():
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        db_module.save_profile(conn, "136", 60, "2026-11-06T10:00:00+00:00", profile)
+        # A second run inside the same stop must upsert, not append.
+        db_module.save_profile(conn, "136", 60, "2026-11-06T10:00:00+00:00", profile)
+
+        assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == 1
+        stored = db_module.load_profile(conn, "136", 60)
+        assert close(stored["poc"], profile["poc"])
+        assert len(stored["bins"]) == len(profile["bins"])
+        assert stored["value_area"] == profile["value_area"]
+    finally:
+        conn.close()
+
+
+def test_db_load_returns_newest_stop():
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        db_module.save_profile(conn, "136", 60, "2026-11-06T09:55:00+00:00", profile)
+        db_module.save_profile(conn, "136", 60, "2026-11-06T10:00:00+00:00", profile)
+        assert db_module.load_profile(conn, "136", 60)["as_of"] == "2026-11-06T10:00:00+00:00"
+    finally:
+        conn.close()
+
+
+def test_db_prune_keeps_newest():
+    conn = db_module.connect(":memory:")
+    try:
+        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
+        for i in range(5):
+            db_module.save_profile(conn, "136", 60, f"2026-11-06T10:0{i}:00+00:00", profile)
+        db_module.prune(conn, keep=2)
+        stops = [r["as_of"] for r in
+                 conn.execute("SELECT as_of FROM vap_run ORDER BY as_of DESC").fetchall()]
+        assert stops == ["2026-11-06T10:04:00+00:00", "2026-11-06T10:03:00+00:00"]
+        # Levels persist for the runs that survive.
+        assert conn.execute("SELECT COUNT(*) FROM vap_level").fetchone()[0] > 0
+    finally:
+        conn.close()
+
+
+def test_db_empty_profile_does_not_clobber_good_stop():
+    conn = db_module.connect(":memory:")
+    try:
+        good = analytics.volume_at_price(VAP_ROWS, 1.0)
+        empty = analytics.volume_at_price([], 1.0)
+        stop = "2026-11-06T10:00:00+00:00"
+        db_module.save_profile(conn, "136", 60, stop, good)
+        # A later run inside the same stop that derived nothing (feed empty)
+        # must leave the good ladder in place.
+        db_module.save_profile(conn, "136", 60, stop, empty)
+
+        stored = db_module.load_profile(conn, "136", 60)
+        assert len(stored["bins"]) == len(good["bins"])
+        assert close(stored["poc"], good["poc"])
+
+        # A brand-new stop that derived nothing is not recorded at all, so it
+        # cannot shadow the good stop that is already on file.
+        db_module.save_profile(conn, "136", 60, "2026-11-06T10:05:00+00:00", empty)
+        newest = db_module.load_profile(conn, "136", 60)
+        assert close(newest["poc"], good["poc"])
+        assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_vap_routes_local_then_refresh():
+    fake = FakeReader()
+    with mock.patch.object(app_module, "reader", fake):
+        client = app_module.app.test_client()
+        # No record yet: the first read derives from Kusto and records it.
+        first = client.get("/api/volume-at-price?symbol=136&window=60")
+        assert first.status_code == 200
+        assert first.json["source"] == "kusto" and first.json["poc"] is not None
+
+        # Now it is on record: the next read is local, with no further Kusto call.
+        before = len(fake.calls)
+        second = client.get("/api/volume-at-price?symbol=136&window=60")
+        assert second.json["source"] == "local"
+        assert len(fake.calls) == before
+
+        # Every lookback is recorded, each with its own POC.
+        windows = client.get("/api/volume-at-price/windows?symbol=136").json
+        assert set(windows) == {"60", "120", "180", "240"}
+
+        posted = client.post("/api/volume-at-price/refresh?symbol=136")
+        assert posted.status_code == 200
+        assert set(posted.json["windows"]) == {"60", "120", "180", "240"}
 
 
 if __name__ == "__main__":
