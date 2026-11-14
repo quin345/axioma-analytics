@@ -2,6 +2,7 @@
 import dataclasses
 import math
 import os
+import pathlib
 import sys
 import tempfile
 import types
@@ -24,7 +25,8 @@ os.environ.update({
     "KUSTO_DATABASE": "db",
     "KUSTO_TABLE": "order_book_aggregate",
     "PRICE_SCALE": "100",
-    "FRONTEND_DIST": "/tmp/no-such-dist",
+    "TERMINAL_DIST": "/tmp/no-such-dist",
+    "LANDING_DIST": "/tmp/no-such-landing",
     # A real file, not :memory: - each db.connect() opens its own connection, so
     # an in-memory path would give every call an empty database. Unique per
     # process so a re-run never sees a previous run's rows: the "no record yet,
@@ -412,27 +414,84 @@ def test_vap_routes_local_then_refresh():
 # --- Maintenance / holding page ----------------------------------------------
 
 def test_holding_page_when_maintenance_on():
-    """MAINTENANCE_MODE serves the holding page at / with a 503, so proxies and
-    uptime checks do not cache an under-construction site as healthy."""
+    """MAINTENANCE_MODE serves the holding page at /terminal/ with a 503, so
+    proxies and uptime checks do not cache an under-construction site as
+    healthy."""
     maintenance_cfg = dataclasses.replace(app_module.cfg, maintenance=True)
     with mock.patch.object(app_module, "cfg", maintenance_cfg):
         client = app_module.app.test_client()
-        r = client.get("/")
+        r = client.get("/terminal/")
         assert r.status_code == 503
         assert b"Service not available" in r.data
         assert b"still working on it" in r.data
 
 
 def test_dashboard_served_when_maintenance_off():
-    """With the flag off, / is the built dashboard again."""
+    """With the flag off, /terminal/ is the built dashboard again."""
     live_cfg = dataclasses.replace(app_module.cfg, maintenance=False)
     with mock.patch.object(app_module, "cfg", live_cfg):
         client = app_module.app.test_client()
-        r = client.get("/")
-        # The stub FRONTEND_DIST does not exist, so this is a 404 from the
+        r = client.get("/terminal/")
+        # The stub TERMINAL_DIST does not exist, so this is a 404 from the
         # static send - the point is that it is no longer the 503 holding page.
         assert r.status_code != 503
         assert b"Service not available" not in r.data
+
+
+def _built_sites():
+    """Minimal landing and terminal builds, so the routes have files to send."""
+    tmp_path = pathlib.Path(tempfile.mkdtemp(prefix="axioma-sites-"))
+    landing = tmp_path / "landing"
+    terminal = tmp_path / "terminal"
+    (landing / "assets").mkdir(parents=True)
+    (terminal / "assets").mkdir(parents=True)
+    (landing / "index.html").write_text("<title>landing</title>")
+    (landing / "favicon.svg").write_text("<svg/>")
+    (terminal / "index.html").write_text("<title>terminal</title>")
+    (terminal / "assets" / "app.js").write_text("console.log(1)")
+    return dataclasses.replace(app_module.cfg, maintenance=False,
+                               landing_dist=str(landing), terminal_dist=str(terminal))
+
+
+def test_landing_page_owns_the_root():
+    """/ is the product landing page, even under MAINTENANCE_MODE - only the
+    terminal swaps to the holding page."""
+    for maintenance in (False, True):
+        cfg = dataclasses.replace(_built_sites(), maintenance=maintenance)
+        with mock.patch.object(app_module, "cfg", cfg):
+            r = app_module.app.test_client().get("/")
+            assert r.status_code == 200
+            assert b"landing" in r.data
+
+
+def test_terminal_served_under_its_prefix():
+    with mock.patch.object(app_module, "cfg", _built_sites()):
+        client = app_module.app.test_client()
+        assert client.get("/terminal").headers["Location"].endswith("/terminal/")
+        page = client.get("/terminal/")
+        assert page.status_code == 200 and b"terminal" in page.data
+        asset = client.get("/terminal/assets/app.js")
+        assert asset.status_code == 200
+        assert client.get("/terminal/../.env").status_code == 404
+
+
+def test_landing_favicon_served():
+    with mock.patch.object(app_module, "cfg", _built_sites()):
+        r = app_module.app.test_client().get("/favicon.svg")
+        assert r.status_code == 200
+        assert r.mimetype == "image/svg+xml"
+
+
+def test_terminal_dist_falls_back_to_frontend_dist():
+    """Deployments whose .env still says FRONTEND_DIST keep working."""
+    import config
+
+    env = dict(KUSTO_TABLE="agg_dom", KUSTO_CLUSTER_URI="u", KUSTO_DATABASE="d",
+               PRICE_SCALE="100000", FRONTEND_DIST="/old/dist")
+    with mock.patch.dict(os.environ, env, clear=True):
+        loaded = config.load_config()
+        assert loaded.terminal_dist == "/old/dist"
+        assert loaded.landing_dist.endswith(os.path.join("landing", "dist"))
 
 
 def test_unavailable_page_is_always_reachable():
@@ -1014,7 +1073,7 @@ def test_build_vap_config_defaults_the_grid_delay_to_one():
     import config
 
     env = dict(os.environ, KUSTO_TABLE="agg_dom", KUSTO_CLUSTER_URI="u",
-               KUSTO_DATABASE="d", PRICE_SCALE="100000", FRONTEND_DIST="/tmp")
+               KUSTO_DATABASE="d", PRICE_SCALE="100000", TERMINAL_DIST="/tmp")
     with mock.patch.dict(os.environ, env, clear=True):
         os.environ.pop("VAP_GRID_DELAY", None)
         assert config.load_config().vap_grid_delay == 1.0

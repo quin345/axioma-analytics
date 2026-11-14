@@ -5,6 +5,9 @@ from dataclasses import dataclass
 NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Where the local record-keeping database lives, relative to this file's parent.
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "axioma.db")
+# The landing page build, relative to the repo root; override with LANDING_DIST.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_LANDING_DIST = os.path.join(REPO_ROOT, "landing", "dist")
 # Values that turn a flag on. Anything else (or unset) is off.
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -15,9 +18,10 @@ class Config:
     database: str
     table: str
     price_scale: float
-    frontend_dist: str   # folder with the built React app (pnpm build output)
+    terminal_dist: str   # built terminal app (terminal/dist), served at /terminal/
+    landing_dist: str    # built landing page (landing/dist), served at /
     db_path: str         # local SQLite file holding the derived VAP records
-    maintenance: bool    # serve the holding page at / instead of the dashboard
+    maintenance: bool    # serve the holding page at /terminal/ instead of the dashboard
     vap_keep_runs: int | None       # cap stops per (symbol, window); None = keep all
     vap_level_hours: float | None   # hours of vap_level bins to keep; None = all
     vap_grid_delay: float           # seconds to wait into the slot before reading
@@ -32,6 +36,16 @@ def _require(name):
     if not value:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
+
+
+def _terminal_dist():
+    """TERMINAL_DIST, falling back to the pre-landing-page name FRONTEND_DIST so
+    an existing deployment's .env keeps working."""
+    for name in ("TERMINAL_DIST", "FRONTEND_DIST"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    raise RuntimeError("Missing required environment variable: TERMINAL_DIST")
 
 
 def _flag(name):
@@ -103,7 +117,8 @@ def load_config():
         database=_require("KUSTO_DATABASE"),
         table=table,
         price_scale=float(_require("PRICE_SCALE")),
-        frontend_dist=_require("FRONTEND_DIST"),
+        terminal_dist=_terminal_dist(),
+        landing_dist=os.environ.get("LANDING_DIST", "").strip() or DEFAULT_LANDING_DIST,
         db_path=db_path,
         maintenance=_flag("MAINTENANCE_MODE"),
         vap_keep_runs=keep_runs,

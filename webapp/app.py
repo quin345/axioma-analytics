@@ -3,7 +3,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, redirect, request, send_from_directory
 
 import analytics
 import db
@@ -15,7 +15,7 @@ BOOK_LEVELS = 10
 BIN_SECONDS = 10  # series bucket width; must match the bin_seconds the UI uses
 SYMBOL_PATTERN = re.compile(r"^\d+$")
 # The fixed lookback windows a volume-at-price profile is recorded for. Mirrors
-# terminal/src/lib/window.ts and the old metrics_5m suffixes (1h/2h/3h/4h).
+# terminal/src/lib/window.ts (1h/2h/3h/4h).
 WINDOWS = (60, 120, 180, 240)
 # The refresh grid: the cron/systemd job runs every this many minutes.
 REFRESH_MINUTES = int(os.environ.get("CACHE_REFRESH_MINUTES", "5") or 5) or 5
@@ -38,8 +38,11 @@ BROKER_ALIASES = {
 
 cfg = load_config()
 reader = KustoReader(cfg)
-# Built assets (Vite writes them to dist/assets) are served at /assets.
-app = Flask(__name__, static_folder=os.path.join(cfg.frontend_dist, "assets"), static_url_path="/assets")
+# Two Vite builds share this server: the landing page owns `/` (its bundle is
+# served from landing/dist/assets at /assets) and the terminal lives under
+# /terminal/ (built with base "/terminal/", so its bundle asks for
+# /terminal/assets/...).
+app = Flask(__name__, static_folder=os.path.join(cfg.landing_dist, "assets"), static_url_path="/assets")
 # The holding page lives next to this module, not in the built bundle, so it
 # still renders while the dashboard is being worked on.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -75,35 +78,54 @@ def _int_arg(name, default, low, high):
     return value
 
 
+# Root-level icons the landing page's index.html links to.
+LANDING_ICONS = {
+    "favicon.png": None,
+    "favicon.svg": "image/svg+xml",
+    "favicon.ico": None,
+    "icon-32.png": None,
+    "icon-180.png": None,
+    "icon-512.png": None,
+}
+
+
 @app.get("/")
 def index():
-    # While we are still working on the terminal, `/` is the holding page with
-    # a 503; the API routes below stay up so the refresh job and any tooling
-    # keep working. Flip MAINTENANCE_MODE off in .env and restart to serve the
-    # dashboard again.
+    """The public product landing page."""
+    return send_from_directory(cfg.landing_dist, "index.html")
+
+
+@app.get("/terminal")
+def terminal_redirect():
+    return redirect("/terminal/", code=301)
+
+
+@app.get("/terminal/")
+def terminal():
+    # While we are still working on the terminal, it is the holding page with
+    # a 503; the landing page and API routes stay up. Flip MAINTENANCE_MODE
+    # off in .env and restart to serve the dashboard again.
     if cfg.maintenance:
         return _holding_page()
-    return send_from_directory(cfg.frontend_dist, "index.html")
+    return send_from_directory(cfg.terminal_dist, "index.html")
+
+
+@app.get("/terminal/<path:filename>")
+def terminal_file(filename):
+    """The terminal's built assets, favicons and app icons."""
+    return send_from_directory(cfg.terminal_dist, filename)
 
 
 @app.get("/unavailable")
 def unavailable():
     """The holding page at its own path, so it can be previewed even when the
-    dashboard is live (`/` only swaps to it under MAINTENANCE_MODE)."""
+    dashboard is live (/terminal/ only swaps to it under MAINTENANCE_MODE)."""
     return send_from_directory(STATIC_DIR, "maintenance.html")
 
 
-@app.get("/favicon.png")
-def favicon():
-    return send_from_directory(cfg.frontend_dist, "favicon.png")
-
-
-@app.get("/favicon.svg")
-def favicon_svg():
-    # The vector mark the terminal's index.html prefers; the PNG above is the
-    # fallback for browsers that do not take SVG favicons.
-    return send_from_directory(cfg.frontend_dist, "favicon.svg",
-                               mimetype="image/svg+xml")
+@app.get("/<any(%s):filename>" % ", ".join(f'"{name}"' for name in LANDING_ICONS))
+def landing_icon(filename):
+    return send_from_directory(cfg.landing_dist, filename, mimetype=LANDING_ICONS[filename])
 
 
 @app.get("/api/symbols")

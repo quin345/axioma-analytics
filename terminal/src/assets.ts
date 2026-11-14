@@ -1,4 +1,5 @@
-export const assetPathPrefix = "/assets";
+// Public assets live under the Vite base (/terminal/ in production).
+export const assetPathPrefix = `${import.meta.env.BASE_URL}assets`;
 // The official AXIOMA mark: diamond + ascending bars, blue-to-green gradient.
 export const imgAxiomaMark = `${assetPathPrefix}/axioma-mark.svg`;
 export const imgLiveIndicator = `${assetPathPrefix}/20d4c.svg`;
