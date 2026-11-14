@@ -1,0 +1,21 @@
+[Unit]
+Description=Axioma Analytics dashboard (Flask app in webapp/, served by gunicorn)
+After=network.target
+
+[Service]
+Type=exec
+User=azureuser
+# gunicorn serves webapp/app.py on 127.0.0.1:8000, which nginx proxies to.
+# Worker/thread counts and timeouts live in gunicorn.conf.py at the repo root.
+# run.py is still the launcher for local development (Flask dev server).
+WorkingDirectory=/home/azureuser/axioma-analytics
+EnvironmentFile=/home/azureuser/axioma-analytics/.env
+ExecStart=/home/azureuser/axioma-analytics/venv/bin/gunicorn -c /home/azureuser/axioma-analytics/gunicorn.conf.py
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=35
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

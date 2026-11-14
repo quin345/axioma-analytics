@@ -1,17 +1,13 @@
-"""Entry point for the Axioma Analytics dashboard (the Flask app in webapp/).
+"""Local development launcher for the Axioma Analytics dashboard (webapp/).
 
-The systemd unit runs:
+Production does not use this file: the axioma systemd unit runs gunicorn with
+gunicorn.conf.py. Locally:
 
     venv/bin/python3 run.py --host 127.0.0.1 --port 8000
 
 The real application lives in ``webapp/app.py``. This file only puts that
 folder on ``sys.path`` (so ``webapp``'s flat imports like ``import analytics``
 resolve), loads the Flask app object, and serves it on the given host/port.
-
-Kept as a thin launcher so the deployment unit does not need to know the
-webapp layout, and so the app can also be started by hand:
-
-    venv/bin/python3 run.py --host 127.0.0.1 --port 8000
 """
 import argparse
 import os

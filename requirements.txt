@@ -1,0 +1,10 @@
+# Python dependencies for webapp/ (versions as installed on the production VM).
+# Install: venv/bin/pip install -r requirements.txt
+Flask==3.1.3
+Werkzeug==3.1.9
+gunicorn==27.0.1
+azure-identity==1.27.0
+azure-kusto-data==6.0.4
+# Optional: only the daily Fabric SQL mirror (export_vap_run.py) needs it,
+# plus the Microsoft ODBC driver on the host.
+pyodbc==5.5.0

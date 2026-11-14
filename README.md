@@ -7,7 +7,9 @@ feed, a React analytics terminal, and a public product landing page.
 
 ```
 .
-├── run.py              # Production entry point (Flask on 127.0.0.1:8000)
+├── run.py              # Local dev launcher (Flask's built-in server)
+├── gunicorn.conf.py    # Production server settings (gunicorn on 127.0.0.1:8000)
+├── deploy/axioma.service  # systemd unit as installed on the VM
 ├── webapp/             # Flask backend: API, page serving, cron jobs
 │   ├── app.py          #   routes (pages + /api/*)
 │   ├── config.py       #   environment-driven Config
@@ -57,8 +59,22 @@ feed, a React analytics terminal, and a public product landing page.
 (cd landing  && pnpm install && pnpm build)
 (cd terminal && pnpm install && pnpm build)
 
-# Backend
+# Backend, local development
 venv/bin/python3 run.py --host 127.0.0.1 --port 8000
+```
+
+## Production
+
+nginx terminates TLS for `axiomanalytics.info`, `www.` and `app.` and proxies
+everything to gunicorn on `127.0.0.1:8000`, run by the `axioma` systemd unit
+(`deploy/axioma.service`). Server tuning is in `gunicorn.conf.py`
+(`GUNICORN_WORKERS`, `GUNICORN_THREADS` and `GUNICORN_BIND` override it).
+
+```bash
+venv/bin/pip install -r requirements.txt            # once
+(cd landing && pnpm build) && (cd terminal && pnpm build)
+sudo systemctl restart axioma                        # or: reload, for a graceful worker swap
+journalctl -u axioma -f                              # access and error logs
 ```
 
 Development servers: `pnpm dev` in `terminal/` (port 5173, proxies `/api` to
