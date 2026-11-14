@@ -1,7 +1,10 @@
+import { useMarket } from "../context/MarketContext";
 import { imgAxiomaMark, imgLiveIndicator, imgSettings2 } from "../assets";
 import WorkspaceTabs from "../tabs/WorkspaceTabs";
 
 export default function TerminalHeader() {
+  const { live, status } = useMarket();
+  const feed = status.startsWith("error") ? "FEED ERROR" : live ? "FEED CONNECTED" : "MARKET CLOSED";
   return (
     <div
       className="border-[#29323d] border-b border-solid content-stretch flex h-[68px] items-center justify-between overflow-clip px-[24px] relative shrink-0 w-full"
@@ -69,7 +72,7 @@ export default function TerminalHeader() {
             className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#8ed6be] text-[10px] whitespace-nowrap"
             data-node-id="2007:7130"
           >
-            FEED CONNECTED
+            {feed}
           </p>
         </div>
         <p

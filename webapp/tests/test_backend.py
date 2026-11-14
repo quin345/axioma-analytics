@@ -148,7 +148,8 @@ def test_routes():
         client = app_module.app.test_client()
         r = client.get("/api/kpis?symbol=136&minutes=240")
         assert r.status_code == 200 and r.json["ticks"] == 100
-        assert "ago(240m)" in fake.calls[-1]
+        # The window is anchored on the instrument's newest tick, not now().
+        assert "_end - 240m" in fake.calls[-1]
         assert client.get("/api/spread?symbol=136").json["median"] == 0.5
         assert len(client.get("/api/volatility?symbol=136&window=2").json) == 2
         assert client.get("/api/acf?symbol=136&max_lag=2").json["lags"][0]["lag"] == 1
@@ -1021,6 +1022,96 @@ def test_build_vap_config_defaults_the_grid_delay_to_one():
         assert config.load_config().vap_grid_delay == 0.0
         os.environ["VAP_GRID_DELAY"] = "12.5"
         assert config.load_config().vap_grid_delay == 12.5
+
+
+# --- Account scoping and trade-flow proxies ----------------------------------
+
+def test_queries_scope_by_account_when_given():
+    """A symbol id is shared across brokers; the account pins the instrument."""
+    import queries
+
+    scoped = queries.series("agg_dom", "114", 60, 10, account="48449283")
+    assert "symbolId == '114' and ctidTraderAccountId == '48449283'" in scoped
+    bare = queries.series("agg_dom", "114", 60, 10)
+    assert "ctidTraderAccountId ==" not in bare
+
+
+def test_routes_pass_the_account_and_reject_a_bad_one():
+    fake = FakeReader()
+    with mock.patch.object(app_module, "reader", fake):
+        client = app_module.app.test_client()
+        assert client.get("/api/kpis?symbol=136&account=49208255").status_code == 200
+        assert "ctidTraderAccountId == '49208255'" in fake.calls[-1]
+        assert client.get("/api/kpis?symbol=136&account=x1").status_code == 400
+
+
+def test_instrument_key_and_rekey_bare_runs():
+    assert db_module.instrument_key("114", "48449283") == "48449283:114"
+    assert db_module.instrument_key("114") == "114"
+
+    conn = db_module.connect(":memory:")
+    profile = analytics.volume_at_price(VAP_RAW, 1.0)
+    db_module.save_profile(conn, "114", 60, "2026-11-06T10:00:00+00:00", profile)
+    db_module.save_profile(conn, "114", 60, "2026-11-06T10:05:00+00:00", profile)
+    # The same stop already recorded under the scoped key: the bare one is a dup.
+    db_module.save_profile(conn, "48449283:114", 60, "2026-11-06T10:05:00+00:00", profile)
+    assert db_module.rekey_bare_runs(conn, {"114": "48449283"}) == 1
+    keys = {r[0] for r in conn.execute("SELECT symbol_id FROM vap_run")}
+    assert keys == {"48449283:114"}
+    assert conn.execute("SELECT COUNT(*) FROM vap_run").fetchone()[0] == 2
+
+
+def test_tick_signs_carry_through_zero_ticks():
+    assert analytics._tick_signs([1, 2, 2, 1, 1, 3]) == [0, 1, 1, -1, -1, 1]
+
+
+def test_order_flow_signs_events_by_the_mid_move():
+    # Mids 100 -> 101 -> 102 -> 101: unsigned, buy 20, buy 30, sell 40.
+    out = analytics.order_flow(ROWS)
+    assert out["buy_events"] == 50 and out["sell_events"] == 40
+    assert close(out["imbalance"], 10 / 90)
+    assert [p["cumulative"] for p in out["series"]] == [0, 20, 50, 10]
+    assert "proxy" in out
+
+
+def test_burst_impact_measures_the_follow_through():
+    # A quiet tape with one up-burst at i=5 that keeps going for 3 buckets.
+    rows = []
+    mids = [100, 100, 100, 100, 100, 101, 102, 103, 103, 103]
+    for i, m in enumerate(mids):
+        rows.append(series_row(i, m - 0.25, m + 0.25, 50 if i == 5 else 5))
+    out = analytics.burst_impact(rows, horizons=(1, 2), quantile=0.95)
+    assert out["bursts"] == 1 and out["threshold"] == 50
+    curve = {c["horizon_s"]: c["mean_bps"] for c in out["curve"]}
+    # From the pre-burst mid 100: +2 after one bucket, +3 after two (bps of 100).
+    assert close(curve[10], 200.0) and close(curve[20], 300.0)
+    assert out["events"][0]["direction"] == 1
+
+
+def test_burst_impact_empty_on_a_short_window():
+    assert analytics.burst_impact(ROWS[:2])["bursts"] == 0
+
+
+def test_raw_ticks_infer_the_side_from_the_next_older_update():
+    newest_first = [
+        {"timestamp": "t3", "eventSeq": 3, "best_bid": 101_00, "best_ask": 101_50},
+        {"timestamp": "t2", "eventSeq": 2, "best_bid": 100_00, "best_ask": 100_50},
+        {"timestamp": "t1", "eventSeq": 1, "best_bid": 100_00, "best_ask": 100_50},
+    ]
+    out = analytics.raw_ticks(newest_first, 100)
+    assert [t["side"] for t in out] == ["buy", None, None]
+    assert out[0]["bid"] == 101.0 and close(out[0]["spread"], 0.5)
+
+
+def test_proxy_routes():
+    fake = FakeReader()
+    with mock.patch.object(app_module, "reader", fake):
+        client = app_module.app.test_client()
+        flow = client.get("/api/order-flow?symbol=136&bin_seconds=60").json
+        assert flow["buy_events"] == 50
+        assert "60s" in fake.calls[-1]
+        assert client.get("/api/impact?symbol=136").status_code == 200
+        assert client.get("/api/activity-days?symbol=136&days=0").status_code == 400
 
 
 if __name__ == "__main__":

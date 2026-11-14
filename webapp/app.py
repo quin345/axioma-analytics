@@ -202,6 +202,9 @@ def _instrument(row, mapped):
         "name": None,
         "standardizedName": None,
         "assetClass": None,
+        # When the feed last ticked for this instrument. A closed market (gold
+        # at the weekend) is still listed; the UI shows it as not live.
+        "lastSeen": _text(row.get("last_seen")),
     }
     if mapped is not None:
         out["name"] = mapped["symbol_name"]
@@ -245,23 +248,42 @@ def asset_classes():
 
 
 
-@app.get("/api/series")
-def series():
-    symbol_id = _symbol_arg()
-    minutes = _int_arg("minutes", 60, 1, 1440)
-    bin_seconds = _int_arg("bin_seconds", 10, 1, 3600)
+def _account_arg():
+    """The optional trader account that scopes a symbol id to one broker.
 
-    rows = reader.run(queries.series(cfg.table, symbol_id, minutes, bin_seconds))
+    Omitted, queries fall back to the bare symbol id (the old behaviour); the
+    UI always sends it, because a symbol id alone is shared across brokers.
+    """
+    value = request.args.get("account", "")
+    if value and not SYMBOL_PATTERN.match(value):
+        abort(400, "account must be a numeric ctidTraderAccountId")
+    return value or None
+
+
+def _instrument_args():
+    return _symbol_arg(), _account_arg()
+
+
+def _series_rows(symbol_id, minutes, account=None, bin_seconds=BIN_SECONDS):
+    rows = reader.run(queries.series(cfg.table, symbol_id, minutes, bin_seconds, account))
     for row in rows:
         row["best_bid"] = _scale(row["best_bid"])
         row["best_ask"] = _scale(row["best_ask"])
-    return jsonify(rows)
+    return rows
+
+
+@app.get("/api/series")
+def series():
+    symbol_id, account = _instrument_args()
+    minutes = _int_arg("minutes", 60, 1, 1440)
+    bin_seconds = _int_arg("bin_seconds", 10, 1, 3600)
+    return jsonify(_series_rows(symbol_id, minutes, account, bin_seconds))
 
 
 @app.get("/api/book")
 def book():
-    symbol_id = _symbol_arg()
-    rows = reader.run(queries.latest_book(cfg.table, symbol_id))
+    symbol_id, account = _instrument_args()
+    rows = reader.run(queries.latest_book(cfg.table, symbol_id, account))
     if not rows:
         return jsonify(None)
 
@@ -273,63 +295,97 @@ def book():
         "timestamp": row["timestamp"],
         "best_bid": _scale(row["best_bid"]),
         "best_ask": _scale(row["best_ask"]),
+        "total_bid": row.get("total_bid"),
+        "total_ask": row.get("total_ask"),
         "bids": [[_scale(price), volume] for price, volume in bids[:BOOK_LEVELS]],
         "asks": [[_scale(price), volume] for price, volume in asks[:BOOK_LEVELS]],
     })
 
 
-def _series_rows(symbol_id, minutes):
-    rows = reader.run(queries.series(cfg.table, symbol_id, minutes, BIN_SECONDS))
-    for row in rows:
-        row["best_bid"] = _scale(row["best_bid"])
-        row["best_ask"] = _scale(row["best_ask"])
-    return rows
-
-
 @app.get("/api/kpis")
 def kpis():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     minutes = _int_arg("minutes", 240, 1, 1440)
-    return jsonify(analytics.kpis(_series_rows(symbol_id, minutes), BIN_SECONDS))
+    return jsonify(analytics.kpis(_series_rows(symbol_id, minutes, account), BIN_SECONDS))
 
 
 @app.get("/api/spread")
 def spread():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     minutes = _int_arg("minutes", 240, 1, 1440)
-    return jsonify(analytics.spread(_series_rows(symbol_id, minutes)))
+    return jsonify(analytics.spread(_series_rows(symbol_id, minutes, account)))
 
 
 @app.get("/api/volatility")
 def volatility():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     minutes = _int_arg("minutes", 240, 1, 1440)
     window = _int_arg("window", 30, 2, 1000)
-    return jsonify(analytics.rolling_volatility(_series_rows(symbol_id, minutes), BIN_SECONDS, window))
+    return jsonify(analytics.rolling_volatility(
+        _series_rows(symbol_id, minutes, account), BIN_SECONDS, window))
 
 
 @app.get("/api/acf")
 def acf():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     minutes = _int_arg("minutes", 240, 1, 1440)
     max_lag = _int_arg("max_lag", 30, 1, 100)
-    return jsonify(analytics.autocorrelation(_series_rows(symbol_id, minutes), max_lag))
+    return jsonify(analytics.autocorrelation(_series_rows(symbol_id, minutes, account), max_lag))
 
 
 @app.get("/api/activity")
 def activity():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     days = _int_arg("days", 1, 1, 30)
-    return jsonify(reader.run(queries.activity(cfg.table, symbol_id, days)))
+    return jsonify(reader.run(queries.activity(cfg.table, symbol_id, days, account)))
+
+
+@app.get("/api/activity-days")
+def activity_days():
+    """Event count per UTC day - the activity calendar."""
+    symbol_id, account = _instrument_args()
+    days = _int_arg("days", 42, 1, 120)
+    rows = reader.run(queries.activity_days(cfg.table, symbol_id, days, account))
+    return jsonify([{"day": str(r["day"])[:10], "events": r["events"]} for r in rows])
 
 
 @app.get("/api/tick-gaps")
 def tick_gaps():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     minutes = _int_arg("minutes", 60, 1, 1440)
-    rows = reader.run(queries.tick_times(cfg.table, symbol_id, minutes))
+    rows = reader.run(queries.tick_times(cfg.table, symbol_id, minutes, account))
     return jsonify(analytics.tick_gaps(rows))
 
+
+# --- Trade-flow proxies ------------------------------------------------------
+# The feed has no trades; these routes serve the closest book-derived stand-in
+# (see analytics' "Trade-flow proxies" section). Each payload names its proxy.
+
+@app.get("/api/order-flow")
+def order_flow():
+    symbol_id, account = _instrument_args()
+    minutes = _int_arg("minutes", 240, 1, 1440)
+    bin_seconds = _int_arg("bin_seconds", 60, 10, 3600)
+    return jsonify(analytics.order_flow(_series_rows(symbol_id, minutes, account, bin_seconds)))
+
+
+@app.get("/api/impact")
+def impact():
+    symbol_id, account = _instrument_args()
+    minutes = _int_arg("minutes", 240, 1, 1440)
+    return jsonify(analytics.burst_impact(
+        _series_rows(symbol_id, minutes, account), bin_seconds=BIN_SECONDS))
+
+
+@app.get("/api/ticks")
+def ticks():
+    symbol_id, account = _instrument_args()
+    limit = _int_arg("limit", 14, 1, 200)
+    rows = reader.run(queries.recent_ticks(cfg.table, symbol_id, limit, account))
+    return jsonify(analytics.raw_ticks(rows, cfg.price_scale)[:limit])
+
+
+# --- Volume-at-price ---------------------------------------------------------
 
 def _vap_scan_minutes():
     """The widest window, so one Kusto scan feeds every lookback."""
@@ -354,20 +410,21 @@ def _vap_as_of(rows):
     ).isoformat()
 
 
-def _compute_vap(symbol_id):
+def _compute_vap(symbol_id, account=None):
     """Read the tick frame once, derive every window's profile, and record it.
 
     Prices come back raw (x PRICE_SCALE) from Kusto, which is exactly what
     `analytics.profiles_by_window` expects - it divides them down itself - so the
-    stored bins are in display units and match `/api/series`.
+    stored bins are in display units and match `/api/series`. The record is
+    keyed on `db.instrument_key`, so two brokers sharing an id never collide.
     """
-    rows = reader.run(queries.vap_ticks(cfg.table, symbol_id, _vap_scan_minutes()))
+    rows = reader.run(queries.vap_ticks(cfg.table, symbol_id, _vap_scan_minutes(), account))
     profiles = analytics.profiles_by_window(rows, cfg.price_scale, WINDOWS)
     as_of = _vap_as_of(rows)
 
     conn = db.connect(cfg.db_path)
     try:
-        db.save_profiles(conn, symbol_id, profiles, as_of)
+        db.save_profiles(conn, db.instrument_key(symbol_id, account), profiles, as_of)
         # `vap_run` is the durable record: never capped here. Only the ladder
         # detail (`vap_level`) is trimmed, on the configured hour window.
         db.prune_runs(conn, keep=cfg.vap_keep_runs)
@@ -377,10 +434,10 @@ def _compute_vap(symbol_id):
     return symbol_id, as_of, profiles
 
 
-def _vap_payload(symbol_id, window, source):
+def _vap_payload(symbol_id, window, source, account=None):
     conn = db.connect(cfg.db_path)
     try:
-        stored = db.load_profile(conn, symbol_id, window)
+        stored = db.load_profile(conn, db.instrument_key(symbol_id, account), window)
     finally:
         conn.close()
     if stored is None:
@@ -391,50 +448,45 @@ def _vap_payload(symbol_id, window, source):
 
 @app.get("/api/volume-at-price")
 def volume_at_price():
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     window = _int_arg("window", max(WINDOWS), min(WINDOWS), max(WINDOWS))
+    if window not in WINDOWS:
+        abort(400, f"window must be one of {', '.join(map(str, WINDOWS))}")
     refresh = request.args.get("refresh", "") in ("1", "true", "yes")
 
     if refresh:
-        _compute_vap(symbol_id)
-        return jsonify(_vap_payload(symbol_id, window, "kusto"))
+        _compute_vap(symbol_id, account)
+        return jsonify(_vap_payload(symbol_id, window, "kusto", account))
 
-    stored = _vap_payload(symbol_id, window, "local")
+    stored = _vap_payload(symbol_id, window, "local", account)
     if stored is not None:
         return jsonify(stored)
 
     # Nothing on record yet (first ever run): derive and store on demand.
-    _compute_vap(symbol_id)
-    payload = _vap_payload(symbol_id, window, "kusto")
-    if payload is None:
-        return jsonify(None)
-    return jsonify(payload)
+    _compute_vap(symbol_id, account)
+    return jsonify(_vap_payload(symbol_id, window, "kusto", account))
 
 
 @app.get("/api/volume-at-price/windows")
 def volume_at_price_windows():
     """Every lookback's stored profile for one symbol, newest stop each."""
-    symbol_id = _symbol_arg()
+    symbol_id, account = _instrument_args()
     out = {}
-    conn = db.connect(cfg.db_path)
-    try:
-        for window in WINDOWS:
-            stored = db.load_profile(conn, symbol_id, window)
-            if stored is not None:
-                stored["source"] = "local"
-                out[str(window)] = stored
-    finally:
-        conn.close()
+    for window in WINDOWS:
+        stored = _vap_payload(symbol_id, window, "local", account)
+        if stored is not None:
+            out[str(window)] = stored
     return jsonify(out)
 
 
 @app.post("/api/volume-at-price/refresh")
 def volume_at_price_refresh():
     """Compute and record every window's profile for the symbol. The cron entry."""
-    symbol_id = _symbol_arg()
-    _, as_of, profiles = _compute_vap(symbol_id)
+    symbol_id, account = _instrument_args()
+    _, as_of, profiles = _compute_vap(symbol_id, account)
     return jsonify({
         "symbol": symbol_id,
+        "account": account,
         "as_of": as_of,
         "windows": {
             str(w): {"poc": p["poc"], "value_area": p["value_area"],

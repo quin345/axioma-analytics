@@ -17,6 +17,16 @@ export interface Instrument {
   standardizedName: string | null;
   // A canonical class: FX | Equities | Index | Commodities | Crypto | Other.
   assetClass: string | null;
+  // When the feed last ticked for this instrument (ISO, UTC). A closed market
+  // stays listed, with its last session analysed.
+  lastSeen: string | null;
+}
+
+// The instrument a request is scoped to. A symbol id is shared across brokers,
+// so the trader account always travels with it.
+export interface InstrumentRef {
+  symbolId: string;
+  account: string | null;
 }
 
 // One row of /api/asset-classes: a canonical class and how many collected
@@ -32,7 +42,99 @@ export interface SeriesPoint {
   best_ask: number | null;
   rel_spread: number | null;
   rel_vwap_spread: number | null;
+  imbalance_ratio?: number | null;
   events: number;
+}
+
+// /api/book, normalised by the endpoint into price/volume levels, nearest the
+// touch first. Volume is the feed's resting size per slot.
+export interface BookLevel {
+  price: number;
+  volume: number;
+}
+
+export interface BookDepth {
+  timestamp: string;
+  best_bid: number | null;
+  best_ask: number | null;
+  total_bid: number | null;
+  total_ask: number | null;
+  bids: BookLevel[];
+  asks: BookLevel[];
+}
+
+// /api/tick-gaps: distribution of gaps between distinct event timestamps.
+export interface TickGapBin {
+  from_ms: number;
+  to_ms: number | null;
+  count: number;
+}
+
+export interface TickGaps {
+  events: number;
+  distinct_timestamps: number;
+  shared_timestamp_share: number | null;
+  median_gap_ms: number | null;
+  bins: TickGapBin[];
+}
+
+export interface HourActivity {
+  hour: number;
+  events: number;
+}
+
+export interface DayActivity {
+  day: string; // YYYY-MM-DD, UTC
+  events: number;
+}
+
+export interface VolatilityPoint {
+  bucket: string;
+  vol_pct: number;
+}
+
+export interface Autocorrelation {
+  n: number;
+  band: number | null;
+  lags: { lag: number; acf: number | null }[];
+}
+
+// /api/order-flow - the signed-flow proxy (tick-rule signed depth events).
+export interface OrderFlow {
+  proxy: string;
+  series: { bucket: string; signed: number; cumulative: number }[];
+  buy_events: number;
+  sell_events: number;
+  imbalance: number | null;
+  book_imbalance: number | null;
+}
+
+// /api/impact - the large-trade-impact proxy: mid response after bursts.
+export interface BurstImpact {
+  proxy: string;
+  threshold: number | null;
+  bursts: number;
+  headline_horizon_s?: number;
+  curve: { horizon_s: number; mean_bps: number | null; n: number }[];
+  events: {
+    bucket: string;
+    events: number;
+    direction: 1 | -1;
+    move_bps: number;
+    impact_bps: number | null;
+  }[];
+}
+
+// /api/ticks - newest raw book updates with an inferred side.
+export interface RawTick {
+  timestamp: string;
+  seq: number | null;
+  bid: number | null;
+  ask: number | null;
+  spread: number | null;
+  bid_size: number | null;
+  ask_size: number | null;
+  side: "buy" | "sell" | null;
 }
 
 // One point of the bid-ask spread series: the absolute quoted spread at a

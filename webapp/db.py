@@ -161,6 +161,44 @@ def init_db(conn):
     conn.commit()
 
 
+def instrument_key(symbol_id, account=None):
+    """The `vap_run.symbol_id` value for one instrument.
+
+    A symbol id alone is ambiguous across brokers (114 is BTCUSD on one account
+    and EURCHF on another), so a profile is recorded under `account:symbol`
+    whenever the trader account is known. The column keeps its name and type -
+    and the Fabric mirror its schema - while the value becomes unambiguous. A
+    bare id is still accepted for callers that do not know the account.
+    """
+    return f"{account}:{symbol_id}" if account else str(symbol_id)
+
+
+def rekey_bare_runs(conn, account_by_symbol):
+    """Re-key stops recorded under a bare symbol id onto `account:symbol`.
+
+    Stops written before the account was part of the key carry just the id.
+    `account_by_symbol` maps an id to the one account the feed collects it on;
+    an id with no single owner is left alone rather than guessed. Rows whose
+    scoped key already exists for the same (window, as_of) are dropped as
+    duplicates. Returns the number of rows re-keyed.
+    """
+    moved = 0
+    for symbol_id, account in account_by_symbol.items():
+        key = instrument_key(symbol_id, account)
+        conn.execute(
+            """DELETE FROM vap_run WHERE symbol_id = ? AND EXISTS (
+                   SELECT 1 FROM vap_run k WHERE k.symbol_id = ?
+                      AND k.window_minutes = vap_run.window_minutes
+                      AND k.as_of = vap_run.as_of)""",
+            (str(symbol_id), key),
+        )
+        cur = conn.execute("UPDATE vap_run SET symbol_id = ? WHERE symbol_id = ?",
+                           (key, str(symbol_id)))
+        moved += cur.rowcount or 0
+    conn.commit()
+    return moved
+
+
 def _migrate(conn):
     """Bring a pre-existing database up to the current schema.
 

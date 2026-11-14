@@ -1,10 +1,16 @@
 import { useMarket } from "../context/MarketContext";
+import { fmtDateUtc, fmtTimeUtc } from "../lib/format";
 import { imgCalendarDays, imgChevronDown, imgPlay } from "../assets";
 
 type Props = { assetClass: string | null; instrument: string; running: boolean };
 
 export default function ControlBar({ assetClass, instrument, running }: Props) {
-  const { actions } = useMarket();
+  const { actions, summary, live } = useMarket();
+  // The window the numbers describe: anchored on the instrument's newest tick,
+  // so a closed market shows its last session rather than an empty "now".
+  const end = summary?.lastBucket ?? null;
+  const start = summary?.firstBucket ?? null;
+  const pointInTime = end ? `${fmtDateUtc(end)}  ${fmtTimeUtc(end)}` : "—";
   return (
     <div
       className="content-stretch flex gap-[16px] items-end overflow-clip relative shrink-0 w-full"
@@ -172,7 +178,7 @@ export default function ControlBar({ assetClass, instrument, running }: Props) {
           <p
             className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[12px] whitespace-pre"
             data-node-id="2007:7169"
-          >{`09 Oct 2026  16:00`}</p>
+          >{pointInTime}</p>
           <div
             className="relative shrink-0 size-[12px]"
             data-node-id="2007:8390"
@@ -197,10 +203,10 @@ export default function ControlBar({ assetClass, instrument, running }: Props) {
           data-name="Scrubber labels"
         >
           <p className="relative shrink-0 text-[#94a3b3]" data-node-id="2007:7173">
-            12:00
+            {start ? fmtTimeUtc(start) : "—"}
           </p>
           <p className="relative shrink-0 text-[#79d9ee]" data-node-id="2007:7174">
-            16:00 · NOW
+            {end ? `${fmtTimeUtc(end)} · ${live ? "NOW" : "LAST TICK"}` : "—"}
           </p>
         </div>
         <div

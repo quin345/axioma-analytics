@@ -1,6 +1,7 @@
 import { useCardState } from "../hooks/useCardState";
 import { useMarket } from "../context/MarketContext";
 import { useSpread } from "../hooks/useMarketData";
+import { emptyReason } from "./ChartCard";
 import { buildSpreadChart, SPREAD_PLOT } from "../lib/chart";
 import { fmtBps, fmtTimeUtc } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
@@ -12,7 +13,7 @@ const LINE = "#79d9ee";
 export default function BidAskSpreadCard() {
   const card = useCardState();
   const { symbolId, windowMinutes } = useMarket();
-  const { data, error } = useSpread(symbolId, windowMinutes);
+  const { data, error } = useSpread();
   const model = buildSpreadChart(data?.series ?? [], fmtBps, fmtTimeUtc);
   // The header reads the series' own mean, so the number matches the line drawn
   // under it rather than the price window's average.
@@ -169,9 +170,7 @@ export default function BidAskSpreadCard() {
         <div className="flex flex-1 flex-col gap-[8px] items-center justify-center w-full text-center">
           <p className="font-mono text-[#94a3b3] text-[11px] tracking-[0.12em]">NO DATA</p>
           <p className="font-sans text-[#647587] text-[11px] max-w-[420px]">
-            {error
-              ? `Bid-ask spread feed unavailable: ${error}`
-              : "Needs a two-sided book. Select an instrument to load its spread series."}
+            {emptyReason(symbolId, error, data !== null, "Needs a two-sided book in this window.")}
           </p>
         </div>
       )}

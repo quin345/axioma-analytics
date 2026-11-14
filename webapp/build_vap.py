@@ -45,22 +45,36 @@ def _symbols(reader, table):
     the ids are collapsed and de-duplicated here.
     """
     seen = []
-    for row in reader.run(queries.symbols(table)):
-        symbol_id = str(row["symbolId"])
+    for symbol_id, _ in _instruments(reader, table):
         if symbol_id not in seen:
             seen.append(symbol_id)
     return seen
 
 
-def refresh_one(cfg, reader, symbol_id):
+def _instruments(reader, table):
+    """The distinct (symbol id, trader account) pairs the feed collects.
+
+    A symbol id is shared across brokers - 114 is BTCUSD on one account and
+    EURCHF on another - so profiles are derived and recorded per pair, keyed
+    on `db.instrument_key`, never on the bare id.
+    """
+    seen = []
+    for row in reader.run(queries.symbols(table)):
+        pair = (str(row["symbolId"]), str(row["ctidTraderAccountId"]))
+        if pair not in seen:
+            seen.append(pair)
+    return seen
+
+
+def refresh_one(cfg, reader, symbol_id, account=None):
     """Derive and record one symbol's profiles. Returns (as_of, {window: poc})."""
-    rows = reader.run(queries.vap_ticks(cfg.table, symbol_id, max(WINDOWS)))
+    rows = reader.run(queries.vap_ticks(cfg.table, symbol_id, max(WINDOWS), account))
     profiles = analytics.profiles_by_window(rows, cfg.price_scale, WINDOWS)
     as_of = _as_of(rows)
 
     conn = db.connect(cfg.db_path)
     try:
-        db.save_profiles(conn, symbol_id, profiles, as_of)
+        db.save_profiles(conn, db.instrument_key(symbol_id, account), profiles, as_of)
         # Retention: `vap_run` is the durable record (only capped if
         # VAP_KEEP_RUNS is set); `vap_level` is trimmed to the hour window.
         db.prune_runs(conn, keep=cfg.vap_keep_runs)
@@ -177,18 +191,34 @@ def main(argv=None):
     _wait_for_ticks(cfg.vap_grid_delay if args.delay is None else args.delay)
 
     reader = KustoReader(cfg)
-    targets = [args.symbol] if args.symbol else _symbols(reader, cfg.table)
+    targets = _instruments(reader, cfg.table)
+    if args.symbol:
+        targets = [t for t in targets if t[0] == args.symbol] or [(args.symbol, None)]
+
+    # Stops recorded before the account joined the key carry a bare id; move
+    # them onto `account:symbol` when the feed has exactly one owner for it.
+    owners = {}
+    for symbol_id, account in targets:
+        owners.setdefault(symbol_id, set()).add(account)
+    single = {s: next(iter(a)) for s, a in owners.items() if len(a) == 1 and None not in a}
+    if single:
+        conn = db.connect(cfg.db_path)
+        try:
+            db.rekey_bare_runs(conn, single)
+        finally:
+            conn.close()
 
     failures = 0
-    for symbol_id in targets:
+    for symbol_id, account in targets:
+        label = db.instrument_key(symbol_id, account)
         try:
-            as_of, pocs = refresh_one(cfg, reader, symbol_id)
+            as_of, pocs = refresh_one(cfg, reader, symbol_id, account)
             summary = " ".join(f"{w}m={poc:.5f}" if poc is not None else f"{w}m=-"
                                for w, poc in sorted(pocs.items()))
-            print(f"OK  {symbol_id} as_of={as_of} {summary}")
+            print(f"OK  {label} as_of={as_of} {summary}")
         except Exception as exc:                      # keep going: one bad symbol
             failures += 1                             # must not stop the run
-            print(f"ERR {symbol_id}: {exc}", file=sys.stderr)
+            print(f"ERR {label}: {exc}", file=sys.stderr)
 
     return 1 if failures and failures == len(targets) else 0
 

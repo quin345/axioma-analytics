@@ -15,9 +15,18 @@ export interface Market {
   // The standardized instrument name, from the broker/symbol mapping.
   symbolLabel: string;
   symbolId: string | null;
-  // Where the selected instrument came from, when the mapping knows.
+  // Where the selected instrument came from, when the mapping knows. The
+  // account also scopes every query: a symbol id is shared across brokers.
   broker: string | null;
   account: string | null;
+  // When the feed last ticked for the selection, and whether that is recent
+  // enough to call the market live (a closed market shows its last session).
+  lastSeen: string | null;
+  live: boolean;
+  // Bumped by the Run button; every data hook re-fetches when it changes.
+  refreshKey: number;
+  // Display decimals for the selected instrument's prices.
+  priceDecimals: number;
   // The selected canonical class, or null for "all".
   assetClass: string | null;
   // Every canonical class and its collected-instrument count, server-ordered.
@@ -38,6 +47,10 @@ const defaultMarket: Market = {
   symbolId: null,
   broker: null,
   account: null,
+  lastSeen: null,
+  live: false,
+  refreshKey: 0,
+  priceDecimals: 2,
   assetClass: null,
   assetClasses: [],
   windowMinutes: 240,

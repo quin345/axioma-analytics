@@ -14,6 +14,8 @@ export function usePoll<T>(
   const [state, setState] = useState<PollState<T>>({ data: null, error: null });
 
   useEffect(() => {
+    // A new key (instrument, window) must not keep showing the old one's data.
+    setState({ data: null, error: null });
     if (!load) return;
     let active = true;
     const run = () =>

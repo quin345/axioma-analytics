@@ -1,667 +1,110 @@
+import { useEffect, useMemo, useState } from "react";
 import { imgChevronLeft1, imgChevronRight1 } from "../assets";
+import { useMarket } from "../context/MarketContext";
+import { CALENDAR_DAYS, useActivityByDay } from "../hooks/useMarketData";
+import { heat, isoDay, monthWeeks, MONTHS, shiftMonth, WEEKDAYS } from "../lib/calendar";
+import { fmtInt } from "../lib/format";
 
+// Activity by day: a month calendar of book events per UTC day for the
+// selected instrument (last six weeks on record). Click a day to read it.
 export default function ActivityCalendarPanel() {
+  const { symbolLabel, symbolId } = useMarket();
+  const { data, error } = useActivityByDay();
+  const byDay = useMemo(() => new Map((data ?? []).map((d) => [d.day, d.events])), [data]);
+  const max = Math.max(1, ...byDay.values());
+
+  const today = new Date();
+  const [cursor, setCursor] = useState({ year: today.getUTCFullYear(), month: today.getUTCMonth() });
+  const [picked, setPicked] = useState<string | null>(null);
+
+  // Default the selection to the newest day with data.
+  useEffect(() => {
+    const days = [...byDay.keys()].sort();
+    setPicked(days.length ? days[days.length - 1] : null);
+  }, [byDay]);
+
+  const prefix = isoDay(cursor.year, cursor.month, 1).slice(0, 7);
+  const monthTotal = [...byDay.entries()]
+    .filter(([d]) => d.startsWith(prefix))
+    .reduce((s, [, v]) => s + v, 0);
+
+  const status = !symbolId
+    ? "Select an instrument"
+    : error
+      ? `Feed unavailable: ${error}`
+      : picked
+        ? `${picked} · ${fmtInt(byDay.get(picked) ?? 0)} events`
+        : data === null
+          ? "Loading…"
+          : "No activity on record";
+
   return (
     <div
       className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[12px] items-start overflow-clip p-[14px] relative rounded-[6px] self-stretch shrink-0 w-[408px]"
       data-node-id="2007:7861"
       data-name="Activity calendar"
     >
-      <div
-        className="[word-break:break-word] content-stretch flex items-center justify-between leading-[1.4] not-italic overflow-clip relative shrink-0 w-full whitespace-nowrap"
-        data-node-id="2007:7862"
-        data-name="Panel heading"
-      >
-        <p
-          className="font-sans font-semibold relative shrink-0 text-[#e7edf3] text-[12px]"
-          data-node-id="2007:7863"
-        >
-          Activity by day
-        </p>
-        <p
-          className="font-mono relative shrink-0 text-[#94a3b3] text-[9px]"
-          data-node-id="2007:7864"
-        >
-          EUR/USD
-        </p>
+      <div className="flex items-center justify-between leading-[1.4] w-full whitespace-nowrap">
+        <p className="font-sans font-semibold text-[#e7edf3] text-[12px]">Activity by day</p>
+        <p className="font-mono text-[#94a3b3] text-[9px]">{symbolLabel}</p>
       </div>
-      <div
-        className="content-stretch flex items-start justify-between overflow-clip relative shrink-0 w-full"
-        data-node-id="2007:7865"
-        data-name="Calendar navigation"
-      >
-        <p
-          className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[11px] whitespace-nowrap"
-          data-node-id="2007:7866"
-        >
-          October 2026
+      <div className="flex items-start justify-between w-full">
+        <p className="font-mono leading-[1.4] text-[#e7edf3] text-[11px] whitespace-nowrap">
+          {MONTHS[cursor.month]} {cursor.year}
+          <span className="text-[#647587]"> · {fmtInt(monthTotal)} events</span>
         </p>
-        <div
-          className="content-stretch flex gap-[12px] items-start overflow-clip relative shrink-0"
-          data-node-id="2007:7867"
-          data-name="Month controls"
-        >
+        <div className="flex gap-[12px] items-start">
           <div
-            className="relative shrink-0 size-[14px]"
-            data-node-id="2007:8495"
+            className="relative shrink-0 size-[14px] cursor-pointer"
+            onClick={() => setCursor((c) => shiftMonth(c, -1))}
             data-name="chevron-left"
           >
-            <img
-              alt=""
-              className="absolute block inset-0 max-w-none size-full"
-              src={imgChevronLeft1}
-            />
+            <img alt="Previous month" className="absolute block inset-0 max-w-none size-full" src={imgChevronLeft1} />
           </div>
           <div
-            className="relative shrink-0 size-[14px]"
-            data-node-id="2007:8498"
+            className="relative shrink-0 size-[14px] cursor-pointer"
+            onClick={() => setCursor((c) => shiftMonth(c, 1))}
             data-name="chevron-right"
           >
-            <img
-              alt=""
-              className="absolute block inset-0 max-w-none size-full"
-              src={imgChevronRight1}
-            />
+            <img alt="Next month" className="absolute block inset-0 max-w-none size-full" src={imgChevronRight1} />
           </div>
         </div>
       </div>
-      <div
-        className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-        data-node-id="2007:7870"
-        data-name="Weekday headings"
-      >
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7871"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7872"
-          >
-            M
-          </p>
+      <div className="flex flex-col gap-[4px] w-full">
+        <div className="flex gap-[4px] w-full">
+          {WEEKDAYS.map((d, i) => (
+            <p key={i} className="flex-[1_0_0] text-center font-sans text-[#94a3b3] text-[9px] leading-[1.4]">
+              {d}
+            </p>
+          ))}
         </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7873"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7874"
-          >
-            T
-          </p>
-        </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7875"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7876"
-          >
-            W
-          </p>
-        </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7877"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7878"
-          >
-            T
-          </p>
-        </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7879"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7880"
-          >
-            F
-          </p>
-        </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7881"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7882"
-          >
-            S
-          </p>
-        </div>
-        <div
-          className="content-stretch flex flex-[1_0_0] items-start justify-center min-w-px overflow-clip relative"
-          data-node-id="2007:7883"
-          data-name="Weekday"
-        >
-          <p
-            className="[word-break:break-word] font-sans font-normal leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-            data-node-id="2007:7884"
-          >
-            S
-          </p>
-        </div>
+        {monthWeeks(cursor).map((week, w) => (
+          <div key={w} className="flex gap-[4px] w-full">
+            {week.map((day, i) => {
+              if (day === null) return <div key={i} className="flex-[1_0_0] h-[34px]" />;
+              const iso = isoDay(cursor.year, cursor.month, day);
+              const events = byDay.get(iso) ?? 0;
+              return (
+                <div
+                  key={i}
+                  onClick={() => setPicked(iso)}
+                  title={`${iso} · ${fmtInt(events)} events`}
+                  className="flex-[1_0_0] h-[34px] flex items-center justify-center rounded-[3px] border border-solid cursor-pointer"
+                  style={{ background: heat(events / max), borderColor: iso === picked ? "#79d9ee" : "#11161d" }}
+                >
+                  <p className="font-mono text-[10px] leading-[1.4]" style={{ color: events > 0 ? "#e7edf3" : "#647587" }}>
+                    {day}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
-      <div
-        className="content-stretch flex flex-col gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-        data-node-id="2007:7885"
-        data-name="Calendar weeks"
-      >
-        <div
-          className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-          data-node-id="2007:7886"
-          data-name="Week"
-        >
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7887"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7888"
-            >{` `}</p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7889"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7890"
-            >{` `}</p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7891"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7892"
-            >{` `}</p>
-          </div>
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7893"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7894"
-            >
-              1
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-60 relative shrink-0 w-[20px]"
-              data-node-id="2007:7895"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7896"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7897"
-            >
-              2
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-80 relative shrink-0 w-[25px]"
-              data-node-id="2007:7898"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7899"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7900"
-            >
-              3
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7901"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7902"
-            >
-              4
-            </p>
-          </div>
-        </div>
-        <div
-          className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-          data-node-id="2007:7903"
-          data-name="Week"
-        >
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7904"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7905"
-            >
-              5
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-80 relative shrink-0 w-[25px]"
-              data-node-id="2007:7906"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7907"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7908"
-            >
-              6
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-40 relative shrink-0 w-[15px]"
-              data-node-id="2007:7909"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7910"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7911"
-            >
-              7
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-60 relative shrink-0 w-[20px]"
-              data-node-id="2007:7912"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#171e27] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7913"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#e7edf3] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7914"
-            >
-              8
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] opacity-80 relative shrink-0 w-[25px]"
-              data-node-id="2007:7915"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#163b47] border border-[#79d9ee] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[3px] h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7916"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#79d9ee] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7917"
-            >
-              9
-            </p>
-            <div
-              className="bg-[#79d9ee] h-[2px] relative shrink-0 w-[15px]"
-              data-node-id="2007:7918"
-              data-name="Activity intensity"
-            />
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7919"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7920"
-            >
-              10
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7921"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7922"
-            >
-              11
-            </p>
-          </div>
-        </div>
-        <div
-          className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-          data-node-id="2007:7923"
-          data-name="Week"
-        >
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7924"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7925"
-            >
-              12
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7926"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7927"
-            >
-              13
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7928"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7929"
-            >
-              14
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7930"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7931"
-            >
-              15
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7932"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7933"
-            >
-              16
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7934"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7935"
-            >
-              17
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7936"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7937"
-            >
-              18
-            </p>
-          </div>
-        </div>
-        <div
-          className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-          data-node-id="2007:7938"
-          data-name="Week"
-        >
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7939"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7940"
-            >
-              19
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7941"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7942"
-            >
-              20
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7943"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7944"
-            >
-              21
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7945"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7946"
-            >
-              22
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7947"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7948"
-            >
-              23
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7949"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7950"
-            >
-              24
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7951"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7952"
-            >
-              25
-            </p>
-          </div>
-        </div>
-        <div
-          className="content-stretch flex gap-[4px] items-start overflow-clip relative shrink-0 w-full"
-          data-node-id="2007:7953"
-          data-name="Week"
-        >
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7954"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7955"
-            >
-              26
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7956"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7957"
-            >
-              27
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7958"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7959"
-            >
-              28
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7960"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7961"
-            >
-              29
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7962"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7963"
-            >
-              30
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7964"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7965"
-            >
-              31
-            </p>
-          </div>
-          <div
-            className="bg-[#11161d] border border-[#11161d] border-solid content-stretch flex flex-[1_0_0] flex-col h-[34px] items-center justify-center min-w-px overflow-clip relative rounded-[3px]"
-            data-node-id="2007:7966"
-            data-name="Day activity"
-          >
-            <p
-              className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#647587] text-[10px] whitespace-nowrap"
-              data-node-id="2007:7967"
-            >{` `}</p>
-          </div>
-        </div>
+      <div className="flex flex-col gap-[4px] w-full font-mono text-[9px] leading-[1.4] text-[#94a3b3] whitespace-nowrap">
+        <p className="text-[#e7edf3] text-[10px]">{status}</p>
+        <p>Low ▂ ▃ ▅ High · last {CALENDAR_DAYS} days · UTC</p>
       </div>
-      <div
-        className="[word-break:break-word] content-stretch flex items-start justify-between leading-[1.4] not-italic overflow-clip relative shrink-0 w-full whitespace-nowrap"
-        data-node-id="2007:7968"
-        data-name="Selected day"
-      >
-        <p
-          className="font-mono relative shrink-0 text-[#79d9ee] text-[10px]"
-          data-node-id="2007:7969"
-        >
-          09 OCT · 184,320 ticks
-        </p>
-        <p
-          className="font-sans font-normal relative shrink-0 text-[#94a3b3] text-[9px]"
-          data-node-id="2007:7970"
-        >
-          Selected 4h
-        </p>
-      </div>
-      <p
-        className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
-        data-node-id="2007:7971"
-      >
-        Low ▂ ▃ ▅ High · weekdays / UTC
-      </p>
     </div>
   );
 }

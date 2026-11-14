@@ -130,6 +130,162 @@ def tick_gaps(rows):
     }
 
 
+# --- Trade-flow proxies ------------------------------------------------------
+#
+# The feed is depth-of-market only: no trade prints, no aggressor side, and the
+# ladder's slot sizes are fixed, so the book's own `imbalance_ratio` sits at ~0.
+# The cards that need trades are filled with the closest proxy the book
+# supports, all built on the **tick rule** (Lee & Ready): an update that lifts
+# the mid is buyer-initiated, one that drops it is seller-initiated, and an
+# unchanged mid inherits the last non-zero direction. Each payload names its
+# proxy (`proxy`) so the UI can say so.
+
+# Event-study horizons for the burst-impact curve, in 10-second buckets:
+# 10s, 30s, 1m, 3m, 5m after the burst.
+IMPACT_HORIZONS = (1, 3, 6, 18, 30)
+# A bucket is a "burst" (the large-trade stand-in) when its event count is at
+# or above this quantile of the window's buckets.
+BURST_QUANTILE = 0.95
+
+
+def _tick_signs(mids):
+    """Tick-rule direction (+1 / -1 / 0) for each mid against the one before.
+
+    Zero ticks carry the previous non-zero sign; the first observation (and
+    any zero tick before the first move) is 0, i.e. unsigned.
+    """
+    signs = []
+    last = 0
+    for prev, cur in zip([None] + mids[:-1], mids):
+        if prev is not None and cur != prev:
+            last = 1 if cur > prev else -1
+        signs.append(last)
+    return signs
+
+
+def order_flow(rows):
+    """Signed-flow proxy per bucket: event count signed by the tick rule.
+
+    `rows` are series buckets (oldest first). Returns the per-bucket signed
+    flow, its running sum, the book's mean `imbalance_ratio` for reference, and
+    the window's buy/sell split with a normalised imbalance in [-1, +1].
+    """
+    mids = _valid_mids(rows)
+    by_bucket = {r["bucket"]: r for r in rows}
+    signs = _tick_signs([m for _, m, _ in mids])
+
+    series = []
+    buy = sell = cumulative = 0
+    for (bucket, _, _), sign in zip(mids, signs):
+        events = by_bucket[bucket]["events"] or 0
+        signed = sign * events
+        cumulative += signed
+        if sign > 0:
+            buy += events
+        elif sign < 0:
+            sell += events
+        series.append({"bucket": bucket, "signed": signed, "cumulative": cumulative})
+
+    total = buy + sell
+    book = [r.get("imbalance_ratio") for r in rows if r.get("imbalance_ratio") is not None]
+    return {
+        "proxy": "tick-rule signed depth events",
+        "series": series,
+        "buy_events": buy,
+        "sell_events": sell,
+        "imbalance": (buy - sell) / total if total else None,
+        "book_imbalance": sum(book) / len(book) if book else None,
+    }
+
+
+def _quantile(values, q):
+    """Nearest-rank quantile; keeps numpy out for one number."""
+    ordered = sorted(values)
+    idx = min(len(ordered) - 1, max(0, int(math.ceil(q * len(ordered))) - 1))
+    return ordered[idx]
+
+
+def burst_impact(rows, horizons=IMPACT_HORIZONS, quantile=BURST_QUANTILE,
+                 bin_seconds=10, recent=8):
+    """Large-trade-impact proxy: the mid's response after activity bursts.
+
+    A burst is a bucket whose event count is in the window's top `quantile`;
+    its direction is the tick-rule sign of the mid move *into* that bucket.
+    For each horizon h the impact is the signed mid change from just before the
+    burst to h buckets after it, in basis points of the pre-burst mid -
+    positive means the price kept going the burst's way (permanent impact),
+    negative means it reverted.
+    """
+    mids = _valid_mids(rows)
+    empty = {"proxy": "top-activity buckets, tick-rule signed", "threshold": None,
+             "bursts": 0, "curve": [], "events": []}
+    if len(mids) < 3:
+        return empty
+
+    by_bucket = {r["bucket"]: r["events"] or 0 for r in rows}
+    counts = [by_bucket[b] for b, _, _ in mids]
+    threshold = _quantile(counts, quantile)
+    if threshold <= 0:
+        return empty
+
+    prices = [m for _, m, _ in mids]
+    samples = {h: [] for h in horizons}
+    headline = horizons[min(2, len(horizons) - 1)]
+    events = []
+    for i in range(1, len(mids)):
+        if counts[i] < threshold:
+            continue
+        move = prices[i] - prices[i - 1]
+        base = prices[i - 1]
+        if move == 0 or not base:
+            continue                      # no direction to attribute
+        sign = 1 if move > 0 else -1
+        impact = None
+        for h in horizons:
+            j = i + h
+            if j < len(prices):
+                bps = sign * (prices[j] - base) / base * 10_000
+                samples[h].append(bps)
+                if h == headline:
+                    impact = bps
+        events.append({"bucket": mids[i][0], "events": counts[i], "direction": sign,
+                       "move_bps": abs(move) / base * 10_000, "impact_bps": impact})
+
+    curve = [{"horizon_s": h * bin_seconds,
+              "mean_bps": sum(v) / len(v) if v else None,
+              "n": len(v)} for h, v in samples.items()]
+    return {**empty, "threshold": threshold, "bursts": len(events), "curve": curve,
+            "headline_horizon_s": headline * bin_seconds,
+            "events": events[-recent:][::-1]}
+
+
+def raw_ticks(rows, price_scale):
+    """The newest raw book updates with a tick-rule side, newest first.
+
+    `rows` arrive newest first, so each row's direction is measured against the
+    row after it (the next older update). Prices are scaled to display units.
+    """
+    out = []
+    for i, row in enumerate(rows):
+        mid = _mid(row)
+        older = _mid(rows[i + 1]) if i + 1 < len(rows) else None
+        side = None
+        if mid is not None and older is not None and mid != older:
+            side = "buy" if mid > older else "sell"
+        bid, ask = row.get("best_bid"), row.get("best_ask")
+        out.append({
+            "timestamp": row.get("timestamp"),
+            "seq": row.get("eventSeq"),
+            "bid": None if bid is None else bid / price_scale,
+            "ask": None if ask is None else ask / price_scale,
+            "spread": None if bid is None or ask is None else (ask - bid) / price_scale,
+            "bid_size": row.get("total_bid"),
+            "ask_size": row.get("total_ask"),
+            "side": side,
+        })
+    return out
+
+
 # --- Volume-at-price ---------------------------------------------------------
 
 

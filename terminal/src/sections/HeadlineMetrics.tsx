@@ -1,7 +1,17 @@
 import { useMarket } from "../context/MarketContext";
 import { formatKpis } from "../lib/format";
+
+const UP = "#8ed6be";
+const DOWN = "#f2a7a7";
+const NEUTRAL = "#e7edf3";
+
+function tone(positive: boolean | null): string {
+  return positive === null ? NEUTRAL : positive ? UP : DOWN;
+}
+
 export default function HeadlineMetrics() {
-  const k = formatKpis(useMarket().summary);
+  const { summary, windowLabel, symbolLabel, live } = useMarket();
+  const k = formatKpis(summary);
   return (
     <div
       className="[word-break:break-word] content-stretch flex gap-[8px] items-start not-italic overflow-clip relative shrink-0 w-full"
@@ -29,7 +39,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7188"
         >
-          100% of book events
+          depth events · {windowLabel}
         </p>
       </div>
       <div
@@ -53,7 +63,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7192"
         >
-          USD per EUR
+          {symbolLabel} mid · {live ? "live" : "last session"}
         </p>
       </div>
       <div
@@ -68,7 +78,8 @@ export default function HeadlineMetrics() {
           Change
         </p>
         <p
-          className="font-mono leading-[normal] min-w-full relative shrink-0 text-[#8ed6be] text-[25px] w-[min-content]"
+          className="font-mono leading-[normal] min-w-full relative shrink-0 text-[25px] w-[min-content]"
+          style={{ color: tone(k.changePositive) }}
           data-node-id="2007:7195"
         >
           {k.change}
@@ -101,7 +112,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7200"
         >
-          L 1.08194 · USD/EUR
+          mid range · {windowLabel}
         </p>
       </div>
       <div
@@ -125,7 +136,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7204"
         >
-          Annualised · 1m returns
+          Annualised · 10s returns
         </p>
       </div>
       <div
@@ -149,7 +160,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7208"
         >
-          pips · 1 pip = 0.0001
+          {k.spreadNote || "price units"}
         </p>
       </div>
       <div
@@ -167,13 +178,13 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[normal] min-w-full relative shrink-0 text-[#e7edf3] text-[25px] w-[min-content]"
           data-node-id="2007:7211"
         >
-          768
+          {k.ticksPerMin}
         </p>
         <p
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7212"
         >
-          4h window average
+          {windowLabel} window average
         </p>
       </div>
       <div
@@ -188,7 +199,8 @@ export default function HeadlineMetrics() {
           Flow imbalance
         </p>
         <p
-          className="font-mono leading-[normal] min-w-full relative shrink-0 text-[#8ed6be] text-[25px] w-[min-content]"
+          className="font-mono leading-[normal] min-w-full relative shrink-0 text-[25px] w-[min-content]"
+          style={{ color: tone(k.flowPositive) }}
           data-node-id="2007:7215"
         >
           {k.flow}
@@ -197,7 +209,7 @@ export default function HeadlineMetrics() {
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7216"
         >
-          −1 sell / +1 buy
+          tick-rule proxy · −1 sell / +1 buy
         </p>
       </div>
     </div>

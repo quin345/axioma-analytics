@@ -1,6 +1,7 @@
 import { useCardState } from "../hooks/useCardState";
 import { useMarket } from "../context/MarketContext";
 import { useVolumeAtPrice } from "../hooks/useMarketData";
+import { emptyReason } from "./ChartCard";
 import { buildVapLadder, VAP_PLOT } from "../lib/chart";
 import { fmtPrice, fmtVolume } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
@@ -13,7 +14,7 @@ const POC = "#79d9ee";
 export default function VolumeAtPriceCard() {
   const card = useCardState();
   const { symbolId, windowMinutes } = useMarket();
-  const { data, error } = useVolumeAtPrice(symbolId, windowMinutes);
+  const { data, error } = useVolumeAtPrice();
   const model = buildVapLadder(data, fmtPrice, fmtVolume);
   const hasProfile = model.rowCount > 0;
 
@@ -69,7 +70,7 @@ export default function VolumeAtPriceCard() {
         data-name="Chart metadata"
       >
         <p className="font-sans font-normal relative shrink-0 text-[#94a3b3] text-[10px]">
-          Traded volume by price · {windowMinutes}m lookback
+          Depth events by mid price · {windowMinutes}m lookback
         </p>
         <p className="font-mono relative shrink-0 text-[#79d9ee] text-[11px]">
           {hasProfile ? `POC ${model.pocLabel} · ${model.volumeLabel}` : "NO DATA"}
@@ -126,9 +127,7 @@ export default function VolumeAtPriceCard() {
         <div className="flex flex-1 flex-col gap-[8px] items-center justify-center w-full text-center">
           <p className="font-mono text-[#94a3b3] text-[11px] tracking-[0.12em]">NO DATA</p>
           <p className="font-sans text-[#647587] text-[11px] max-w-[420px]">
-            {error
-              ? `Volume-at-price feed unavailable: ${error}`
-              : "Needs traded volume by price. Select an instrument to load its profile."}
+            {emptyReason(symbolId, error, data !== null, "No recorded profile for this window yet.")}
           </p>
         </div>
       )}

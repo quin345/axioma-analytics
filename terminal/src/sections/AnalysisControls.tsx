@@ -1,11 +1,17 @@
 import { useMarket } from "../context/MarketContext";
-import { fmtInt } from "../lib/format";
+import { fmtDateUtc, fmtInt, fmtTimeUtc } from "../lib/format";
 import ControlBar from "./ControlBar";
 
 type Props = { assetClass: string | null; instrument: string; running: boolean };
 
 export default function AnalysisControls({ assetClass, instrument, running }: Props) {
-  const { ticks, windowLabel, status, broker, account, assetClasses } = useMarket();
+  const { ticks, windowLabel, status, broker, account, assetClasses, summary, live } = useMarket();
+  const start = summary?.firstBucket ?? null;
+  const end = summary?.lastBucket ?? null;
+  const span =
+    start && end
+      ? `${fmtDateUtc(end)} / ${fmtTimeUtc(start)}–${fmtTimeUtc(end)} UTC / ${live ? "LIVE" : "MARKET CLOSED · LAST SESSION"}`
+      : "NO DATA IN WINDOW";
   // The selected class's instrument count, from the mapping-derived list.
   const classCount = assetClasses.find((c) => c.assetClass === assetClass)?.count;
   // Where the instrument came from: broker / account, when the mapping knows.
@@ -64,7 +70,7 @@ export default function AnalysisControls({ assetClass, instrument, running }: Pr
           className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[10px] whitespace-nowrap"
           data-node-id="2007:7143"
         >
-          09 OCT 2026 / 12:00–16:00 UTC / 100% EVENT COVERAGE
+          {span}
         </p>
       </div>
       <ControlBar assetClass={assetClass} instrument={instrument} running={running} />
