@@ -4,7 +4,7 @@
 The artwork is the official AXIOMA mark: a diamond (the market instrument) with
 an ascending bar pair behind it, stroked with a blue-to-green gradient.
 
-Outputs (all written into the terminal's Vite `public/` folder):
+Outputs (written into terminal/public/; copy the favicon/icon files into landing/public/ too):
 
   * assets/axioma-mark.svg  - the header mark used by the React terminal
   * favicon.svg             - the same vector art, crisp at any size

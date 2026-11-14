@@ -22,8 +22,7 @@ slot **upserts** the same row instead of duplicating it.
 ## Cadence: every 5 minutes, on the grid
 
 The job runs **every 5 minutes**, on the mark - the same cadence
-the app used for its cache (`CACHE_REFRESH_MINUTES`) and the grain the old
-`metrics_5m` table was built on.
+the app uses for its cache (`CACHE_REFRESH_MINUTES`).
 
 It then waits `VAP_GRID_DELAY` seconds (default **1**) *inside* the script before
 it reads Kusto. The wait is not padding: the job fires on the mark, but the feed

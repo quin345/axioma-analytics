@@ -9,7 +9,7 @@ GAP_EDGES_MS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000]
 
 # --- Volume-at-price ---------------------------------------------------------
 # Share of total volume the value area must cover, expanding outwards from the
-# point of control. Same 70% rule the tick frame and metrics_5m used.
+# point of control (the conventional 70% rule).
 VALUE_AREA_SHARE = 0.70
 # How many high-volume nodes a profile reports.
 HIGH_VOLUME_NODES = 5
@@ -301,7 +301,7 @@ def _level_weight(row):
     """The volume a tick contributes to its price bin.
 
     `volume` when the feed carries one (traded size), otherwise the event count
-    - the same fallback `metrics_5m` used when the DOM feed had no trades. Never
+    - the fallback for a DOM feed with no trades. Never
     negative, so a bad column cannot invert a ladder.
     """
     volume = row.get("volume")
