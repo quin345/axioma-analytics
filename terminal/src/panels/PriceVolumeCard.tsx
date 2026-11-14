@@ -9,7 +9,7 @@ export default function PriceVolumeCard() {
   const k = formatKpis(useMarket().summary);
   return (
     <div
-      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[312px] items-start overflow-clip p-[14px] relative rounded-[6px] shrink-0 w-[1024px] ${card.className}`}
+      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[312px] items-start overflow-clip p-[14px] min-w-0 relative rounded-[6px] flex-[1024_1_0px] ${card.className}`}
       data-node-id="2007:7222"
       data-name="Analytics card"
     >
@@ -86,7 +86,7 @@ export default function PriceVolumeCard() {
         >{`${k.last}  /  ${k.change}`}</p>
       </div>
       <div
-        className="h-[230px] overflow-clip relative shrink-0 w-[996px]"
+        className="h-[230px] overflow-clip relative shrink-0 w-full"
         data-node-id="2007:7233"
         data-name="Analytical plot"
       >

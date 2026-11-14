@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { useCardState } from "../hooks/useCardState";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
@@ -6,14 +6,22 @@ import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 // cards: title with collapse chevron, expand / highlight actions, a one-line
 // metadata strip (left caption, right headline value) and the plot area. A
 // panel supplies only its numbers and its SVG.
+//
+// Cards fill the width of their row: each one grows in proportion to its
+// design width (the `flex-[509_1_0px]` in `size`), and the plot spans the
+// card. Panels measure the plot through `plotRef` and stretch their SVG box
+// to match (see fitBox in lib/chart).
 type Props = {
   title: string;
   caption: ReactNode;
   headline: ReactNode;
-  // Card box size, matching the design grid (e.g. "h-[248px] w-[509px]").
+  // Card height and its share of the row, from the design grid
+  // (e.g. "h-[248px] flex-[509_1_0px]" for a 509px-wide Figma card).
   size: string;
-  // Plot box size (e.g. "h-[166px] w-[481px]").
+  // Plot height (e.g. "h-[166px]"). The plot is always full card width.
   plotSize: string;
+  // Measures the plot area so the panel can fit its SVG to it.
+  plotRef?: Ref<HTMLDivElement>;
   dataNodeId?: string;
   // When false the plot is replaced by the NO DATA state with `emptyReason`.
   hasData: boolean;
@@ -29,6 +37,7 @@ export default function ChartCard({
   headline,
   size,
   plotSize,
+  plotRef,
   dataNodeId,
   hasData,
   emptyReason,
@@ -38,7 +47,7 @@ export default function ChartCard({
   const card = useCardState();
   return (
     <div
-      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] items-start overflow-clip p-[14px] relative rounded-[6px] shrink-0 ${size} ${card.className}`}
+      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] items-start min-w-0 overflow-clip p-[14px] relative rounded-[6px] ${size} ${card.className}`}
       data-node-id={dataNodeId}
       data-name="Analytics card"
     >
@@ -78,7 +87,11 @@ export default function ChartCard({
         <p className="font-mono relative shrink-0 text-[#79d9ee] text-[11px]">{hasData ? headline : "NO DATA"}</p>
       </div>
       {hasData ? (
-        <div className={`overflow-clip relative shrink-0 ${plotSize}`} data-name="Analytical plot">
+        <div
+          ref={plotRef}
+          className={`overflow-clip relative shrink-0 w-full ${plotSize}`}
+          data-name="Analytical plot"
+        >
           {children}
         </div>
       ) : (

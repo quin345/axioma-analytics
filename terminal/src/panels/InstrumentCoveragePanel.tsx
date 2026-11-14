@@ -11,7 +11,7 @@ export default function InstrumentCoveragePanel() {
 
   return (
     <div
-      className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[12px] items-start overflow-clip p-[14px] relative rounded-[6px] self-stretch shrink-0 w-[360px]"
+      className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[12px] items-start overflow-clip p-[14px] relative rounded-[6px] min-w-0 self-stretch flex-[360_1_0px]"
       data-node-id="2007:7808"
       data-name="Instrument coverage"
     >

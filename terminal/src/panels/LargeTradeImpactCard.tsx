@@ -1,8 +1,9 @@
 import ChartCard, { emptyReason } from "./ChartCard";
+import { useElementSize } from "../hooks/useElementSize";
 import Axes, { ACCENT, ACCENT_SELL, GRID, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { useImpact } from "../hooks/useMarketData";
-import { valueTicks, yScale, type PlotBox } from "../lib/chart";
+import { fitBox, valueTicks, yScale, type PlotBox } from "../lib/chart";
 import { fmtBpsSigned, fmtInt, fmtSigned, fmtTimeUtc } from "../lib/format";
 
 // Left: the mean impact curve. Right: the most recent bursts as a table.
@@ -18,6 +19,9 @@ function horizonLabel(s: number): string {
 // (bps of the pre-burst mid) at each horizon - above zero the move persisted,
 // below zero it reverted.
 export default function LargeTradeImpactCard() {
+  // The curve takes the card width left over by the burst table.
+  const [plotRef, plotDims] = useElementSize();
+  const box = fitBox(BOX, plotDims);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useImpact();
   const curve = (data?.curve ?? []).filter((c) => c.mean_bps !== null);
@@ -25,9 +29,9 @@ export default function LargeTradeImpactCard() {
   const headlineH = data?.headline_horizon_s ?? 60;
   const headline = curve.find((c) => c.horizon_s === headlineH)?.mean_bps ?? null;
 
-  const scale = yScale(curve.map((c) => c.mean_bps as number), BOX, { includeZero: true });
+  const scale = yScale(curve.map((c) => c.mean_bps as number), box, { includeZero: true });
   const zero = scale.at(0);
-  const slot = (BOX.right - BOX.left) / Math.max(1, curve.length);
+  const slot = (box.right - box.left) / Math.max(1, curve.length);
   const barWidth = Math.min(46, slot * 0.6);
 
   return (
@@ -35,8 +39,8 @@ export default function LargeTradeImpactCard() {
       title="Large-trade impact"
       caption={`Mid response after activity bursts · bps · ${windowMinutes}m`}
       headline={`${horizonLabel(headlineH)} ${fmtBpsSigned(headline)} bps`}
-      size="h-[226px] w-[770px]"
-      plotSize="h-[144px] w-[742px]"
+      size="h-[226px] flex-[770_1_0px]"
+      plotSize="h-[144px]"
       dataNodeId="2007:7687"
       hasData={hasData}
       emptyReason={emptyReason(symbolId, error, data !== null, "No directional bursts in this window.")}
@@ -47,12 +51,12 @@ export default function LargeTradeImpactCard() {
       }
     >
       <div className="flex gap-[12px] h-full w-full">
-        <div className="h-[144px] w-[430px] shrink-0">
-          <Plot box={BOX} label="Mean signed mid response after activity bursts">
-            <Axes box={BOX} yTicks={valueTicks(scale, 4, (v) => fmtSigned(v, 1))} />
-            <line x1={BOX.left} x2={BOX.right} y1={zero} y2={zero} stroke={LABEL} strokeDasharray="2 3" />
+        <div ref={plotRef} className="h-[144px] flex-1 min-w-0">
+          <Plot box={box} label="Mean signed mid response after activity bursts">
+            <Axes box={box} yTicks={valueTicks(scale, 4, (v) => fmtSigned(v, 1))} />
+            <line x1={box.left} x2={box.right} y1={zero} y2={zero} stroke={LABEL} strokeDasharray="2 3" />
             {curve.map((c, i) => {
-              const x = BOX.left + slot * (i + 0.5);
+              const x = box.left + slot * (i + 0.5);
               const y = scale.at(c.mean_bps as number);
               return (
                 <g key={c.horizon_s}>
@@ -64,7 +68,7 @@ export default function LargeTradeImpactCard() {
                     fill={(c.mean_bps as number) >= 0 ? ACCENT : ACCENT_SELL}
                     opacity={0.7}
                   />
-                  <text x={x} y={BOX.bottom + 13} fill={LABEL} fontSize={9} fontFamily={MONO} textAnchor="middle">
+                  <text x={x} y={box.bottom + 13} fill={LABEL} fontSize={9} fontFamily={MONO} textAnchor="middle">
                     +{horizonLabel(c.horizon_s)}
                   </text>
                 </g>
@@ -72,7 +76,7 @@ export default function LargeTradeImpactCard() {
             })}
           </Plot>
         </div>
-        <div className="flex flex-col gap-[3px] w-[300px] font-mono text-[10px] leading-[1.4]">
+        <div className="flex flex-col gap-[3px] w-[300px] shrink-0 font-mono text-[10px] leading-[1.4]">
           <div className="flex justify-between text-[#647587] border-b pb-[2px]" style={{ borderColor: GRID }}>
             <span className="w-[44px]">TIME</span>
             <span className="w-[30px]">SIDE</span>

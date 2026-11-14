@@ -1,8 +1,9 @@
 import { useCardState } from "../hooks/useCardState";
+import { useElementSize } from "../hooks/useElementSize";
 import { useMarket } from "../context/MarketContext";
 import { useSpread } from "../hooks/useMarketData";
 import { emptyReason } from "./ChartCard";
-import { buildSpreadChart, SPREAD_PLOT } from "../lib/chart";
+import { buildSpreadChart, fitBox, SPREAD_PLOT } from "../lib/chart";
 import { fmtBps, fmtTimeUtc } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
@@ -12,16 +13,18 @@ const LINE = "#79d9ee";
 
 export default function BidAskSpreadCard() {
   const card = useCardState();
+  const [plotRef, plotDims] = useElementSize();
+  const box = fitBox(SPREAD_PLOT, plotDims);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useSpread();
-  const model = buildSpreadChart(data?.series ?? [], fmtBps, fmtTimeUtc);
+  const model = buildSpreadChart(data?.series ?? [], fmtBps, fmtTimeUtc, box);
   // The header reads the series' own mean, so the number matches the line drawn
   // under it rather than the price window's average.
   const avgLabel = fmtBps(data?.mean ?? null);
 
   return (
     <div
-      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[248px] items-start overflow-clip p-[14px] relative rounded-[6px] shrink-0 w-[510px] ${card.className}`}
+      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[248px] items-start overflow-clip p-[14px] min-w-0 relative rounded-[6px] flex-[510_1_0px] ${card.className}`}
       data-node-id="2007:7451"
       data-name="Analytics card"
     >
@@ -101,12 +104,13 @@ export default function BidAskSpreadCard() {
       </div>
       {model.hasSeries ? (
         <div
-          className="h-[166px] overflow-clip relative shrink-0 w-[482px]"
+          ref={plotRef}
+          className="h-[166px] overflow-clip relative shrink-0 w-full"
           data-node-id="2007:7462"
           data-name="Analytical plot"
         >
           <svg
-            viewBox={`0 0 ${SPREAD_PLOT.width} ${SPREAD_PLOT.height}`}
+            viewBox={`0 0 ${box.width} ${box.height}`}
             width="100%"
             height="100%"
             role="img"
@@ -116,8 +120,8 @@ export default function BidAskSpreadCard() {
             {model.yTicks.map((t) => (
               <g key={`y${t.pos}`}>
                 <line
-                  x1={SPREAD_PLOT.left}
-                  x2={SPREAD_PLOT.right}
+                  x1={box.left}
+                  x2={box.right}
                   y1={t.pos}
                   y2={t.pos}
                   stroke={GRID}
@@ -138,13 +142,13 @@ export default function BidAskSpreadCard() {
                 <line
                   x1={t.pos}
                   x2={t.pos}
-                  y1={SPREAD_PLOT.top}
-                  y2={SPREAD_PLOT.bottom}
+                  y1={box.top}
+                  y2={box.bottom}
                   stroke={GRID}
                 />
                 <text
                   x={t.pos}
-                  y={SPREAD_PLOT.bottom + 13}
+                  y={box.bottom + 13}
                   fill={LABEL}
                   fontSize={9}
                   fontFamily="IBM Plex Mono, monospace"

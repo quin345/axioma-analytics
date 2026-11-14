@@ -17,7 +17,7 @@ export default function RawTickDataPanel() {
 
   return (
     <div
-      className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[10px] items-start overflow-clip p-[14px] relative rounded-[6px] self-stretch shrink-0 w-[760px]"
+      className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[10px] items-start overflow-clip p-[14px] relative rounded-[6px] min-w-0 self-stretch flex-[760_1_0px]"
       data-node-id="2007:7720"
       data-name="Raw tick data"
     >

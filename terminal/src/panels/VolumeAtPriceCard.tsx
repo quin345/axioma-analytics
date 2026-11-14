@@ -1,8 +1,9 @@
 import { useCardState } from "../hooks/useCardState";
+import { useElementSize } from "../hooks/useElementSize";
 import { useMarket } from "../context/MarketContext";
 import { useVolumeAtPrice } from "../hooks/useMarketData";
 import { emptyReason } from "./ChartCard";
-import { buildVapLadder, VAP_PLOT } from "../lib/chart";
+import { buildVapLadder, fitBox, VAP_PLOT } from "../lib/chart";
 import { fmtPrice, fmtVolume } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
@@ -13,14 +14,16 @@ const POC = "#79d9ee";
 
 export default function VolumeAtPriceCard() {
   const card = useCardState();
+  const [plotRef, plotDims] = useElementSize();
+  const box = fitBox(VAP_PLOT, plotDims);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useVolumeAtPrice();
-  const model = buildVapLadder(data, fmtPrice, fmtVolume);
+  const model = buildVapLadder(data, fmtPrice, fmtVolume, box);
   const hasProfile = model.rowCount > 0;
 
   return (
     <div
-      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[248px] items-start overflow-clip p-[14px] relative rounded-[6px] shrink-0 w-[509px] ${card.className}`}
+      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[248px] items-start overflow-clip p-[14px] min-w-0 relative rounded-[6px] flex-[509_1_0px] ${card.className}`}
       data-node-id="2007:7377"
       data-name="Analytics card"
     >
@@ -79,11 +82,12 @@ export default function VolumeAtPriceCard() {
 
       {hasProfile ? (
         <div
-          className="h-[166px] overflow-clip relative shrink-0 w-[481px]"
+          ref={plotRef}
+          className="h-[166px] overflow-clip relative shrink-0 w-full"
           data-name="Analytical plot"
         >
           <svg
-            viewBox={`0 0 ${VAP_PLOT.width} ${VAP_PLOT.height}`}
+            viewBox={`0 0 ${box.width} ${box.height}`}
             width="100%"
             height="100%"
             role="img"
@@ -93,7 +97,7 @@ export default function VolumeAtPriceCard() {
             {model.bars.map((b) => (
               <rect
                 key={b.price}
-                x={VAP_PLOT.left}
+                x={box.left}
                 y={b.y}
                 width={b.width}
                 height={b.height}
@@ -103,8 +107,8 @@ export default function VolumeAtPriceCard() {
             ))}
             {model.pocY !== null && (
               <line
-                x1={VAP_PLOT.left}
-                x2={VAP_PLOT.right}
+                x1={box.left}
+                x2={box.right}
                 y1={model.pocY}
                 y2={model.pocY}
                 stroke={POC}
@@ -113,8 +117,8 @@ export default function VolumeAtPriceCard() {
               />
             )}
             <text
-              x={VAP_PLOT.left}
-              y={VAP_PLOT.bottom - 4}
+              x={box.left}
+              y={box.bottom - 4}
               fill={LABEL}
               fontSize={9}
               fontFamily="IBM Plex Mono, monospace"
