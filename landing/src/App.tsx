@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const A = "/assets";
 
@@ -217,6 +217,104 @@ function Terminal({ window }: { window: number }) {
   );
 }
 
+const TERMINAL_URL = "/terminal/";
+
+function goToTerminal() {
+  globalThis.location.assign(TERMINAL_URL);
+}
+
+// The terminal sits behind a pilot login. The server holds the credentials and
+// sets the session cookie; this dialog only collects them.
+async function isSignedIn(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/session", { credentials: "same-origin" });
+    return res.ok && (await res.json()).authenticated === true;
+  } catch {
+    return false;
+  }
+}
+
+function LoginDialog({ close }: { close: () => void }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (res.ok) {
+        goToTerminal();
+        return;
+      }
+      setError(res.status === 401 ? "Incorrect username or password." : "Sign-in failed. Try again.");
+    } catch {
+      setError("Could not reach the server. Try again.");
+    }
+    setBusy(false);
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={close}>
+      <div
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="login-title"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button className="dialog-close" onClick={close} aria-label="Close dialog">
+          ×
+        </button>
+        <Eyebrow>PILOT ACCESS</Eyebrow>
+        <h2 id="login-title">Sign in to the terminal.</h2>
+        <p>Enter the credentials your AXIOMA contact shared with your desk.</p>
+        <form onSubmit={submit}>
+          <label>
+            Username
+            <input
+              name="username"
+              autoComplete="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              autoFocus
+            />
+          </label>
+          <label>
+            Password
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </label>
+          {error && (
+            <p className="dialog-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button className="action action-primary dialog-submit" type="submit" disabled={busy}>
+            <span>{busy ? "Signing in…" : "Enter the terminal"}</span>
+            <Arrow dark />
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function AccessDialog({ close }: { close: () => void }) {
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={close}>
@@ -271,6 +369,23 @@ export default function App() {
   const [selectedBlock, setSelectedBlock] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const openDialog = () => setDialogOpen(true);
+  // The server sends unauthenticated visits to /terminal/ back here with
+  // ?login=1, so they land on the sign-in dialog.
+  const [loginOpen, setLoginOpen] = useState(
+    () => new URLSearchParams(globalThis.location.search).get("login") === "1",
+  );
+  useEffect(() => {
+    if (!loginOpen) return;
+    const url = new URL(globalThis.location.href);
+    if (url.searchParams.has("login")) {
+      url.searchParams.delete("login");
+      globalThis.history.replaceState(null, "", url);
+    }
+  }, [loginOpen]);
+  const openTerminal = async () => {
+    if (await isSignedIn()) goToTerminal();
+    else setLoginOpen(true);
+  };
 
   return (
     <main id="top">
@@ -302,9 +417,7 @@ export default function App() {
             </p>
             <ActionButton
               primary
-              onClick={() => {
-                globalThis.location.href = "/terminal/";
-              }}
+              onClick={openTerminal}
             >
               Explore the terminal
             </ActionButton>
@@ -533,6 +646,7 @@ export default function App() {
         </nav>
       </footer>
       {dialogOpen && <AccessDialog close={() => setDialogOpen(false)} />}
+      {loginOpen && <LoginDialog close={() => setLoginOpen(false)} />}
     </main>
   );
 }

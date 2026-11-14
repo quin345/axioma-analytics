@@ -1,9 +1,10 @@
+import hmac
 import json
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from flask import Flask, abort, jsonify, redirect, request, send_from_directory
+from flask import Flask, abort, jsonify, redirect, request, send_from_directory, session
 
 import analytics
 import db
@@ -46,6 +47,78 @@ app = Flask(__name__, static_folder=os.path.join(cfg.landing_dist, "assets"), st
 # The holding page lives next to this module, not in the built bundle, so it
 # still renders while the dashboard is being worked on.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+# --- Terminal login wall -------------------------------------------------------
+#
+# The landing page is public; the terminal and its API sit behind a shared
+# pilot login (TERMINAL_USERNAME / TERMINAL_PASSWORD in .env). The check lives
+# here, not in the browser, so the terminal cannot be reached by skipping the
+# landing page's dialog. A signed, HttpOnly session cookie carries the login;
+# SECRET_KEY must be the same for every gunicorn worker.
+app.secret_key = cfg.secret_key or None
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=cfg.cookie_secure,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
+# Reachable without a login: the sign-in endpoints themselves.
+PUBLIC_API = {"/api/login", "/api/logout", "/api/session"}
+# Where an unauthenticated visit to the terminal is sent (the landing page
+# opens its sign-in dialog when it sees ?login=1).
+LOGIN_PAGE = "/?login=1"
+
+
+def _auth_enabled():
+    return bool(cfg.auth_username)
+
+
+def _signed_in():
+    return not _auth_enabled() or session.get("user") == cfg.auth_username
+
+
+@app.before_request
+def _require_login():
+    path = request.path
+    gated = path == "/terminal" or path.startswith("/terminal/") or (
+        path.startswith("/api/") and path not in PUBLIC_API
+    )
+    if not gated or _signed_in():
+        return None
+    if path.startswith("/api/"):
+        return jsonify(error="login required"), 401
+    return redirect(LOGIN_PAGE, code=302)
+
+
+@app.post("/api/login")
+def login():
+    body = request.get_json(silent=True) or {}
+    username = str(body.get("username", ""))
+    password = str(body.get("password", ""))
+    if not _auth_enabled():
+        return jsonify(authenticated=True)
+    # Compare both fields in constant time, and always both, so the response
+    # time does not reveal which one was wrong.
+    user_ok = hmac.compare_digest(username.encode(), cfg.auth_username.encode())
+    pass_ok = hmac.compare_digest(password.encode(), cfg.auth_password.encode())
+    if not (user_ok and pass_ok):
+        return jsonify(error="Incorrect username or password"), 401
+    session.clear()
+    session.permanent = True
+    session["user"] = cfg.auth_username
+    return jsonify(authenticated=True)
+
+
+@app.post("/api/logout")
+def logout():
+    if _auth_enabled():
+        session.clear()
+    return jsonify(authenticated=False)
+
+
+@app.get("/api/session")
+def session_status():
+    return jsonify(authenticated=_signed_in())
 
 
 def _scale(value):

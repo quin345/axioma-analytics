@@ -29,6 +29,10 @@ class Config:
     sql_database: str    # the database (catalog) to write into
     sql_schema: str      # schema for the mirrored table
     sql_table: str       # the mirrored table name
+    auth_username: str   # login for /terminal/ and /api/*; blank = no login wall
+    auth_password: str
+    secret_key: str      # signs the session cookie; shared by every worker
+    cookie_secure: bool  # send the session cookie over HTTPS only
 
 
 def _require(name):
@@ -46,6 +50,23 @@ def _terminal_dist():
         if value:
             return value
     raise RuntimeError("Missing required environment variable: TERMINAL_DIST")
+
+
+def _auth():
+    """TERMINAL_USERNAME / TERMINAL_PASSWORD / SECRET_KEY.
+
+    Both credentials blank means no login wall (local development). Setting
+    only one, or setting them without a SECRET_KEY, is a misconfiguration and
+    refuses to start rather than silently leaving the terminal open.
+    """
+    username = os.environ.get("TERMINAL_USERNAME", "").strip()
+    password = os.environ.get("TERMINAL_PASSWORD", "")
+    secret = os.environ.get("SECRET_KEY", "").strip()
+    if bool(username) != bool(password):
+        raise RuntimeError("Set both TERMINAL_USERNAME and TERMINAL_PASSWORD, or neither")
+    if username and not secret:
+        raise RuntimeError("SECRET_KEY is required when the terminal login is enabled")
+    return username, password, secret
 
 
 def _flag(name):
@@ -112,6 +133,7 @@ def load_config():
             if not NAME_PATTERN.match(value):
                 raise RuntimeError(f"{label} must be a plain identifier, e.g. {value!r}")
 
+    username, password, secret = _auth()
     return Config(
         cluster_uri=_require("KUSTO_CLUSTER_URI"),
         database=_require("KUSTO_DATABASE"),
@@ -128,4 +150,8 @@ def load_config():
         sql_database=sql_database,
         sql_schema=sql_schema,
         sql_table=sql_table,
+        auth_username=username,
+        auth_password=password,
+        secret_key=secret,
+        cookie_secure=os.environ.get("SESSION_COOKIE_SECURE", "1").strip().lower() in TRUE_VALUES,
     )

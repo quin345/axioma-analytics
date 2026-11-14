@@ -1,4 +1,5 @@
 """Run from the webapp folder:  python -m tests.test_backend"""
+import contextlib
 import dataclasses
 import math
 import os
@@ -492,6 +493,103 @@ def test_terminal_dist_falls_back_to_frontend_dist():
         loaded = config.load_config()
         assert loaded.terminal_dist == "/old/dist"
         assert loaded.landing_dist.endswith(os.path.join("landing", "dist"))
+
+
+@contextlib.contextmanager
+def _gated(cookie_secure=False):
+    """The app with the pilot login switched on. The secret key and cookie flag
+    are read when the app starts, so they are patched alongside the config."""
+    cfg = dataclasses.replace(_built_sites(), auth_username="pilot-test",
+                              auth_password="pilot-test", secret_key="test-secret",
+                              cookie_secure=cookie_secure)
+    flask_app = app_module.app
+    with mock.patch.object(app_module, "cfg", cfg), \
+            mock.patch.dict(flask_app.config, SECRET_KEY="test-secret",
+                            SESSION_COOKIE_SECURE=cookie_secure):
+        yield flask_app.test_client()
+
+
+def _login(client, username="pilot-test", password="pilot-test"):
+    return client.post("/api/login", json={"username": username, "password": password})
+
+
+def test_login_wall_blocks_terminal_and_api():
+    """Without a session the terminal redirects to the landing page's sign-in
+    dialog and the API answers 401 - the wall is enforced server-side."""
+    with _gated() as client:
+        page = client.get("/terminal/")
+        assert page.status_code == 302
+        assert page.headers["Location"].endswith("/?login=1")
+        assert client.get("/terminal/assets/app.js").status_code == 302
+        assert client.get("/terminal").status_code == 302
+        api = client.get("/api/symbols")
+        assert api.status_code == 401
+        assert api.json == {"error": "login required"}
+        assert client.get("/api/session").json == {"authenticated": False}
+        # The landing page stays public.
+        assert client.get("/").status_code == 200
+
+
+def test_login_rejects_wrong_credentials():
+    with _gated() as client:
+        for user, password in (("pilot-test", "nope"), ("nope", "pilot-test"), ("", "")):
+            r = _login(client, user, password)
+            assert r.status_code == 401
+            assert r.json["error"] == "Incorrect username or password"
+        assert client.get("/terminal/").status_code == 302
+        assert client.post("/api/login", data="not json").status_code == 401
+
+
+def test_login_opens_terminal_and_logout_closes_it():
+    with _gated() as client:
+        r = _login(client)
+        assert r.status_code == 200 and r.json == {"authenticated": True}
+        cookie = r.headers["Set-Cookie"]
+        assert "HttpOnly" in cookie and "SameSite=Lax" in cookie
+        assert client.get("/api/session").json == {"authenticated": True}
+        page = client.get("/terminal/")
+        assert page.status_code == 200 and b"terminal" in page.data
+        assert client.get("/terminal/assets/app.js").status_code == 200
+        assert client.post("/api/logout").json == {"authenticated": False}
+        assert client.get("/terminal/").status_code == 302
+
+
+def test_session_cookie_is_secure_by_default():
+    with _gated(cookie_secure=True) as client:
+        assert "Secure" in _login(client).headers["Set-Cookie"]
+
+
+def test_logout_without_login_wall():
+    """With no credentials configured (local dev) the terminal is open and the
+    sign-in endpoints still answer, without needing a secret key."""
+    with mock.patch.object(app_module, "cfg", _built_sites()):
+        client = app_module.app.test_client()
+        assert client.get("/terminal/").status_code == 200
+        assert client.get("/api/session").json == {"authenticated": True}
+        assert client.post("/api/logout").status_code == 200
+
+
+def test_login_config_must_be_complete():
+    """Half a login config refuses to start rather than leaving the terminal open."""
+    import config
+
+    base = dict(KUSTO_TABLE="agg_dom", KUSTO_CLUSTER_URI="u", KUSTO_DATABASE="d",
+                PRICE_SCALE="100000", TERMINAL_DIST="/tmp")
+    for extra, message in (
+        (dict(TERMINAL_USERNAME="pilot-test"), "both"),
+        (dict(TERMINAL_USERNAME="pilot-test", TERMINAL_PASSWORD="pilot-test"), "SECRET_KEY"),
+    ):
+        with mock.patch.dict(os.environ, dict(base, **extra), clear=True):
+            try:
+                config.load_config()
+            except RuntimeError as error:
+                assert message in str(error)
+            else:
+                raise AssertionError(f"expected a RuntimeError for {extra}")
+    full = dict(base, TERMINAL_USERNAME="pilot-test", TERMINAL_PASSWORD="pilot-test", SECRET_KEY="s")
+    with mock.patch.dict(os.environ, full, clear=True):
+        loaded = config.load_config()
+        assert loaded.auth_username == "pilot-test" and loaded.cookie_secure is True
 
 
 def test_unavailable_page_is_always_reachable():

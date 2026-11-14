@@ -774,6 +774,16 @@ footer nav button:hover {
   color: var(--text);
   font-size: 13px;
 }
+.dialog-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #ff6b6b;
+  font-size: 12px;
+}
+.dialog-submit:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
 .dialog-submit {
   grid-column: 1 / -1;
   justify-content: center;

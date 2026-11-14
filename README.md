@@ -35,10 +35,11 @@ feed, a React analytics terminal, and a public product landing page.
 | `/` | Landing page (`landing/dist/index.html`) |
 | `/assets/*` | Landing page bundle and images |
 | `/favicon.*`, `/icon-*.png` | Landing page icons |
-| `/terminal/` | Analytics terminal (holding page with 503 when `MAINTENANCE_MODE=1`) |
+| `/terminal/` | Analytics terminal, behind the pilot login (holding page with 503 when `MAINTENANCE_MODE=1`) |
 | `/terminal/*` | Terminal bundle, images and icons (built with `base: '/terminal/'`) |
 | `/unavailable` | Holding page preview |
-| `/api/*` | JSON API used by the terminal |
+| `/api/*` | JSON API used by the terminal, behind the pilot login (401 without a session) |
+| `/api/login`, `/api/logout`, `/api/session` | Sign-in endpoints (public) |
 
 ## Configuration (`.env`)
 
@@ -48,9 +49,21 @@ feed, a React analytics terminal, and a public product landing page.
 | `PRICE_SCALE` | yes | Integer price -> decimal divisor |
 | `TERMINAL_DIST` | yes | Path to `terminal/dist` (legacy name `FRONTEND_DIST` still accepted) |
 | `LANDING_DIST` | no | Path to `landing/dist` (defaults to `<repo>/landing/dist`) |
+| `TERMINAL_USERNAME`, `TERMINAL_PASSWORD` | no | Shared pilot login for `/terminal/` and `/api/*`; both blank = no login wall |
+| `SECRET_KEY` | with login | Signs the session cookie; must be long, random and the same for every worker |
+| `SESSION_COOKIE_SECURE` | no | Default `1` (HTTPS-only cookie); set `0` only for plain-HTTP local testing |
 | `MAINTENANCE_MODE` | no | `1` swaps `/terminal/` for the holding page |
 | `DB_PATH`, `VAP_*`, `CACHE_REFRESH_MINUTES` | no | Record store and VAP job tuning, see `docs/volume-at-price.md` |
 | `SQL_SERVER`, `SQL_DATABASE`, `SQL_SCHEMA`, `SQL_TABLE` | no | Fabric SQL mirror |
+
+## Terminal login
+
+The landing page is public. "Explore the terminal" opens a sign-in dialog; the
+server checks the credentials and sets a signed, HttpOnly session cookie that
+lasts 12 hours. The check is server-side, so going straight to `/terminal/`
+without a session redirects to `/?login=1`, which opens the dialog, and the
+API answers 401. To change the credentials, edit `.env` and
+`sudo systemctl restart axioma`; changing `SECRET_KEY` signs everyone out.
 
 ## Build and run
 
