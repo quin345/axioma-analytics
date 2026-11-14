@@ -3,7 +3,8 @@ import { useState } from "react";
 const A = "/assets";
 
 const assets = {
-  mark: `${A}/ffcfa.svg`,
+  // Same official mark as the terminal header (terminal/public/assets/axioma-mark.svg).
+  mark: `${A}/axioma-mark.svg`,
   arrowDark: `${A}/f4464.svg`,
   arrowLight: `${A}/fa1b6.svg`,
   connected: `${A}/09808.svg`,
@@ -48,7 +49,7 @@ const events = [
 function Brand() {
   return (
     <a className="brand" href="#top" aria-label="AXIOMA home">
-      <img src={assets.mark} width="30" height="31" alt="" />
+      <img src={assets.mark} width="28" height="28" alt="" />
       <span>AXIOMA</span>
     </a>
   );

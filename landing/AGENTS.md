@@ -9,7 +9,7 @@ for the whole system.
 - `src/App.tsx` - the whole page (header, hero, mock terminal, sections, footer, access dialog)
 - `src/index.css` - Tailwind v4 import plus the page's hand-written styles
 - `public/assets/*.svg` - page artwork, served at `/assets/...`
-- `public/favicon.*`, `public/icon-*.png` - copies of the terminal's icon set (`terminal/scripts/make_favicon.py`)
+- `public/assets/axioma-mark.svg`, `public/favicon.*`, `public/icon-*.png` - copies of the terminal's logo and icon set (`terminal/scripts/make_favicon.py`); keep them identical
 
 ## Conventions
 
