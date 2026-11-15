@@ -25,6 +25,7 @@ feed, a React analytics terminal, and a public product landing page.
 │   └── tests/test_backend.py
 ├── terminal/           # React + Vite analytics terminal  -> served at /terminal/
 ├── landing/            # React + Vite product landing page -> served at /
+├── research/           # Quant research pipeline over webapp/data/axioma.db (research/README.md)
 └── docs/
     ├── volume-at-price.md
     └── flat-export.md
@@ -39,6 +40,7 @@ feed, a React analytics terminal, and a public product landing page.
 | `/favicon.*`, `/icon-*.png` | Landing page icons |
 | `/terminal/` | Analytics terminal, behind the pilot login (holding page with 503 when `MAINTENANCE_MODE=1`) |
 | `/terminal/*` | Terminal bundle, images and icons (built with `base: '/terminal/'`) |
+| `/research/` | Published research report (`research/site/`, built by `research/studies/build_report.py`), behind the pilot login |
 | `/unavailable` | Holding page preview |
 | `/api/*` | JSON API used by the terminal, behind the pilot login (401 without a session) |
 | `/api/login`, `/api/logout`, `/api/session` | Sign-in endpoints (public) |
@@ -54,6 +56,7 @@ feed, a React analytics terminal, and a public product landing page.
 | `TERMINAL_USERNAME`, `TERMINAL_PASSWORD` | no | Shared pilot login for `/terminal/` and `/api/*`; both blank = no login wall |
 | `SECRET_KEY` | with login | Signs the session cookie; must be long, random and the same for every worker |
 | `SESSION_COOKIE_SECURE` | no | Default `1` (HTTPS-only cookie); set `0` only for plain-HTTP local testing |
+| `RESEARCH_DIST` | no | Path to the published research site (defaults to `<repo>/research/site`) |
 | `MAINTENANCE_MODE` | no | `1` swaps `/terminal/` for the holding page |
 | `DB_PATH`, `VAP_*`, `CACHE_REFRESH_MINUTES` | no | Record store and VAP job tuning, see `docs/volume-at-price.md` |
 | `SQL_SERVER`, `SQL_DATABASE`, `SQL_SCHEMA`, `SQL_TABLE` | no | Fabric SQL mirror |

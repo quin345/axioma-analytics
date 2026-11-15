@@ -77,17 +77,24 @@ def _signed_in():
     return not _auth_enabled() or session.get("user") == cfg.auth_username
 
 
+def _gated_page(path, prefix):
+    return path == prefix or path.startswith(prefix + "/")
+
+
 @app.before_request
 def _require_login():
     path = request.path
-    gated = path == "/terminal" or path.startswith("/terminal/") or (
+    research = _gated_page(path, "/research")
+    gated = research or _gated_page(path, "/terminal") or (
         path.startswith("/api/") and path not in PUBLIC_API
     )
     if not gated or _signed_in():
         return None
     if path.startswith("/api/"):
         return jsonify(error="login required"), 401
-    return redirect(LOGIN_PAGE, code=302)
+    # The research report is behind the same pilot login; after signing in the
+    # landing page sends the visitor on to it instead of the terminal.
+    return redirect(LOGIN_PAGE + ("&next=research" if research else ""), code=302)
 
 
 @app.post("/api/login")
@@ -187,6 +194,28 @@ def terminal():
 def terminal_file(filename):
     """The terminal's built assets, favicons and app icons."""
     return send_from_directory(cfg.terminal_dist, filename)
+
+
+@app.get("/research")
+def research_redirect():
+    return redirect("/research/", code=301)
+
+
+@app.get("/research/")
+def research():
+    """The published quant research report (built by research/studies/build_report.py).
+    Behind the pilot login, like the terminal; a 404 page until a report is published."""
+    if not os.path.exists(os.path.join(cfg.research_dist, "index.html")):
+        return ("<!doctype html><title>Research</title><p>No research report has been published yet. "
+                "Run <code>research/studies/run_studies.py</code> and "
+                "<code>research/studies/build_report.py</code>.</p>"), 404
+    return send_from_directory(cfg.research_dist, "index.html")
+
+
+@app.get("/research/<path:filename>")
+def research_file(filename):
+    """Report assets (charts, the slide deck, downloadable CSV/JSON)."""
+    return send_from_directory(cfg.research_dist, filename)
 
 
 @app.get("/unavailable")

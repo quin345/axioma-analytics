@@ -26,3 +26,8 @@ dist/
 # --- Editors / agents ---
 .vscode/
 .cline/
+
+# --- Research pipeline outputs ---
+research/output/
+.ipynb_checkpoints/
+research/site/

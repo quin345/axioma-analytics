@@ -8,6 +8,8 @@ DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data
 # The landing page build, relative to the repo root; override with LANDING_DIST.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_LANDING_DIST = os.path.join(REPO_ROOT, "landing", "dist")
+# The published research report (research/studies/build_report.py); override with RESEARCH_DIST.
+DEFAULT_RESEARCH_DIST = os.path.join(REPO_ROOT, "research", "site")
 # Values that turn a flag on. Anything else (or unset) is off.
 TRUE_VALUES = {"1", "true", "yes", "on"}
 
@@ -33,6 +35,7 @@ class Config:
     auth_password: str
     secret_key: str      # signs the session cookie; shared by every worker
     cookie_secure: bool  # send the session cookie over HTTPS only
+    research_dist: str = DEFAULT_RESEARCH_DIST  # published research report, served at /research/
 
 
 def _require(name):
@@ -154,4 +157,5 @@ def load_config():
         auth_password=password,
         secret_key=secret,
         cookie_secure=os.environ.get("SESSION_COOKIE_SECURE", "1").strip().lower() in TRUE_VALUES,
+        research_dist=os.environ.get("RESEARCH_DIST", "").strip() or DEFAULT_RESEARCH_DIST,
     )

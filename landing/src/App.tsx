@@ -218,6 +218,14 @@ function Terminal({ window }: { window: number }) {
 }
 
 const TERMINAL_URL = "/terminal/";
+const RESEARCH_URL = "/research/";
+
+// The server sends unauthenticated visits to /research/ here with
+// ?login=1&next=research; after signing in they continue to the report.
+function afterLoginUrl(): string {
+  const next = new URLSearchParams(globalThis.location.search).get("next");
+  return next === "research" ? RESEARCH_URL : TERMINAL_URL;
+}
 
 function goToTerminal() {
   globalThis.location.assign(TERMINAL_URL);
@@ -234,7 +242,7 @@ async function isSignedIn(): Promise<boolean> {
   }
 }
 
-function LoginDialog({ close }: { close: () => void }) {
+function LoginDialog({ close, nextUrl }: { close: () => void; nextUrl: string }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -252,7 +260,7 @@ function LoginDialog({ close }: { close: () => void }) {
         body: JSON.stringify({ username, password }),
       });
       if (res.ok) {
-        goToTerminal();
+        globalThis.location.assign(nextUrl);
         return;
       }
       setError(res.status === 401 ? "Incorrect username or password." : "Sign-in failed. Try again.");
@@ -275,7 +283,9 @@ function LoginDialog({ close }: { close: () => void }) {
           ×
         </button>
         <Eyebrow>PILOT ACCESS</Eyebrow>
-        <h2 id="login-title">Sign in to the terminal.</h2>
+        <h2 id="login-title">
+          {nextUrl === RESEARCH_URL ? "Sign in to read the research." : "Sign in to the terminal."}
+        </h2>
         <p>Enter the credentials your AXIOMA contact shared with your desk.</p>
         <form onSubmit={submit}>
           <label>
@@ -306,7 +316,9 @@ function LoginDialog({ close }: { close: () => void }) {
             </p>
           )}
           <button className="action action-primary dialog-submit" type="submit" disabled={busy}>
-            <span>{busy ? "Signing in…" : "Enter the terminal"}</span>
+            <span>
+              {busy ? "Signing in…" : nextUrl === RESEARCH_URL ? "Open the research" : "Enter the terminal"}
+            </span>
             <Arrow dark />
           </button>
         </form>
@@ -374,17 +386,22 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(
     () => new URLSearchParams(globalThis.location.search).get("login") === "1",
   );
+  const [nextUrl, setNextUrl] = useState(afterLoginUrl);
   useEffect(() => {
     if (!loginOpen) return;
     const url = new URL(globalThis.location.href);
-    if (url.searchParams.has("login")) {
+    if (url.searchParams.has("login") || url.searchParams.has("next")) {
       url.searchParams.delete("login");
+      url.searchParams.delete("next");
       globalThis.history.replaceState(null, "", url);
     }
   }, [loginOpen]);
   const openTerminal = async () => {
     if (await isSignedIn()) goToTerminal();
-    else setLoginOpen(true);
+    else {
+      setNextUrl(TERMINAL_URL);
+      setLoginOpen(true);
+    }
   };
 
   return (
@@ -393,6 +410,7 @@ export default function App() {
         <Brand />
         <nav aria-label="Primary navigation">
           <a href="/terminal/">Terminal</a>
+          <a href="/research/">Research</a>
           <a href="#analytics">Analytics</a>
           <a href="#coverage">Coverage</a>
           <a href="#methodology">Methodology</a>
@@ -642,11 +660,12 @@ export default function App() {
         <p className="mono">© 2026 AXIOMA · MARKET MICROSTRUCTURE, RESOLVED.</p>
         <nav>
           <a href="/terminal/">Terminal</a>
+          <a href="/research/">Research</a>
           <button onClick={openDialog}>Contact</button>
         </nav>
       </footer>
       {dialogOpen && <AccessDialog close={() => setDialogOpen(false)} />}
-      {loginOpen && <LoginDialog close={() => setLoginOpen(false)} />}
+      {loginOpen && <LoginDialog close={() => setLoginOpen(false)} nextUrl={nextUrl} />}
     </main>
   );
 }

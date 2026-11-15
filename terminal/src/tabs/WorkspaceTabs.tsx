@@ -21,13 +21,15 @@ export default function WorkspaceTabs() {
       >
         Instruments
       </p>
-      <p
-        className="relative shrink-0 text-[#94a3b3]"
+      {/* Opens the published research report (served by Flask at /research/). */}
+      <a
+        className="relative shrink-0 text-[#94a3b3] no-underline"
         data-node-id="2007:7126"
-        onClick={() => actions.setTab("research")}
+        href="/research/"
+        title="Research notes: strategy and factor studies"
       >
         Research
-      </p>
+      </a>
     </div>
   );
 }

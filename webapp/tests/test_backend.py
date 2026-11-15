@@ -1447,6 +1447,44 @@ def test_export_flat_closed_market_writes_nothing():
     os.unlink(path)
 
 
+def _with_research(cfg):
+    site = pathlib.Path(tempfile.mkdtemp(prefix="axioma-research-"))
+    (site / "charts").mkdir()
+    (site / "index.html").write_text("<title>research</title>")
+    (site / "charts" / "a.png").write_bytes(b"png")
+    return dataclasses.replace(cfg, research_dist=str(site))
+
+
+def test_research_report_served():
+    with mock.patch.object(app_module, "cfg", _with_research(_built_sites())):
+        client = app_module.app.test_client()
+        assert client.get("/research").headers["Location"].endswith("/research/")
+        page = client.get("/research/")
+        assert page.status_code == 200 and b"research" in page.data
+        assert client.get("/research/charts/a.png").status_code == 200
+        assert client.get("/research/../.env").status_code == 404
+
+
+def test_research_404_until_published():
+    cfg = dataclasses.replace(_built_sites(), research_dist=tempfile.mkdtemp(prefix="axioma-empty-"))
+    with mock.patch.object(app_module, "cfg", cfg):
+        r = app_module.app.test_client().get("/research/")
+        assert r.status_code == 404 and b"No research report" in r.data
+
+
+def test_research_behind_login_and_returns_after_sign_in():
+    """The report is behind the pilot login; the redirect tells the landing
+    page to continue to /research/ after signing in."""
+    with _gated() as client, mock.patch.object(app_module, "cfg", _with_research(app_module.cfg)):
+        r = client.get("/research/")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/?login=1&next=research")
+        assert client.get("/research/charts/a.png").status_code == 302
+        assert client.get("/terminal/").headers["Location"].endswith("/?login=1")
+        assert _login(client).status_code == 200
+        assert client.get("/research/").status_code == 200
+        assert client.get("/research-notes").status_code == 404  # prefix match is exact
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:
