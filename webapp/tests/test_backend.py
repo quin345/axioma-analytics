@@ -1271,6 +1271,182 @@ def test_proxy_routes():
         assert client.get("/api/activity-days?symbol=136&days=0").status_code == 400
 
 
+class FlatReader:
+    """Kusto stand-in for export_flat: 10s buckets from 09:00 to 10:10 UTC."""
+    def __init__(self):
+        self.calls = []
+
+    def run(self, query):
+        self.calls.append(query)
+        if "first_tick" in query:
+            return [{"first_tick": "2026-11-06T09:00:00+00:00",
+                     "last_tick": "2026-11-06T10:10:00+00:00", "events": 1}]
+        if "ctidTraderAccountId, symbolId" in query and "summarize events = count(), last_seen" in query:
+            return [{"broker": "icmarkets", "ctidTraderAccountId": "48449283", "symbolId": 136}]
+        if "SERIES_RANGE" in query:
+            out = []
+            for i in range(70 * 6):                         # 70 minutes of 10s buckets
+                t = 9 * 3600 + i * 10
+                mid = 10000 + (i % 7) * 10                  # raw units (PRICE_SCALE=100)
+                out.append({"bucket": f"2026-11-06T{t // 3600:02d}:{t // 60 % 60:02d}:{t % 60:02d}Z",
+                            "best_bid": mid - 25, "best_ask": mid + 25, "events": 1 + i % 5,
+                            "imbalance_ratio": 0.0, "rel_spread": None, "rel_vwap_spread": None})
+            return out
+        if "epoch_ms" in query:
+            base = 1793955600000                            # 2026-11-06T09:00:00Z
+            return [{"epoch_ms": base + i * 250, "events": 1} for i in range(70 * 240)]
+        raise AssertionError("unexpected query: " + query[:80])
+
+
+def test_export_flat_grid_and_slot_ends():
+    import export_flat
+    from datetime import datetime, timezone
+
+    t = datetime(2026, 11, 6, 10, 7, 33, tzinfo=timezone.utc)
+    assert export_flat.floor_slot(t) == datetime(2026, 11, 6, 10, 5, tzinfo=timezone.utc)
+    ends = export_flat.slot_ends(datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc), t)
+    assert ends == [datetime(2026, 11, 6, 10, 5, tzinfo=timezone.utc)]
+    assert export_flat.parse_time("2026-11-06").hour == 0
+
+
+def test_export_flat_range_queries_are_half_open_utc():
+    from datetime import datetime, timezone
+
+    a = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    b = datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc)
+    q = app_module.queries.series_range("t", "136", a, b, 10, "48449283")
+    assert "timestamp >= datetime(2026-11-06T09:00:00Z)" in q
+    assert "timestamp < datetime(2026-11-06T10:00:00Z)" in q
+    assert "ctidTraderAccountId == '48449283'" in q and "10s" in q
+
+
+def test_export_flat_rows_match_the_api_analytics():
+    """A row's slot metrics equal analytics on exactly that slot's buckets."""
+    import export_flat
+    from datetime import datetime, timezone
+
+    cfg = app_module.cfg
+    reader = FlatReader()
+    ident = {"broker": "icmarkets", "ctid_trader_account": "48449283", "symbol_id": "136",
+             "symbol_name": None, "standardized_name": None, "asset_class": None}
+    end = datetime(2026, 11, 6, 10, 5, tzinfo=timezone.utc)
+    start_data = datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    [row] = export_flat.export_chunk(cfg, reader, ident, [end], start_data)
+
+    assert row["slot_start"] == "2026-11-06T10:00:00Z" and row["slot_end"] == "2026-11-06T10:05:00Z"
+    raw = reader.run("SERIES_RANGE")
+    slot = export_flat._scaled(raw[60 * 6:65 * 6], cfg.price_scale)   # 10:00:00..10:04:50
+    k = analytics.kpis(slot, 10)
+    assert row["events"] == k["ticks"] and row["book_buckets"] == 30
+    assert close(row["realised_vol_pct"], k["realised_vol_pct"])
+    assert close(row["spread_mean"], 0.5)
+    assert row["tick_distinct_timestamps"] == 5 * 240          # ticks in [10:00, 10:05)
+    # 1h VAP covered by the data read, 4h only partly (history starts at 09:00).
+    assert row["vap_60m_coverage"] == 1.0 and close(row["vap_240m_coverage"], 65 / 240)
+    assert row["vap_60m_poc"] is not None
+    assert set(row) >= set(export_flat.COLUMNS)
+
+
+def _metrics_db():
+    """A fresh database file for the metrics tests (each connect() opens it anew)."""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(path)
+    return path
+
+
+def test_export_flat_table_upserts_on_the_key():
+    import export_flat
+
+    path = _metrics_db()
+    conn = db_module.connect(path)
+    try:
+        base = {c: None for c in export_flat.COLUMNS}
+        a = {**base, "slot_start": "2026-11-06T10:00:00Z", "slot_end": "2026-11-06T10:05:00Z",
+             "ctid_trader_account": "1", "symbol_id": 136, "events": 5, "has_data": 1,
+             "mid_open": float("nan")}
+        assert db_module.save_metrics(conn, [a], export_flat.COLUMNS) == 1
+        db_module.save_metrics(conn, [{**a, "events": 9}], export_flat.COLUMNS)   # replaced
+        db_module.save_metrics(conn, [{**a, "symbol_id": 114}], export_flat.COLUMNS)
+        rows = conn.execute("SELECT symbol_id, events, mid_open, computed_at FROM metrics_5m "
+                            "ORDER BY symbol_id").fetchall()
+        assert [(r["symbol_id"], r["events"]) for r in rows] == [(114, 5), (136, 9)]
+        assert rows[0]["mid_open"] is None and rows[0]["computed_at"]       # NaN -> NULL
+        types = {r["name"]: r["type"] for r in conn.execute("PRAGMA table_info(metrics_5m)")}
+        assert types["slot_end"] == "TEXT" and types["events"] == "INTEGER"
+        assert types["vap_60m_poc"] == "REAL" and types["vap_60m_hvn_count"] == "INTEGER"
+        pk = [r["name"] for r in sorted(conn.execute("PRAGMA table_info(metrics_5m)"),
+                                        key=lambda r: r["pk"]) if r["pk"]]
+        assert pk == ["ctid_trader_account", "symbol_id", "slot_end"]
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_export_flat_table_adds_new_columns():
+    """A column the exporter gains later is added to an existing table, not lost."""
+    path = _metrics_db()
+    conn = db_module.connect(path)
+    try:
+        cols = ["slot_start", "slot_end", "ctid_trader_account", "symbol_id", "events"]
+        db_module.save_metrics(conn, [{"slot_end": "x", "ctid_trader_account": "1",
+                                       "symbol_id": 1, "events": 2}], cols)
+        db_module.save_metrics(conn, [{"slot_end": "y", "ctid_trader_account": "1",
+                                       "symbol_id": 1, "events": 3, "new_metric": 0.5}],
+                               cols + ["new_metric"])
+        got = conn.execute("SELECT slot_end, new_metric FROM metrics_5m ORDER BY slot_end").fetchall()
+        assert [tuple(r) for r in got] == [("x", None), ("y", 0.5)]
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_export_flat_main_writes_the_table():
+    import export_flat
+
+    path = _metrics_db()
+    with mock.patch.dict(os.environ, {"DB_PATH": path}):
+        code = export_flat.main(["--start", "2026-11-06T10:00:00Z", "--end", "2026-11-06T10:10:00Z"],
+                                reader=FlatReader())
+        assert code == 0
+        # Re-running the same range must not duplicate.
+        assert export_flat.main(["--start", "2026-11-06T10:05:00Z", "--end", "2026-11-06T10:10:00Z"],
+                                reader=FlatReader()) == 0
+        conn = db_module.connect(path)
+        try:
+            rows = conn.execute("SELECT * FROM metrics_5m ORDER BY slot_end").fetchall()
+            assert [r["slot_end"] for r in rows] == ["2026-11-06T10:05:00Z", "2026-11-06T10:10:00Z"]
+            # Coverage is measured against the feed's first tick (09:00), not --start.
+            assert rows[0]["vap_60m_coverage"] == 1.0
+            assert abs(rows[1]["vap_240m_coverage"] - 70 / 240) < 1e-9
+            assert rows[0]["symbol_id"] == 136 and rows[0]["has_data"] == 1
+            [summary] = db_module.metrics_summary(conn)
+            assert summary["slots"] == 2 and summary["live_slots"] == 2
+        finally:
+            conn.close()
+        assert export_flat.main(["--list"]) == 0
+    os.unlink(path)
+
+
+def test_export_flat_closed_market_writes_nothing():
+    import export_flat
+
+    class Silent(FlatReader):
+        def run(self, query):
+            return [] if "last_seen" in query else super().run(query)
+
+    path = _metrics_db()
+    with mock.patch.dict(os.environ, {"DB_PATH": path}):
+        assert export_flat.main(["--start", "2026-11-08T10:00:00Z", "--end", "2026-11-08T10:10:00Z"],
+                                reader=Silent()) == 0
+        conn = db_module.connect(path)
+        try:
+            assert db_module.metrics_summary(conn) == []
+        finally:
+            conn.close()
+    os.unlink(path)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:

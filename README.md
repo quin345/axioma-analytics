@@ -19,13 +19,15 @@ feed, a React analytics terminal, and a public product landing page.
 │   ├── db.py           #   local SQLite record store (webapp/data/, untracked)
 │   ├── build_vap.py    #   5-minute volume-at-price job (cron/systemd)
 │   ├── export_vap_run.py / sql_mirror.py  # daily Fabric SQL mirror
+│   ├── export_flat.py  #   5-minute research table `metrics_5m` in axioma.db (docs/flat-export.md)
 │   ├── snapshot_symbols.py
 │   ├── static/maintenance.html  # holding page (MAINTENANCE_MODE)
 │   └── tests/test_backend.py
 ├── terminal/           # React + Vite analytics terminal  -> served at /terminal/
 ├── landing/            # React + Vite product landing page -> served at /
 └── docs/
-    └── volume-at-price.md
+    ├── volume-at-price.md
+    └── flat-export.md
 ```
 
 ## Routes

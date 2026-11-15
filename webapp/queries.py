@@ -125,6 +125,56 @@ def recent_ticks(table, symbol_id, limit, account=None):
 """
 
 
+def _range(table, symbol_id, account, start, end):
+    """One instrument's rows in the half-open UTC interval [start, end).
+
+    `start` / `end` are timezone-aware datetimes, formatted here (never taken
+    as caller text), so nothing user-typed reaches the KQL. Used by the flat
+    export, which must reproduce any past slot exactly - unlike `_window`,
+    which anchors on the instrument's newest tick.
+    """
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return f"""{table}
+| where {_where(symbol_id, account)}
+    and timestamp >= datetime({start.strftime(fmt)}) and timestamp < datetime({end.strftime(fmt)})"""
+
+
+def symbols_range(table, start, end):
+    # `symbols()` over a fixed interval, so a backfill lists the instruments
+    # that actually ticked then - not just those seen in the last week.
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return f"""
+{table}
+| where timestamp >= datetime({start.strftime(fmt)}) and timestamp < datetime({end.strftime(fmt)})
+| summarize events = count(), last_seen = max(timestamp) by broker, ctidTraderAccountId, symbolId
+| order by broker asc, ctidTraderAccountId asc, symbolId asc
+"""
+
+
+def series_range(table, symbol_id, start, end, bin_seconds, account=None):
+    # `series()` over a fixed interval: last book state per bucket, the mean
+    # imbalance ratio and the event count. The flat export reads this once per
+    # slot and derives both the slot's microstructure and every VAP window.
+    return f"""// SERIES_RANGE
+{_range(table, symbol_id, account, start, end)}
+| summarize
+    arg_max(timestamp, best_bid, best_ask, rel_spread, rel_vwap_spread),
+    imbalance_ratio = avg(imbalance_ratio),
+    events = count()
+    by bucket = bin(timestamp, {bin_seconds}s)
+| order by bucket asc
+"""
+
+
+def tick_times_range(table, symbol_id, start, end, account=None):
+    # `tick_times()` over a fixed interval, for the slot's inter-arrival stats.
+    return f"""
+{_range(table, symbol_id, account, start, end)}
+| summarize events = count() by epoch_ms = datetime_diff('millisecond', timestamp, datetime(1970-01-01))
+| order by epoch_ms asc
+"""
+
+
 def vap_ticks(table, symbol_id, minutes, account=None):
     # One scan for every volume-at-price window: fetch the widest window's
     # buckets once (best_bid/best_ask per bucket plus its event count) and slice

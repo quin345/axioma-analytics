@@ -218,6 +218,100 @@ def _migrate(conn):
             conn.execute(f"ALTER TABLE symbol_mapping ADD COLUMN {column} TEXT")
 
 
+# --- 5-minute research metrics -------------------------------------------------
+#
+# `metrics_5m` is the wide research table `export_flat.py` writes: one row per
+# instrument per 5-minute slot, every metric the terminal computes. Its column
+# list belongs to the exporter (`export_flat.COLUMNS`), so the table is created
+# from that list rather than from a fixed `SCHEMA` entry, and any column added
+# to the exporter later is added here with `ALTER TABLE` on the next write.
+#
+# The primary key is the natural one - (account, symbol, slot_end) - so a
+# re-run of a slot or an overlapping backfill is an upsert, never a duplicate.
+
+METRICS_TABLE = "metrics_5m"
+METRICS_KEY = ("ctid_trader_account", "symbol_id", "slot_end")
+# Columns stored as text; every other metric is numeric.
+METRICS_TEXT = {"slot_start", "slot_end", "broker", "ctid_trader_account",
+                "symbol_name", "standardized_name", "asset_class", "computed_at"}
+METRICS_INTEGER = {"symbol_id", "has_data", "events", "book_buckets",
+                   "flow_buy_events", "flow_sell_events", "burst_count",
+                   "tick_distinct_timestamps"}
+
+
+def _metric_type(column):
+    if column in METRICS_TEXT:
+        return "TEXT"
+    if column in METRICS_INTEGER or column.endswith("_hvn_count"):
+        return "INTEGER"
+    return "REAL"
+
+
+def ensure_metrics_table(conn, columns):
+    """Create `metrics_5m` for `columns`, or add any of them it lacks. Idempotent."""
+    columns = list(columns) + ["computed_at"]
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (METRICS_TABLE,)
+    ).fetchone()
+    if exists is None:
+        body = ",\n    ".join(
+            f"{c} {_metric_type(c)}{' NOT NULL' if c in METRICS_KEY else ''}" for c in columns)
+        conn.execute(f"CREATE TABLE {METRICS_TABLE} (\n    {body},\n    "
+                     f"PRIMARY KEY ({', '.join(METRICS_KEY)})\n)")
+    else:
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({METRICS_TABLE})")}
+        for c in columns:
+            if c not in have:
+                conn.execute(f"ALTER TABLE {METRICS_TABLE} ADD COLUMN {c} {_metric_type(c)}")
+    # Research reads are "one slot range, all instruments" or "one instrument
+    # over time"; the key covers the second, this index the first.
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{METRICS_TABLE}_slot "
+                 f"ON {METRICS_TABLE} (slot_end)")
+    conn.commit()
+
+
+def save_metrics(conn, rows, columns, computed_at=None):
+    """Upsert research rows on (account, symbol, slot_end) in one transaction.
+
+    `rows` are dicts keyed by `columns`; a missing key is stored as NULL, as is
+    a NaN or infinite float. Returns the number of rows written.
+    """
+    if not rows:
+        return 0
+    ensure_metrics_table(conn, columns)
+    computed_at = computed_at or _now()
+    cols = list(columns) + ["computed_at"]
+    sql = (f"INSERT OR REPLACE INTO {METRICS_TABLE} ({', '.join(cols)}) "
+           f"VALUES ({', '.join('?' for _ in cols)})")
+    with conn:
+        conn.executemany(sql, [
+            [_metric_value(row.get(c)) for c in columns] + [computed_at] for row in rows
+        ])
+    return len(rows)
+
+
+def _metric_value(value):
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    return value
+
+
+def metrics_summary(conn):
+    """Rows, slot range and live-slot count per instrument, for `--list`."""
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (METRICS_TABLE,)
+    ).fetchone()
+    if exists is None:
+        return []
+    return [dict(r) for r in conn.execute(
+        f"""SELECT broker, ctid_trader_account, symbol_id, standardized_name,
+                   COUNT(*) AS slots, SUM(has_data) AS live_slots,
+                   MIN(slot_end) AS first_slot, MAX(slot_end) AS last_slot
+              FROM {METRICS_TABLE}
+             GROUP BY ctid_trader_account, symbol_id
+             ORDER BY broker, ctid_trader_account, symbol_id""")]
+
+
 def save_profile(conn, symbol_id, window_minutes, as_of, profile, computed_at=None):
     """Persist one window's profile for one stop. Upsert on (symbol, window, as_of).
 
