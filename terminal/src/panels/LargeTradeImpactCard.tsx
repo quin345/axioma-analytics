@@ -1,9 +1,11 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import Axes, { ACCENT, ACCENT_SELL, GRID, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { useImpact } from "../hooks/useMarketData";
-import { fitBox, valueTicks, yScale, type PlotBox } from "../lib/chart";
+import { valueTicks, yScale, type PlotBox } from "../lib/chart";
 import { fmtBpsSigned, fmtInt, fmtSigned, fmtTimeUtc } from "../lib/format";
 
 // Left: the mean impact curve. Right: the most recent bursts as a table.
@@ -20,8 +22,9 @@ function horizonLabel(s: number): string {
 // below zero it reverted.
 export default function LargeTradeImpactCard() {
   // The curve takes the card width left over by the burst table.
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOX, plotDims);
+  const box = plotBox(BOX, plotDims, card.expanded);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useImpact();
   const curve = (data?.curve ?? []).filter((c) => c.mean_bps !== null);
@@ -36,6 +39,7 @@ export default function LargeTradeImpactCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Large-trade impact"
       caption={`Mid response after activity bursts · bps · ${windowMinutes}m`}
       headline={`${horizonLabel(headlineH)} ${fmtBpsSigned(headline)} bps`}
@@ -51,7 +55,7 @@ export default function LargeTradeImpactCard() {
       }
     >
       <div className="flex gap-[12px] h-full w-full">
-        <div ref={plotRef} className="h-[144px] flex-1 min-w-0">
+        <div ref={plotRef} className="h-full flex-1 min-w-0">
           <Plot box={box} label="Mean signed mid response after activity bursts">
             <Axes box={box} yTicks={valueTicks(scale, 4, (v) => fmtSigned(v, 1))} />
             <line x1={box.left} x2={box.right} y1={zero} y2={zero} stroke={LABEL} strokeDasharray="2 3" />

@@ -1,9 +1,11 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import Axes, { ACCENT, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { useVolatility, VOL_WINDOW_BUCKETS } from "../hooks/useMarketData";
-import { linePath, timeTicks, valueTicks, xAt, yScale, fitBox, type PlotBox } from "../lib/chart";
+import { linePath, timeTicks, valueTicks, xAt, yScale, type PlotBox } from "../lib/chart";
 import { formatKpis, fmtTimeUtc } from "../lib/format";
 import { BIN_SECONDS } from "../lib/window";
 
@@ -12,8 +14,9 @@ const BOX: PlotBox = { width: 482, height: 154, left: 40, right: 468, top: 12, b
 // Rolling realised volatility: annualised stdev of 10-second mid log returns
 // over a trailing 30-minute window, one point per bucket.
 export default function RollingVolatilityCard() {
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOX, plotDims);
+  const box = plotBox(BOX, plotDims, card.expanded);
   const { symbolId, windowMinutes, summary } = useMarket();
   const k = formatKpis(summary);
   const { data, error } = useVolatility();
@@ -26,6 +29,7 @@ export default function RollingVolatilityCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Rolling volatility"
       caption={`Annualised % · ${rollMin}m rolling / ${BIN_SECONDS}s returns · ${windowMinutes}m`}
       headline={hasData ? `${values[last].toFixed(2)}% · win ${k.vol}` : k.vol}

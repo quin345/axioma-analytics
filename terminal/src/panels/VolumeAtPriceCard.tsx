@@ -1,9 +1,10 @@
 import { useCardState } from "../hooks/useCardState";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import { useMarket } from "../context/MarketContext";
 import { useVolumeAtPrice } from "../hooks/useMarketData";
 import { emptyReason } from "./ChartCard";
-import { buildVapLadder, fitBox, VAP_PLOT } from "../lib/chart";
+import { buildVapLadder, VAP_PLOT } from "../lib/chart";
 import { fmtPrice, fmtVolume } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
@@ -15,7 +16,7 @@ const POC = "#79d9ee";
 export default function VolumeAtPriceCard() {
   const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(VAP_PLOT, plotDims);
+  const box = plotBox(VAP_PLOT, plotDims, card.expanded);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useVolumeAtPrice();
   const model = buildVapLadder(data, fmtPrice, fmtVolume, box);
@@ -83,7 +84,7 @@ export default function VolumeAtPriceCard() {
       {hasProfile ? (
         <div
           ref={plotRef}
-          className="h-[166px] overflow-clip relative shrink-0 w-full"
+          className={`overflow-clip relative w-full ${card.expanded ? "flex-1 min-h-0" : "h-[166px] shrink-0"}`}
           data-name="Analytical plot"
         >
           <svg

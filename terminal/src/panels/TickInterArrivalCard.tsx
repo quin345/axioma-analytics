@@ -1,9 +1,11 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import Axes, { ACCENT, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { useTickGaps } from "../hooks/useMarketData";
-import { valueTicks, yScale, fitBox, type PlotBox } from "../lib/chart";
+import { valueTicks, yScale, type PlotBox } from "../lib/chart";
 import { fmtInt } from "../lib/format";
 
 const BOX: PlotBox = { width: 481, height: 154, left: 40, right: 478, top: 8, bottom: 136 };
@@ -15,8 +17,9 @@ function edge(ms: number): string {
 // Tick inter-arrival: the distribution of gaps between distinct event
 // timestamps, in log-spaced millisecond bins, as a share of all gaps.
 export default function TickInterArrivalCard() {
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOX, plotDims);
+  const box = plotBox(BOX, plotDims, card.expanded);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useTickGaps();
   const bins = data?.bins ?? [];
@@ -30,6 +33,7 @@ export default function TickInterArrivalCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Tick inter-arrival"
       caption={`Event gap distribution · ms · ${windowMinutes}m`}
       headline={`MED ${median === null ? "—" : fmtInt(median)} ms`}

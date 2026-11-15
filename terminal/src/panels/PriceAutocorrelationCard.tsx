@@ -1,9 +1,11 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import Axes, { ACCENT, ACCENT_SELL, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { ACF_MAX_LAG, useAcf } from "../hooks/useMarketData";
-import { valueTicks, yScale, fitBox, type PlotBox } from "../lib/chart";
+import { valueTicks, yScale, type PlotBox } from "../lib/chart";
 import { fmtInt, fmtSigned } from "../lib/format";
 
 const BOX: PlotBox = { width: 742, height: 144, left: 40, right: 738, top: 8, bottom: 126 };
@@ -12,8 +14,9 @@ const BOX: PlotBox = { width: 742, height: 144, left: 40, right: 738, top: 8, bo
 // white-noise band. Negative lag-1 is the bid-ask bounce / mean reversion;
 // bars outside the band are significant.
 export default function PriceAutocorrelationCard() {
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOX, plotDims);
+  const box = plotBox(BOX, plotDims, card.expanded);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useAcf();
   const lags = (data?.lags ?? []).filter((l) => l.acf !== null) as { lag: number; acf: number }[];
@@ -27,6 +30,7 @@ export default function PriceAutocorrelationCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Price-behaviour autocorrelation"
       caption={`10s mid-return ACF · 95% band ±${band === null ? "—" : band.toFixed(3)} · n=${fmtInt(data?.n ?? null)} · ${windowMinutes}m`}
       headline={`LAG 1  ${fmtSigned(lag1, 2)}`}

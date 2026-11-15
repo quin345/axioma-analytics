@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from "react";
-import { useCardState } from "../hooks/useCardState";
+import { useCardState, type CardState } from "../hooks/useCardState";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
 // The analytics-card shell every chart panel shares, lifted from the Figma
@@ -18,8 +18,13 @@ type Props = {
   // Card height and its share of the row, from the design grid
   // (e.g. "h-[248px] flex-[509_1_0px]" for a 509px-wide Figma card).
   size: string;
-  // Plot height (e.g. "h-[166px]"). The plot is always full card width.
+  // Plot height (e.g. "h-[166px]"). The plot is always full card width; when
+  // the card is expanded it takes the card's remaining height instead.
   plotSize: string;
+  // The card's collapse / expand / highlight state. Pass it when the panel
+  // needs to know (e.g. to size its SVG box for the expanded card); otherwise
+  // the card keeps its own.
+  card?: CardState;
   // Measures the plot area so the panel can fit its SVG to it.
   plotRef?: Ref<HTMLDivElement>;
   dataNodeId?: string;
@@ -37,6 +42,7 @@ export default function ChartCard({
   headline,
   size,
   plotSize,
+  card: cardProp,
   plotRef,
   dataNodeId,
   hasData,
@@ -44,7 +50,8 @@ export default function ChartCard({
   footnote,
   children,
 }: Props) {
-  const card = useCardState();
+  const ownCard = useCardState();
+  const card = cardProp ?? ownCard;
   return (
     <div
       className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] items-start min-w-0 overflow-clip p-[14px] relative rounded-[6px] ${size} ${card.className}`}
@@ -89,7 +96,7 @@ export default function ChartCard({
       {hasData ? (
         <div
           ref={plotRef}
-          className={`overflow-clip relative shrink-0 w-full ${plotSize}`}
+          className={`overflow-clip relative w-full ${card.expanded ? "flex-1 min-h-0" : `shrink-0 ${plotSize}`}`}
           data-name="Analytical plot"
         >
           {children}

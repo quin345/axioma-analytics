@@ -126,6 +126,15 @@ export function fetchVolumeAtPrice(
   return getJson<VolumeAtPriceProfile | null>("/api/volume-at-price", scope(ref, { window: minutes }));
 }
 
+// Every lookback's recorded profile for the instrument, keyed by window minutes
+// ("60", "120", ...). Read-only: unlike /api/volume-at-price it never derives
+// (and records) a missing profile, it only returns what is already stored.
+export function fetchVolumeAtPriceWindows(
+  ref: InstrumentRef,
+): Promise<Record<string, VolumeAtPriceProfile>> {
+  return getJson<Record<string, VolumeAtPriceProfile>>("/api/volume-at-price/windows", scope(ref));
+}
+
 // Re-derive every window's volume-at-price profile from the feed and record
 // it. The control bar's Run button.
 export function refreshVolumeAtPrice(ref: InstrumentRef): Promise<unknown> {

@@ -13,6 +13,7 @@ import {
   fetchTicks,
   fetchVolatility,
   fetchVolumeAtPrice,
+  fetchVolumeAtPriceWindows,
 } from "../api/endpoints";
 import type {
   AssetClassCount,
@@ -150,4 +151,15 @@ export function useVolumeAtPrice(): PollState<VolumeAtPriceProfile | null> {
   const { ref, key, minutes } = useScope();
   const load = ref ? () => fetchVolumeAtPrice(ref, minutes) : null;
   return usePoll(load, [key, minutes], VAP_REFRESH_MS);
+}
+
+// Every stored lookback's profile, for the price panel's volume-profile
+// overlay. Only polls while the overlay is on (`enabled`), so the panel makes
+// no extra request in its default state.
+export function useVolumeProfiles(
+  enabled: boolean,
+): PollState<Record<string, VolumeAtPriceProfile>> {
+  const { ref, key } = useScope();
+  const load = enabled && ref ? () => fetchVolumeAtPriceWindows(ref) : null;
+  return usePoll(load, [key, enabled], VAP_REFRESH_MS);
 }

@@ -1,9 +1,10 @@
 import { useCardState } from "../hooks/useCardState";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import { useMarket } from "../context/MarketContext";
 import { useSpread } from "../hooks/useMarketData";
 import { emptyReason } from "./ChartCard";
-import { buildSpreadChart, fitBox, SPREAD_PLOT } from "../lib/chart";
+import { buildSpreadChart, SPREAD_PLOT } from "../lib/chart";
 import { fmtBps, fmtTimeUtc } from "../lib/format";
 import { imgChevronDown, imgEllipsis, imgMaximize2 } from "../assets";
 
@@ -14,7 +15,7 @@ const LINE = "#79d9ee";
 export default function BidAskSpreadCard() {
   const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(SPREAD_PLOT, plotDims);
+  const box = plotBox(SPREAD_PLOT, plotDims, card.expanded);
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useSpread();
   const model = buildSpreadChart(data?.series ?? [], fmtBps, fmtTimeUtc, box);
@@ -105,7 +106,7 @@ export default function BidAskSpreadCard() {
       {model.hasSeries ? (
         <div
           ref={plotRef}
-          className="h-[166px] overflow-clip relative shrink-0 w-full"
+          className={`overflow-clip relative w-full ${card.expanded ? "flex-1 min-h-0" : "h-[166px] shrink-0"}`}
           data-node-id="2007:7462"
           data-name="Analytical plot"
         >

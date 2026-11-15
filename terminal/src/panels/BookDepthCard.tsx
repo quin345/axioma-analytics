@@ -1,17 +1,20 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import { ACCENT, ACCENT_SELL, GRID, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { useBook } from "../hooks/useMarketData";
-import { BOOK_PLOT, buildBookDepth, fitBox } from "../lib/chart";
+import { BOOK_PLOT, buildBookDepth } from "../lib/chart";
 import { fmtPrice, fmtTimeUtc, fmtVolume } from "../lib/format";
 
 // Book depth from the newest two-sided snapshot: cumulative resting size per
 // level, bids growing left from the centre, asks growing right, nearest the
 // touch on the top row. Real data - the feed's own `bids` / `asks` ladder.
 export default function BookDepthCard() {
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOOK_PLOT, plotDims);
+  const box = plotBox(BOOK_PLOT, plotDims, card.expanded);
   const { symbolId, live } = useMarket();
   const { data, error } = useBook();
   const model = buildBookDepth(data, fmtVolume, box);
@@ -21,6 +24,7 @@ export default function BookDepthCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Book depth"
       caption={`Cumulative resting size · ${model.rowCount} levels${data && !live ? ` · as of ${fmtTimeUtc(data.timestamp)}` : ""}`}
       headline={`B ${fmtVolume(model.bidTotal)} / A ${fmtVolume(model.askTotal)}`}

@@ -1,9 +1,11 @@
+import { useCardState } from "../hooks/useCardState";
 import ChartCard, { emptyReason } from "./ChartCard";
 import { useElementSize } from "../hooks/useElementSize";
+import { plotBox } from "../charts/geometry";
 import Axes, { ACCENT, BAR, LABEL, MONO, Plot } from "../charts/Axes";
 import { useMarket } from "../context/MarketContext";
 import { ACTIVITY_HOUR_DAYS, useActivityByHour } from "../hooks/useMarketData";
-import { valueTicks, yScale, fitBox, type PlotBox } from "../lib/chart";
+import { valueTicks, yScale, type PlotBox } from "../lib/chart";
 import { fmtCompact } from "../lib/format";
 
 const BOX: PlotBox = { width: 481, height: 154, left: 40, right: 478, top: 8, bottom: 136 };
@@ -11,8 +13,9 @@ const BOX: PlotBox = { width: 481, height: 154, left: 40, right: 478, top: 8, bo
 // Activity by hour of day (UTC): book events per hour over the instrument's
 // last week, averaged per day. The current UTC hour is highlighted.
 export default function ActivityByHourCard() {
+  const card = useCardState();
   const [plotRef, plotDims] = useElementSize();
-  const box = fitBox(BOX, plotDims);
+  const box = plotBox(BOX, plotDims, card.expanded);
   const { symbolId } = useMarket();
   const { data, error } = useActivityByHour();
   const byHour = new Array<number>(24).fill(0);
@@ -26,6 +29,7 @@ export default function ActivityByHourCard() {
 
   return (
     <ChartCard
+      card={card}
       title="Activity by hour"
       caption={`Events per hour, ${ACTIVITY_HOUR_DAYS}-day average · UTC`}
       headline={`PEAK ${fmtCompact(peak)} @ ${String(peakHour).padStart(2, "0")}h`}
