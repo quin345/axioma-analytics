@@ -19,9 +19,12 @@ export default function BidAskSpreadCard() {
   const { symbolId, windowMinutes } = useMarket();
   const { data, error } = useSpread();
   const model = buildSpreadChart(data?.series ?? [], fmtBps, fmtTimeUtc, box);
-  // The header reads the series' own mean, so the number matches the line drawn
-  // under it rather than the price window's average.
-  const avgLabel = fmtBps(data?.mean ?? null);
+  // The header averages the series' relative spread (bps of mid), the same values
+  // the line draws. `data.mean` is the absolute spread in price units, so it is not
+  // used here: scaling it to bps gives a meaningless number.
+  const relValues = (data?.series ?? []).map((p) => p.rel_spread).filter((v): v is number => v !== null);
+  const relMean = relValues.length ? relValues.reduce((a, b) => a + b, 0) / relValues.length : null;
+  const avgLabel = fmtBps(relMean);
 
   return (
     <div
