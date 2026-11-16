@@ -1,6 +1,7 @@
 """Closing sections of the /research/ report and the section/TOC assembly."""
 from build_report import chart, num, tone
 from report_glossary import glossary_data
+from report_panel_guide import panel_guide
 from report_sections import h1, h2, h3, hero, method
 
 
@@ -63,6 +64,8 @@ def sections(r):
            ("h1-maker", "Adverse selection", True), ("h1-oos", "Unseen data", True),
            ("h2", "H2 · Flow momentum", False), ("h2-checks", "Stress tests", True), ("h2-ic", "By horizon", True),
            ("h3", "H3 · Reversal", False), ("compare", "Side by side", False), ("limits", "Limitations", False),
-           ("next", "Next steps", False), ("glossary", "Glossary", False), ("data", "Data & re-run", False)]
-    body = hero(r) + method(r) + h1(r) + h2(r) + h3(r) + compare(r) + limits_next(r) + glossary_data(r)
+           ("next", "Next steps", False), ("panel-guide", "Panel guide", False),
+           ("glossary", "Glossary", False), ("data", "Data & re-run", False)]
+    body = (hero(r) + method(r) + h1(r) + h2(r) + h3(r) + compare(r) + limits_next(r) + panel_guide()
+            + glossary_data(r))
     return toc, body

@@ -31,3 +31,6 @@ dist/
 research/output/
 .ipynb_checkpoints/
 research/site/
+
+# Embedding store (separate from webapp/data/axioma.db)
+research/data/
