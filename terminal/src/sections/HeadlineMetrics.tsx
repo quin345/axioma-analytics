@@ -14,12 +14,12 @@ export default function HeadlineMetrics() {
   const k = formatKpis(summary);
   return (
     <div
-      className="[word-break:break-word] content-stretch flex gap-[8px] items-start not-italic overflow-clip relative shrink-0 w-full"
+      className="[word-break:break-word] content-stretch flex gap-[8px] items-stretch not-italic overflow-clip relative shrink-0 w-full"
       data-node-id="2007:7184"
       data-name="Headline metrics"
     >
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7185"
         data-name="KPI tile"
       >
@@ -43,7 +43,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7189"
         data-name="KPI tile"
       >
@@ -67,7 +67,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7193"
         data-name="KPI tile"
       >
@@ -92,7 +92,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7197"
         data-name="KPI tile"
       >
@@ -102,12 +102,14 @@ export default function HeadlineMetrics() {
         >
           High / low
         </p>
-        <p
-          className="font-mono leading-[normal] min-w-full relative shrink-0 text-[#e7edf3] text-[23px] w-[min-content]"
+        {/* Two fixed lines at 14px so the tile matches the height of the single-line values. */}
+        <div
+          className="font-mono leading-[18px] min-w-full relative shrink-0 text-[#e7edf3] text-[20px] whitespace-nowrap"
           data-node-id="2007:7199"
         >
-          {k.highLow}
-        </p>
+          <p>H {k.high}</p>
+          <p>L {k.low}</p>
+        </div>
         <p
           className="font-mono leading-[1.4] relative shrink-0 text-[#94a3b3] text-[9px] whitespace-nowrap"
           data-node-id="2007:7200"
@@ -116,7 +118,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7201"
         data-name="KPI tile"
       >
@@ -140,7 +142,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7205"
         data-name="KPI tile"
       >
@@ -164,7 +166,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7209"
         data-name="KPI tile"
       >
@@ -188,7 +190,7 @@ export default function HeadlineMetrics() {
         </p>
       </div>
       <div
-        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start min-w-px overflow-clip p-[14px] relative rounded-[4px]"
+        className="bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-[1_0_0] flex-col gap-[8px] items-start justify-between min-w-px overflow-clip p-[14px] relative rounded-[4px]"
         data-node-id="2007:7213"
         data-name="KPI tile"
       >

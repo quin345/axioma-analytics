@@ -77,7 +77,7 @@ export default function PriceVolumeCard() {
 
   return (
     <div
-      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[312px] items-start overflow-clip p-[14px] min-w-0 relative rounded-[6px] flex-[1024_1_0px] ${card.className}`}
+      className={`bg-[#11161d] border border-[#29323d] border-solid content-stretch flex flex-col gap-[8px] h-[248px] items-start overflow-clip p-[14px] min-w-0 relative rounded-[6px] flex-[1024_1_0px] ${card.className}`}
       data-node-id="2007:7222"
       data-name="Analytics card"
     >
@@ -193,7 +193,7 @@ export default function PriceVolumeCard() {
         >{`${k.last}  /  ${k.change}`}</p>
       </div>
       <div
-        className={`overflow-clip relative w-full ${card.expanded ? "flex-1 min-h-0" : "h-[230px] shrink-0"}`}
+        className={`overflow-clip relative w-full ${card.expanded ? "flex-1 min-h-0" : "h-[166px] shrink-0"}`}
         data-node-id="2007:7233"
         data-name="Analytical plot"
       >
