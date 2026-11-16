@@ -1,6 +1,17 @@
+import { useEffect, useState } from "react";
 import { useMarket } from "../context/MarketContext";
 import { imgAxiomaMark, imgLiveIndicator, imgSettings2 } from "../assets";
 import WorkspaceTabs from "../tabs/WorkspaceTabs";
+
+// Live UTC clock, HH:MM:SS, ticking once a second.
+function UtcClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return <>{now.toISOString().slice(11, 19)} UTC</>;
+}
 
 export default function TerminalHeader() {
   const { live, status } = useMarket();
@@ -79,7 +90,7 @@ export default function TerminalHeader() {
           className="[word-break:break-word] font-mono leading-[1.4] not-italic relative shrink-0 text-[#94a3b3] text-[10px] whitespace-nowrap"
           data-node-id="2007:7131"
         >
-          UPDATED 16:00:00 UTC
+          <UtcClock />
         </p>
         <div
           className="relative shrink-0 size-[14px]"
