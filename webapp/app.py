@@ -310,8 +310,15 @@ def _text(value):
 
 
 def _mapping_by_triple(conn):
-    """The snapshot keyed by (broker, account, symbol id) - the catalogue's key."""
-    return {_triple(row): row for row in db.load_symbol_mapping(conn)}
+    """The mapping keyed by (broker, account, symbol id) - the catalogue's key.
+
+    The Fabric snapshot is the base. Hand-maintained `symbol_manual` rows are
+    laid over it, so a manual name wins for its triple and survives a re-run of
+    the snapshot (which replaces `symbol_mapping` wholesale).
+    """
+    mapping = {_triple(row): row for row in db.load_symbol_mapping(conn)}
+    mapping.update({_triple(row): row for row in db.load_symbol_manual(conn)})
+    return mapping
 
 
 def _instrument(row, mapped):

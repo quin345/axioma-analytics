@@ -21,6 +21,7 @@ feed, a React analytics terminal, and a public product landing page.
 │   ├── export_vap_run.py / sql_mirror.py  # daily Fabric SQL mirror
 │   ├── export_flat.py  #   5-minute research table `metrics_5m` in axioma.db (docs/flat-export.md)
 │   ├── snapshot_symbols.py
+│   ├── load_symbols.py / symbols_manual.csv  # hand-maintained instrument names (symbol_manual)
 │   ├── static/maintenance.html  # holding page (MAINTENANCE_MODE)
 │   └── tests/test_backend.py
 ├── terminal/           # React + Vite analytics terminal  -> served at /terminal/

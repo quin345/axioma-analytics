@@ -126,6 +126,22 @@ CREATE TABLE IF NOT EXISTS symbol_mapping (
     PRIMARY KEY (broker, ctid_trader_account, symbol_id)
 );
 
+-- Hand-maintained instrument names, loaded from webapp/symbols_manual.csv by
+-- load_symbols.py. Kept apart from symbol_mapping on purpose: the Fabric snapshot
+-- replaces that table wholesale on every run, which would wipe these rows. The
+-- app overlays this table on the snapshot, so a manual row wins for its triple.
+-- Same key and column names as symbol_mapping, minus captured_at.
+CREATE TABLE IF NOT EXISTS symbol_manual (
+    broker              TEXT    NOT NULL,
+    ctid_trader_account TEXT    NOT NULL,
+    symbol_id           INTEGER NOT NULL,
+    symbol_name         TEXT    NOT NULL,
+    standardized_name   TEXT    NOT NULL,
+    asset_class         TEXT    NOT NULL,
+    updated_at          TEXT    NOT NULL,
+    PRIMARY KEY (broker, ctid_trader_account, symbol_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_vap_run_lookup
     ON vap_run (symbol_id, window_minutes, as_of DESC);
 
@@ -627,6 +643,42 @@ def load_symbol_mapping(conn, broker=None, account=None):
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY broker, ctid_trader_account, symbol_id"
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def upsert_symbol_manual(conn, rows, updated_at=None):
+    """Write hand-maintained instrument names into `symbol_manual`.
+
+    `rows` are `(broker, ctid_trader_account, symbol_id, symbol_name, asset_class)`
+    tuples, the same shape `replace_symbol_mapping` takes. The standardized name
+    and the canonical asset class are derived here, exactly as for the snapshot,
+    so a manual row and a snapshot row read the same way. Re-running with the
+    same key updates the row in place; nothing else in the table is touched.
+    Returns the number of rows written.
+    """
+    updated_at = updated_at or _now()
+    conn.executemany(
+        "INSERT OR REPLACE INTO symbol_manual "
+        "(broker, ctid_trader_account, symbol_id, symbol_name, "
+        " standardized_name, asset_class, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(broker, str(account), int(symbol_id), name,
+          standardize_symbol(name), canonical_asset_class(asset_class), updated_at)
+         for broker, account, symbol_id, name, asset_class in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def load_symbol_manual(conn):
+    """Every hand-maintained row, shaped like `load_symbol_mapping`'s output.
+
+    `captured_at` is filled from `updated_at` so a reader can treat the two
+    tables' rows the same way.
+    """
+    sql = ("SELECT broker, ctid_trader_account, symbol_id, symbol_name, "
+           "standardized_name, asset_class, updated_at AS captured_at "
+           "FROM symbol_manual ORDER BY broker, ctid_trader_account, symbol_id")
+    return [dict(row) for row in conn.execute(sql).fetchall()]
 
 
 def _hours_ago(hours):

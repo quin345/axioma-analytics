@@ -1485,6 +1485,108 @@ def test_research_behind_login_and_returns_after_sign_in():
         assert client.get("/research-notes").status_code == 404  # prefix match is exact
 
 
+# --- Hand-maintained symbol names (symbol_manual) ---------------------------
+
+def _tmp_db(name):
+    path = os.path.join(tempfile.gettempdir(), f"axioma-test-{name}-{os.getpid()}.db")
+    if os.path.exists(path):
+        os.remove(path)
+    return path
+
+
+def test_manual_symbol_overlays_the_snapshot_for_its_triple():
+    """A manual row wins over the snapshot for the same triple, and only there."""
+    path = _tmp_db("manual-overlay")
+    conn = db_module.connect(path)
+    try:
+        db_module.replace_symbol_mapping(conn, [
+            ("acgmarkets", "49208255", 136, "XAUUSD.pro", "Metals (Pro)"),
+            ("acgmarkets", "49208255", 114, "EURCHF.pro", "Forex (Spot)"),
+        ])
+        db_module.upsert_symbol_manual(conn, [
+            ("acgmarkets", "49208255", 136, "Gold", "commodities"),
+        ])
+    finally:
+        conn.close()
+
+    cfg = dataclasses.replace(app_module.cfg, db_path=path)
+    feed = [feed_row("acgmarkets", "49208255", 136), feed_row("acgmarkets", "49208255", 114)]
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", FakeSymbolReader(feed)):
+        gold, chf = app_module.app.test_client().get("/api/symbols").json
+
+    assert gold["standardizedName"] == "Gold" and gold["assetClass"] == "Commodities"
+    # The untouched triple still shows the snapshot's name.
+    assert chf["standardizedName"] == "EURCHF" and chf["assetClass"] == "FX"
+
+
+def test_manual_symbol_survives_a_snapshot_rerun():
+    """replace_symbol_mapping clears symbol_mapping; symbol_manual must be untouched."""
+    path = _tmp_db("manual-survives")
+    conn = db_module.connect(path)
+    try:
+        db_module.upsert_symbol_manual(conn, [
+            ("acgmarkets", "49208255", 136, "XAUUSD", "Commodities"),
+        ])
+        db_module.replace_symbol_mapping(conn, [])
+        db_module.replace_symbol_mapping(conn, [
+            ("acgmarkets", "49208255", 1, "EURUSD", "Forex (Spot)"),
+        ])
+        manual = db_module.load_symbol_manual(conn)
+    finally:
+        conn.close()
+    assert [(r["symbol_id"], r["standardized_name"], r["asset_class"]) for r in manual] == \
+        [(136, "XAUUSD", "Commodities")]
+
+
+def test_manual_symbol_upsert_updates_in_place():
+    path = _tmp_db("manual-upsert")
+    conn = db_module.connect(path)
+    try:
+        db_module.upsert_symbol_manual(conn, [("acgmarkets", "49208255", 136, "XAU", "Metals")])
+        db_module.upsert_symbol_manual(conn, [("acgmarkets", "49208255", 136, "XAUUSD.pro", "Metals")])
+        got = db_module.load_symbol_manual(conn)
+    finally:
+        conn.close()
+    assert len(got) == 1
+    assert got[0]["symbol_name"] == "XAUUSD.pro" and got[0]["standardized_name"] == "XAUUSD"
+    assert got[0]["asset_class"] == "Commodities"
+
+
+def test_load_symbols_reads_the_seed_file():
+    import load_symbols
+    rows = load_symbols.read_rows(load_symbols.DEFAULT_CSV)
+    assert ("acgmarkets", "49208255", 136, "XAUUSD", "Commodities") in rows
+
+
+def test_load_symbols_refuses_a_row_without_its_account():
+    import load_symbols
+    path = _tmp_db("symbols-csv")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("broker,ctid_trader_account,symbol_id,symbol_name,asset_class\n"
+                     "acgmarkets,,136,XAUUSD,Commodities\n")
+    try:
+        load_symbols.read_rows(path)
+    except load_symbols.SymbolFileError as exc:
+        assert "ctid_trader_account" in str(exc) and ":2:" in str(exc)
+    else:
+        raise AssertionError("a row with no account must be refused")
+
+
+def test_load_symbols_refuses_a_non_numeric_symbol_id():
+    import load_symbols
+    path = _tmp_db("symbols-csv-bad")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("broker,ctid_trader_account,symbol_id,symbol_name,asset_class\n"
+                     "acgmarkets,49208255,XAUUSD,XAUUSD,Commodities\n")
+    try:
+        load_symbols.read_rows(path)
+    except load_symbols.SymbolFileError as exc:
+        assert "symbol_id" in str(exc)
+    else:
+        raise AssertionError("a non-numeric symbol_id must be refused")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for t in tests:
