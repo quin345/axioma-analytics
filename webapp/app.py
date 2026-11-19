@@ -262,8 +262,28 @@ def symbols():
 
 
 def _collected_instruments():
-    """The collected (broker, account, symbol) rows from the feed."""
-    return reader.run(queries.symbols(cfg.table))
+    """The collected (broker, account, symbol) rows from the feed.
+
+    If the feed cannot be reached, fall back to the local catalogue (manual rows
+    over the Fabric snapshot) so the instrument list is not empty. Those rows
+    carry no `last_seen`, which the UI reads as not live. The failure is logged,
+    so an outage is visible in the journal rather than hidden by the fallback.
+    """
+    try:
+        return reader.run(queries.symbols(cfg.table))
+    except Exception:
+        app.logger.warning("feed unreachable; listing instruments from the local catalogue",
+                           exc_info=True)
+        conn = db.connect(cfg.db_path)
+        try:
+            catalogue = _mapping_by_triple(conn)
+        finally:
+            conn.close()
+        return [{"broker": row["broker"],
+                 "ctidTraderAccountId": row["ctid_trader_account"],
+                 "symbolId": row["symbol_id"],
+                 "last_seen": None}
+                for row in catalogue.values()]
 
 
 def _triple(row):

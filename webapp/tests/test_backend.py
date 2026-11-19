@@ -1520,6 +1520,35 @@ def test_manual_symbol_overlays_the_snapshot_for_its_triple():
     assert chf["standardizedName"] == "EURCHF" and chf["assetClass"] == "FX"
 
 
+class DeadReader:
+    """A feed that cannot be reached, as when its hostname stops resolving."""
+
+    def run(self, query):
+        raise OSError("name resolution failed")
+
+
+def test_symbols_fall_back_to_the_catalogue_when_the_feed_is_down():
+    path = _tmp_db("feed-down")
+    conn = db_module.connect(path)
+    try:
+        db_module.upsert_symbol_manual(conn, [("acgmarkets", "49208255", 136, "XAUUSD", "Commodities")])
+    finally:
+        conn.close()
+
+    cfg = dataclasses.replace(app_module.cfg, db_path=path)
+    with mock.patch.object(app_module, "cfg", cfg), \
+         mock.patch.object(app_module, "reader", DeadReader()):
+        client = app_module.app.test_client()
+        symbols = client.get("/api/symbols")
+        classes = client.get("/api/asset-classes")
+
+    assert symbols.status_code == 200 and classes.status_code == 200
+    (gold,) = symbols.json
+    assert gold["symbolId"] == "136" and gold["standardizedName"] == "XAUUSD"
+    assert gold["assetClass"] == "Commodities" and gold["lastSeen"] is None
+    assert {c["assetClass"]: c["count"] for c in classes.json}["Commodities"] == 1
+
+
 def test_manual_symbol_survives_a_snapshot_rerun():
     """replace_symbol_mapping clears symbol_mapping; symbol_manual must be untouched."""
     path = _tmp_db("manual-survives")
