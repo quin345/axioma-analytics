@@ -1,0 +1,47 @@
+# cTrader DEMO autotrader (poc_reversion_4h forward test) - installed copy lives at
+# /etc/systemd/system/ctrader-autotrade.service. Runs as root because the repo,
+# .env (0600) and venv live under /root on this host; systemd sandboxing below
+# limits what it can touch instead: everything is read-only except state/ and logs/.
+#
+#   systemctl start|stop|restart|status ctrader-autotrade
+#   journalctl -u ctrader-autotrade -f
+#
+# Restart policy: restarts after a crash or lost connection (non-zero exit), but NOT
+# after a clean stop, the KILL file (exit 0), a refused/live account (exit 2) or SAFE
+# mode such as an expired token (exit 3) - those need a human.
+
+[Unit]
+Description=cTrader demo autotrader (poc_reversion_4h forward test)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/axioma-analytics/ctrader_autotrade
+ExecStart=/root/axioma-analytics/ctrader_autotrade/.venv/bin/autotrade run --mode demo --exec taker
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=2 3
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# Resource caps: this host also serves the production webapp.
+Nice=10
+MemoryMax=512M
+CPUQuota=50%
+
+# Sandboxing (in place of a dedicated user).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/root/axioma-analytics/ctrader_autotrade/state /root/axioma-analytics/ctrader_autotrade/logs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

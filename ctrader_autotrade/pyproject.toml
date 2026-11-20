@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autotrade"
+version = "0.1.0"
+description = "cTrader demo autotrader for the poc_reversion_4h hypothesis (forward test)"
+requires-python = ">=3.11"
+
+[project.scripts]
+autotrade = "autotrade.__main__:main"
+
+[tool.setuptools]
+packages = ["autotrade"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,13 @@
+# Credentials and local state - never commit
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+logs/
+.venv/
+__pycache__/
+state/
+*.egg-info/
+.pytest_cache/

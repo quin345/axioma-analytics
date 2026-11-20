@@ -1,0 +1,40 @@
+# Non-secret settings (secrets live in .env). Defaults from DESIGN.md sections 2 and 5.
+symbols = ["XAUUSD", "BTCUSD"]
+host = "demo.ctraderapi.com"
+port = 5035
+label = "axq-poc4h-v1"
+state_dir = "state"
+log_dir = "logs"
+
+[aliases]
+XAUUSD = ["XAUUSD.pro", "GOLD"]
+BTCUSD = ["BTCUSD.pro", "BITCOIN"]
+
+[strategy]
+entry_z = 1.0
+vol_shrink_z = 2.0
+confirm_range = "off"
+exec = "taker"
+limit_ttl_s = 120
+rollover_same_side = true
+exit_mode = "taker"
+stop_k = 4.0
+grace_s = 2
+warmup_hours = 9
+
+[risk]
+base_size_x_min = 2
+max_positions = 2
+max_trades_day = 200
+max_orders_min = 10
+daily_loss_pct = 1.0
+daily_loss_bps = 150
+max_consec_losses = 15
+pause_after_losses_min = 60
+no_entry_before_close_min = 10
+flat_before_close_min = 2
+spread_guard_x_median = 2.0
+stale_s = 30
+reject_breaker = [3, 10]   # rejects, window in minutes
+flatten_after_disconnect_s = 120
+close_on_shutdown = true
