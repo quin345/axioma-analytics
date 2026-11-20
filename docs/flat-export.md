@@ -100,7 +100,7 @@ per-slot metric is computed exactly as for 5m. The VAP lookbacks keep the
 defined in `export_flat.TIMEFRAMES`; the default 5m behaviour and `metrics_5m`
 are unchanged. `--list --timeframe 1m` summarises the table.
 
-The table stops at the last cron run (1m collection was stopped on 2026-11-20, see Schedule). To refresh a range by hand (idempotent upsert):
+Cron keeps it current (see Schedule below). To refresh a range by hand (idempotent upsert):
 
 ```bash
 cd webapp
@@ -118,16 +118,16 @@ The 5-minute export runs from cron on the server; the files are kept in the repo
 `deploy/axioma-flat.logrotate` (to `/etc/logrotate.d/axioma-flat`, mode 644).
 
 - 5m: `*/5 * * * *`, `export_flat.py --recent 3`
-- 1m: **stopped on 2026-11-20** (see `docs/findings-1m-screen.md`). To restart it, add
-  `* * * * * root cd $APP/webapp && set -a && . $APP/.env && set +a && flock -n /run/lock/axioma-flat-1m.lock runuser -u axioma -- $APP/venv/bin/python export_flat.py --timeframe 1m --recent 5 >> /var/log/axioma/flat-1m.log 2>&1`
-  to `/etc/cron.d/axioma-flat` after backfilling the gap by hand.
+- 1m: `* * * * *`, `export_flat.py --timeframe 1m --recent 5` (stopped on 2026-11-20 after the
+  1-minute screen, resumed the same day for the 1-minute forward-test bot; see
+  `docs/findings-1m-screen.md`)
 
 Each job runs as root only to read the root-only `.env`, then drops to the
 `axioma` user (owner of `axioma.db`) with `runuser`, so the database and its WAL
 files stay owned by the web service's user. `flock -n` skips a run while the
 previous one is still going, and `--recent` re-exports a few closed slots, so a
 missed or failed run is healed by the next one (idempotent upsert). Logs go to
-`/var/log/axioma/flat-5m.log`.
+`/var/log/axioma/flat-5m.log` and `/var/log/axioma/flat-1m.log`.
 
 After downtime longer than the `--recent` window, backfill by hand, e.g.
 

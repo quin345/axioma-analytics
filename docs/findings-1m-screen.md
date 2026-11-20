@@ -1,9 +1,13 @@
 # Findings: the 1-minute hypothesis screen (2026-11-20)
 
-**Decision:** the 1-minute bar export (`metrics_1m`) was taken off cron on 2026-11-20.
-The signals are real in the data but too small to pay for trading costs. The
+**Decision:** the 1-minute bar export (`metrics_1m`) was taken off cron on 2026-11-20 and
+put back the same day, because the 1-minute screen is being forward-tested on the demo
+account by a second autotrader instance (`ax1m`). The text below is the research verdict.
+The signals are real in the data but too small to pay for trading costs, so the
+forward test on the demo account is expected to lose money per trade; it tests
+whether the signal holds on new data, not whether it is a money-maker. The
 `metrics_1m` table and the published page (`/research/screen-1m/`) stay as the
-record. Nothing from this screen is traded.
+record.
 
 ## What was tested
 
