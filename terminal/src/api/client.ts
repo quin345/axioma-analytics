@@ -3,10 +3,12 @@
 export class ApiError extends Error {}
 
 // The terminal sits behind the pilot login. If the session lapses mid-use the
-// API answers 401; send the user back to the landing page's sign-in dialog.
+// API answers 401; send the user to the login page, returning here afterwards.
 function checkSession(res: Response): void {
   if (res.status === 401) {
-    window.location.assign("/?login=1");
+    window.location.assign(
+      "/login?next=" + encodeURIComponent(window.location.pathname + window.location.search),
+    );
   }
 }
 

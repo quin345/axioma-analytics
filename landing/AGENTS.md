@@ -1,6 +1,6 @@
 # AXIOMA landing page
 
-The public product landing page, served by Flask at `/`. It started as a Figma
+The product landing page (behind the site login), served by Flask at `/`. It started as a Figma
 Make export; Figma-specific tooling has been removed. See the root `README.md`
 for the whole system.
 
