@@ -8,8 +8,9 @@ import numpy as np
 import pandas as pd
 
 from . import INSTRUMENT
+from .timeframe import TF_5M
 
-BARS_PER_YEAR = 252 * 24 * 12  # 5-minute bars, 24h markets
+BARS_PER_YEAR = TF_5M.bars_per_year  # 5-minute bars, 24h markets
 
 
 def positions(signal, threshold=0.0):
@@ -17,7 +18,7 @@ def positions(signal, threshold=0.0):
     return pos
 
 
-def backtest(df, signal, threshold=0.0, cost=True):
+def backtest(df, signal, threshold=0.0, cost=True, tf=TF_5M):
     rows, curves = [], []
     for (account, sym), g in df.groupby(INSTRUMENT):
         g = g.sort_values("slot_end")
@@ -34,7 +35,7 @@ def backtest(df, signal, threshold=0.0, cost=True):
             "ctid_trader_account": account, "symbol_id": sym, "signal": signal, "threshold": threshold,
             "bars": len(pnl), "exposure": float((pos != 0).mean()), "trades": float(trades.sum()),
             "total_log_ret": float(pnl.sum()),
-            "sharpe_ann": float(pnl.mean() / std * np.sqrt(BARS_PER_YEAR)) if std > 0 else np.nan,
+            "sharpe_ann": float(pnl.mean() / std * np.sqrt(tf.bars_per_year)) if std > 0 else np.nan,
             "max_drawdown": float((pnl.cumsum() - pnl.cumsum().cummax()).min()),
         })
     return pd.DataFrame(rows), pd.concat(curves, ignore_index=True) if curves else pd.DataFrame()

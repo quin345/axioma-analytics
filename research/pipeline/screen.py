@@ -7,7 +7,8 @@ Protocol (fixed in code, so it cannot drift toward a nicer answer):
    quantile of the pooled timestamps that have data. Discovery ends `embargo`
    before the cut so that no forward target in discovery reaches into holdout.
 2. **Score.** For each hypothesis x horizon x instrument: Spearman rank IC
-   between the signal and the target, computed *per time block* (default 4 h).
+   between the signal and the target, computed *per time block* (default 4 h on 5-minute
+   bars, 1 h on 1-minute bars; see `timeframe.py`).
    Forward targets overlap bar to bar, so the bars are not independent; the
    blocks are close to it, and the t-stat is taken across blocks. A hypothesis
    with a `control` uses the partial rank correlation with that column held
@@ -34,33 +35,36 @@ import pandas as pd
 
 from . import INSTRUMENT
 from . import strategies as S
-from .features import HORIZONS, _rolling_z
-from .hypotheses import HYPOTHESES, evaluate_signal
+from .features import _rolling_z
+from .hypotheses import evaluate_signal, hypotheses_for
+from .timeframe import TF_5M
 
-BLOCK = pd.Timedelta(hours=4)
+BLOCK = TF_5M.block     # 4 h; each Timeframe carries its own block length
 MIN_BLOCK_OBS = 12      # a block with fewer valid pairs is skipped
 MIN_BLOCKS = 3          # an instrument with fewer blocks does not vote on sign
 MAX_SIGNAL_CORR = 0.7   # picks closer than this (|Spearman rho| on discovery) are one effect
-SLOT = pd.Timedelta(minutes=5)
+SLOT = TF_5M.slot
 
 
 # --- data preparation ---------------------------------------------------------
 
-def add_hypothesis_signals(features, hypotheses=HYPOTHESES):
+def add_hypothesis_signals(features, hypotheses=None, tf=TF_5M):
     """`hyp_<key>` columns, computed once on the full point-in-time frame."""
+    hypotheses = hypotheses or hypotheses_for(tf)
     out = features.copy()
     for h in hypotheses:
         out[f"hyp_{h.key}"] = evaluate_signal(h, out)
     return out
 
 
-def split(df, frac=0.6, embargo_bars=max(HORIZONS)):
+def split(df, frac=0.6, embargo_bars=None, tf=TF_5M):
     """(discovery, holdout, cut). Same timestamp cut for every instrument."""
+    embargo_bars = tf.embargo_bars if embargo_bars is None else embargo_bars
     t = df.loc[df["has_data"].astype(bool), "slot_end"].sort_values()
     if t.empty:
         raise ValueError("no bars with data to split")
     cut = t.iloc[min(len(t) - 1, int(len(t) * frac))]
-    disc = df[df["slot_end"] <= cut - embargo_bars * SLOT]
+    disc = df[df["slot_end"] <= cut - embargo_bars * tf.slot]
     hold = df[df["slot_end"] > cut]
     return disc, hold, cut
 
@@ -108,8 +112,11 @@ def target_column(h, horizon):
     return f"fwd_{h.target}_{horizon}"
 
 
-def score(df, hypotheses=HYPOTHESES, horizons=HORIZONS, block=BLOCK):
+def score(df, hypotheses=None, horizons=None, block=None, tf=TF_5M):
     """One row per (hypothesis, horizon, instrument) plus a pooled 'ALL' row."""
+    hypotheses = hypotheses or hypotheses_for(tf)
+    horizons = tf.horizons if horizons is None else horizons
+    block = tf.block if block is None else block
     rows = []
     for h in hypotheses:
         for k in horizons:
@@ -139,7 +146,7 @@ def bh_qvalues(p):
 
 # --- selection ----------------------------------------------------------------
 
-def select(table, hypotheses=HYPOTHESES, top=3, fdr=0.10, discovery=None, max_corr=MAX_SIGNAL_CORR):
+def select(table, hypotheses=None, top=3, fdr=0.10, discovery=None, max_corr=MAX_SIGNAL_CORR, tf=TF_5M):
     """The top-N (hypothesis, horizon) picks from a discovery score table.
 
     With `discovery` (the discovery feature frame, holding `hyp_*` columns), a
@@ -147,6 +154,7 @@ def select(table, hypotheses=HYPOTHESES, top=3, fdr=0.10, discovery=None, max_co
     is skipped as a duplicate measurement of the same effect, and the next
     candidate takes its place. Discovery data only, so the holdout stays unseen.
     """
+    hypotheses = hypotheses or hypotheses_for(tf)
     eligible_keys = {h.key for h in hypotheses if not h.baseline}
     pooled = table[(table["instrument"] == "ALL") & table["hypothesis"].isin(eligible_keys)].copy()
     pooled["q"] = bh_qvalues(pooled["p"])
@@ -190,14 +198,15 @@ def select(table, hypotheses=HYPOTHESES, top=3, fdr=0.10, discovery=None, max_co
     return ranked, picks
 
 
-def confirm(holdout, picks, hypotheses=HYPOTHESES, alpha=0.05, block=BLOCK):
+def confirm(holdout, picks, hypotheses=None, alpha=0.05, block=None, tf=TF_5M):
     """Holdout statistics at each pick's frozen horizon, with a verdict."""
+    hypotheses = hypotheses or hypotheses_for(tf)
     by_key = {h.key: h for h in hypotheses}
     n = max(1, len(picks))
     rows = []
     for _, pick in picks.iterrows():
         h, k = by_key[pick["hypothesis"]], int(pick["horizon_bars"])
-        tab = score(holdout, [h], [k], block)
+        tab = score(holdout, [h], [k], block, tf=tf)
         pooled = tab[tab["instrument"] == "ALL"].iloc[0]
         per = {r["instrument"]: r["ic"] for _, r in tab[tab["instrument"] != "ALL"].iterrows()}
         if np.isfinite(pooled["p"]) and pooled["p"] < alpha / n:
@@ -215,10 +224,10 @@ def confirm(holdout, picks, hypotheses=HYPOTHESES, alpha=0.05, block=BLOCK):
 
 # --- economics ----------------------------------------------------------------
 
-def trade_test(holdout, key, horizon, threshold=1.0):
-    """Taker trades on holdout: |rolling z| > threshold, hold `horizon` bars."""
+def trade_test(holdout, key, horizon, threshold=1.0, tf=TF_5M):
+    """Taker trades on holdout: |rolling z| > threshold (z over `tf.zwindow` bars), hold `horizon` bars."""
     d = holdout.sort_values(INSTRUMENT + ["slot_end"]).copy()
-    d["_z"] = d.groupby(INSTRUMENT)[f"hyp_{key}"].transform(_rolling_z)
+    d["_z"] = d.groupby(INSTRUMENT)[f"hyp_{key}"].transform(lambda s: _rolling_z(s, tf.zwindow))
     net = S.summarize(S.simulate_signal(d, "_z", threshold, horizon, cost=True))
     gross = S.summarize(S.simulate_signal(d, "_z", threshold, horizon, cost=False))
     return {"trades": net["trades"], "trades_per_day": net["trades_per_day"],
@@ -246,12 +255,12 @@ def vol_quintile_ratio(holdout, key, horizon, control):
             "vol_ratio_cells": len(ratios)}
 
 
-def robustness(holdout, picks, discovery, hypotheses=HYPOTHESES, block=BLOCK):
+def robustness(holdout, picks, discovery, hypotheses=None, block=None, tf=TF_5M):
     """Post-selection stress tests on holdout, one dict per pick (IC values).
 
     Return picks:
       * `ic_ctrl_last_return`: partial IC holding the last bar's return fixed,
-        so a pick that only re-expresses 5-minute reversal shows up as ~0;
+        so a pick that only re-expresses one-bar reversal shows up as ~0;
       * `ic_skip_one_bar`: IC against the return from t+1 to t+1+h. Noise in the
         mid snapshot at t makes returns reverse mechanically; skipping a bar
         removes that artefact, so a surviving IC is not snapshot noise.
@@ -260,12 +269,14 @@ def robustness(holdout, picks, discovery, hypotheses=HYPOTHESES, block=BLOCK):
         hour-of-day average volatility (estimated on discovery) fixed, so the
         session cycle cannot pass for prediction.
     """
+    hypotheses = hypotheses or hypotheses_for(tf)
+    block = tf.block if block is None else block
     by_key = {h.key: h for h in hypotheses}
     hold = holdout.sort_values(INSTRUMENT + ["slot_end"]).copy()
     hold["_neg_ret_1"] = -hold["ret_1"]
     logp = np.log(hold["mid_close"])
     keys = [hold[c] for c in INSTRUMENT]
-    for k in HORIZONS:
+    for k in tf.horizons:
         hold[f"_fwd_skip_{k}"] = logp.groupby(keys).shift(-(k + 1)) - logp.groupby(keys).shift(-1)
     hour = discovery.groupby(INSTRUMENT + [discovery["slot_end"].dt.hour.rename("_hr")])["realised_vol_pct"] \
         .mean().rename("_hour_vol").reset_index()
@@ -293,11 +304,12 @@ def robustness(holdout, picks, discovery, hypotheses=HYPOTHESES, block=BLOCK):
     return pd.DataFrame(rows)
 
 
-def economics(holdout, picks, hypotheses=HYPOTHESES):
+def economics(holdout, picks, hypotheses=None, tf=TF_5M):
+    hypotheses = hypotheses or hypotheses_for(tf)
     by_key = {h.key: h for h in hypotheses}
     rows = []
     for _, pick in picks.iterrows():
         h, k = by_key[pick["hypothesis"]], int(pick["horizon_bars"])
-        extra = trade_test(holdout, h.key, k) if h.target == "ret" else vol_quintile_ratio(holdout, h.key, k, h.control)
+        extra = trade_test(holdout, h.key, k, tf=tf) if h.target == "ret" else vol_quintile_ratio(holdout, h.key, k, h.control)
         rows.append({"hypothesis": h.key, **extra})
     return pd.DataFrame(rows)

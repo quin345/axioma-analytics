@@ -8,9 +8,10 @@ import numpy as np
 import pandas as pd
 
 from . import INSTRUMENT
+from .timeframe import TF_5M
 
-HORIZONS = (1, 3, 6, 12)  # bars of 5 minutes
-ZWINDOW = 48  # 4 hours
+HORIZONS = TF_5M.horizons  # bars (5-minute preset)
+ZWINDOW = TF_5M.zwindow  # 4 hours of 5-minute bars
 
 
 def _rolling_z(s, window=ZWINDOW):
@@ -19,31 +20,32 @@ def _rolling_z(s, window=ZWINDOW):
     return (s - mean) / std.replace(0, np.nan)
 
 
-def _per_instrument(g, horizons):
+def _per_instrument(g, horizons, tf=TF_5M):
     g = g.sort_values("slot_end").copy()
     logp = np.log(g["mid_close"])
     for h in horizons:
         g[f"fwd_ret_{h}"] = logp.shift(-h) - logp
     g["ret_1"] = logp - logp.shift(1)
     g["ret_6"] = logp - logp.shift(6)
-    g["flow_imbalance_z"] = _rolling_z(g["flow_imbalance"])
-    g["book_imbalance_z"] = _rolling_z(g["book_imbalance"])
-    g["rel_spread_z"] = _rolling_z(g["rel_spread_mean"])
-    g["realised_vol_z"] = _rolling_z(g["realised_vol_pct"])
+    zw = tf.zwindow
+    g["flow_imbalance_z"] = _rolling_z(g["flow_imbalance"], zw)
+    g["book_imbalance_z"] = _rolling_z(g["book_imbalance"], zw)
+    g["rel_spread_z"] = _rolling_z(g["rel_spread_mean"], zw)
+    g["realised_vol_z"] = _rolling_z(g["realised_vol_pct"], zw)
     g["flow_imbalance_3"] = g["flow_imbalance"].rolling(3, min_periods=1).mean()
-    for w in (60, 120, 240):
+    for w in tf.poc_windows:
         poc, lo, hi = g[f"vap_{w}m_poc"], g[f"vap_{w}m_va_low"], g[f"vap_{w}m_va_high"]
         g[f"poc_dist_{w}"] = (g["mid_close"] - poc) / (hi - lo).replace(0, np.nan)
-    _extra_features(g, logp, horizons)
+    _extra_features(g, logp, horizons, tf)
     return g
 
 
 def _optional(g, column):
-    """A metrics_5m column, or NaN if this extract does not carry it."""
+    """A metrics column, or NaN if this extract does not carry it."""
     return g[column] if column in g else pd.Series(np.nan, index=g.index)
 
 
-def _extra_features(g, logp, horizons):
+def _extra_features(g, logp, horizons, tf=TF_5M):
     """Inputs for the hypothesis screen (studies of price, spread and activity).
 
     All point-in-time. `fwd_vol_{h}` is a *target* (mean realised volatility over
@@ -54,8 +56,8 @@ def _extra_features(g, logp, horizons):
     high = _optional(g, "mid_high").rolling(12, min_periods=6).max()
     low = _optional(g, "mid_low").rolling(12, min_periods=6).min()
     g["range_pos_12"] = (g["mid_close"] - low) / (high - low).replace(0, np.nan) - 0.5
-    g["events_z"] = _rolling_z(_optional(g, "events"))
-    g["tick_gap_z"] = _rolling_z(_optional(g, "tick_median_gap_ms"))
+    g["events_z"] = _rolling_z(_optional(g, "events"), tf.zwindow)
+    g["tick_gap_z"] = _rolling_z(_optional(g, "tick_median_gap_ms"), tf.zwindow)
     g["acf1"] = _optional(g, "acf_lag1")
     vol = g["realised_vol_pct"]
     for h in horizons:
@@ -80,11 +82,12 @@ def _add_cross_returns(df):
     return df
 
 
-def build_features(df, horizons=HORIZONS):
+def build_features(df, horizons=None, tf=TF_5M):
     """df must come from clean.clean_metrics (regular grid per instrument)."""
+    horizons = tf.horizons if horizons is None else horizons
     if df.empty:
         return df.copy()
-    parts = [_per_instrument(g, horizons) for _, g in df.groupby(INSTRUMENT, sort=True)]
+    parts = [_per_instrument(g, horizons, tf) for _, g in df.groupby(INSTRUMENT, sort=True)]
     return _add_cross_returns(pd.concat(parts, ignore_index=True))
 
 

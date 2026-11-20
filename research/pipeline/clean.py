@@ -1,16 +1,17 @@
-"""Cleaning: UTC timestamps, de-duplication, and a regular 5-minute grid per instrument."""
+"""Cleaning: UTC timestamps, de-duplication, and a regular grid (one slot per bar) per instrument."""
 import pandas as pd
 
 from . import INSTRUMENT
+from .timeframe import TF_5M
 
-SLOT = pd.Timedelta(minutes=5)
+SLOT = TF_5M.slot
 
 
-def clean_metrics(df):
-    """Return bars on a gap-free 5-minute grid per instrument.
+def clean_metrics(df, tf=TF_5M):
+    """Return bars on a gap-free grid of `tf` slots per instrument.
 
     Missing slots and has_data=0 slots are kept as rows with NaN market fields so
-    that shifts in features.py are time-correct (shift(1) == previous 5 minutes).
+    that shifts in features.py are time-correct (shift(1) == previous slot).
     """
     if df.empty:
         return df.copy()
@@ -27,12 +28,12 @@ def clean_metrics(df):
 
     out = []
     for key, g in df.groupby(INSTRUMENT, sort=True):
-        grid = pd.date_range(g["slot_end"].min(), g["slot_end"].max(), freq=SLOT)
+        grid = pd.date_range(g["slot_end"].min(), g["slot_end"].max(), freq=tf.slot)
         g = g.set_index("slot_end").reindex(grid)
         g.index.name = "slot_end"
         g[INSTRUMENT] = key
         g[static] = g[static].ffill().bfill()
         g["has_data"] = g["has_data"].fillna(False).astype(bool)
-        g["slot_start"] = g.index - SLOT
+        g["slot_start"] = g.index - tf.slot
         out.append(g.reset_index())
     return pd.concat(out, ignore_index=True)

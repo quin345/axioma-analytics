@@ -2,6 +2,7 @@
 import csv
 import json
 import pathlib
+import shutil
 import sys
 import tempfile
 import unittest
@@ -34,13 +35,24 @@ COLS = ["hypothesis", "target", "horizon_bars", "instrument", "blocks", "ic", "t
         "passed_discovery", "instruments_voting", "rank", "redundant_with", "picked"]
 
 
-def write_screen(d):
+TF_1M_META = {"key": "1m", "slot_minutes": 1, "table": "metrics_1m", "poc_windows": [15, 30, 60],
+              "zwindow_bars": 60, "block_hours": 1, "horizons_bars": [1, 3, 6, 12], "hypotheses": 14, "baselines": 1}
+
+
+def write_screen(d, tf=None):
+    """A screen output folder. tf=None writes the legacy 5-minute layout (no `timeframe` key)."""
     d.mkdir(parents=True)
-    top = {"split": {"cut": "2026-01-02 10:00:00+00:00", "fraction": 0.6, "embargo_bars": 12, "block_hours": 4,
+    picks = PICKS
+    if tf:
+        picks = [{**p, "horizon_minutes": p["horizon_bars"]} for p in PICKS]
+    top = {"split": {"cut": "2026-01-02 10:00:00+00:00", "fraction": 0.6, "embargo_bars": 12,
+                     "block_hours": tf["block_hours"] if tf else 4,
                      "fdr": 0.1, "top": 3},
            "coverage": [{"instrument": "AAA", "bars_with_data": 100, "first": "2026-01-01 00:00:00+00:00",
                          "last": "2026-01-05 00:00:00+00:00", "days_with_data": 4}],
-           "picks": PICKS}
+           "picks": picks}
+    if tf:
+        top["timeframe"] = tf
     (d / "top_hypotheses.json").write_text(json.dumps(top))
     with (d / "ranking.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, COLS)
@@ -54,20 +66,88 @@ def write_screen(d):
         (d / n).write_text("x")
 
 
+def build(tmp, **kw):
+    return build_report.build(out=tmp / "studies", site=tmp / "site", screen_dir=tmp / "screen",
+                              screen_1m_dir=tmp / "screen_1m", **kw)
+
+
 class ReportBuildTest(unittest.TestCase):
-    def test_screen_only_build(self):
+    def test_5m_item_page(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
             write_screen(tmp / "screen")
-            path = build_report.build(out=tmp / "studies", site=tmp / "site", screen_dir=tmp / "screen")
-            page = path.read_text()
+            build(tmp)
+            page = (tmp / "site" / "screen-5m" / "index.html").read_text()
             for name in ("alpha_vol", "beta_ret", "gamma_ret", "confirmed", "right sign, not significant",
                          "failed", "Full ranking", 'href="data/screen/top_hypotheses.json"',
                          'href="data/screen/ranking.csv"', "Covers the spread in this test.",
-                         "Predicts direction, but the edge is smaller than the spread"):
+                         "Predicts direction, but the edge is smaller than the spread",
+                         'href="../report.css"', "Top 3 hypotheses", "Fourteen pre-registered ideas",
+                         "5-minute bars", "4-hour windows", "AAA", "All research"):
                 self.assertIn(name, page)
+            self.assertNotIn("What changed vs the 5-minute screen", page)
             self.assertNotIn("http://", page)
-            self.assertTrue((tmp / "site" / "data" / "screen" / "ranking.csv").exists())
+            self.assertTrue((tmp / "site" / "screen-5m" / "data" / "screen" / "ranking.csv").exists())
+
+    def test_1m_item_page_is_derived_from_the_timeframe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            write_screen(tmp / "screen_1m", TF_1M_META)
+            build(tmp)
+            page = (tmp / "site" / "screen-1m" / "index.html").read_text()
+            for name in ("What changed vs the 5-minute screen", "1-minute bars", "metrics_1m", "15 min / 30 min / 60 min",
+                         "60 bars = 1 h", "48 bars = 4 h", "Not independent of the 5-minute screen",
+                         "1-hour windows", "--timeframe 1m", "1-minute taker trade", "12 bars (12 min)", "Top 3 hypotheses"):
+                self.assertIn(name, page)
+            self.assertNotIn("5-minute taker trade", page)
+            self.assertNotIn("0.61", page)                 # first-run 5-minute caveats do not carry over
+            self.assertNotIn("rho 0.95", page)
+            self.assertFalse((tmp / "site" / "screen-5m").exists())
+
+    def test_index_lists_both_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            write_screen(tmp / "screen")
+            write_screen(tmp / "screen_1m", TF_1M_META)
+            path = build(tmp)
+            self.assertEqual(path, tmp / "site" / "index.html")
+            index = path.read_text()
+            for name in ('href="screen-5m/index.html"', 'href="screen-1m/index.html"',
+                         "Hypothesis screen, 5-minute bars", "Hypothesis screen, 1-minute bars",
+                         "14 pre-registered hypotheses on 1-minute bars with 1-hour aggregation windows",
+                         "14 pre-registered hypotheses on 5-minute bars with 4-hour aggregation windows",
+                         "1 of 3 top picks confirmed on holdout", "2026-01-01 to 2026-01-05", 'href="report.css"'):
+                self.assertIn(name, index)
+            self.assertTrue((tmp / "site" / "screen-5m" / "index.html").exists())
+            self.assertTrue((tmp / "site" / "screen-1m" / "index.html").exists())
+            self.assertTrue((tmp / "site" / "report.css").exists())
+
+    def test_building_one_item_keeps_the_other_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            write_screen(tmp / "screen")
+            write_screen(tmp / "screen_1m", TF_1M_META)
+            build(tmp)
+            keep = tmp / "site" / "screen-5m"
+            (keep / "marker.txt").write_text("mine")
+            before = (keep / "index.html").read_text()
+            shutil.rmtree(tmp / "screen")                 # 5m outputs go missing; 1m is rebuilt
+            build(tmp)
+            self.assertEqual((keep / "marker.txt").read_text(), "mine")
+            self.assertEqual((keep / "index.html").read_text(), before)
+            self.assertIn('href="screen-5m/index.html"', (tmp / "site" / "index.html").read_text())
+            self.assertIn("1-minute", (tmp / "site" / "screen-1m" / "index.html").read_text())
+
+    def test_old_root_layout_is_replaced_by_the_5m_item(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp)
+            (tmp / "site" / "charts").mkdir(parents=True)
+            (tmp / "site" / "charts" / "old.png").write_text("x")
+            (tmp / "site" / "index.html").write_text("old single page")
+            write_screen(tmp / "screen")
+            build(tmp)
+            self.assertFalse((tmp / "site" / "charts").exists())
+            self.assertIn("screen-5m/index.html", (tmp / "site" / "index.html").read_text())
 
     def test_nothing_to_build_leaves_site_intact(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,7 +155,7 @@ class ReportBuildTest(unittest.TestCase):
             (tmp / "site").mkdir()
             (tmp / "site" / "keep.txt").write_text("old")
             with self.assertRaises(FileNotFoundError):
-                build_report.build(out=tmp / "studies", site=tmp / "site", screen_dir=tmp / "screen")
+                build(tmp)
             self.assertEqual((tmp / "site" / "keep.txt").read_text(), "old")
 
 

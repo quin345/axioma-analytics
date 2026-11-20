@@ -13,14 +13,21 @@ import pandas as pd
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from pipeline import clean, features, screen  # noqa: E402
-from pipeline.hypotheses import BY_KEY, HYPOTHESES  # noqa: E402
+from pipeline.hypotheses import BY_KEY, HYPOTHESES, hypotheses_for  # noqa: E402
+from pipeline.timeframe import TF_1M, TF_5M  # noqa: E402
 import run_screen  # noqa: E402
 
-VAP = [f"vap_{w}m_{k}" for w in (60, 120, 180, 240) for k in ("poc", "va_low", "va_high")]
+GOLDEN = pathlib.Path(__file__).resolve().parent / "golden"
 
 
-def synthetic_bars(n=1800, phi=-0.35, seed=1):
-    """Two instruments on a 5-minute grid whose returns mean-revert (AR(1), phi < 0)."""
+def vap_columns(tf):
+    """The VAP columns of the table: 5m has 60/120/180/240 minute windows, 1m has 15/30/60."""
+    windows = (60, 120, 180, 240) if tf.key == "5m" else (15, 30, 60)
+    return [f"vap_{w}m_{k}" for w in windows for k in ("poc", "va_low", "va_high")]
+
+
+def synthetic_bars(n=1800, phi=-0.35, seed=1, tf=TF_5M):
+    """Two instruments on a `tf` grid whose returns mean-revert (AR(1), phi < 0)."""
     rng = np.random.default_rng(seed)
     t0 = pd.Timestamp("2026-11-05T00:00:00Z")
     rows = []
@@ -30,9 +37,9 @@ def synthetic_bars(n=1800, phi=-0.35, seed=1):
             r = phi * prev + rng.normal(0, 1e-3)
             prev = r
             price *= np.exp(r)
-            end = t0 + pd.Timedelta(minutes=5 * (i + 1))
+            end = t0 + pd.Timedelta(minutes=tf.slot_minutes * (i + 1))
             rows.append({
-                "slot_start": (end - pd.Timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "slot_start": (end - tf.slot).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "slot_end": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "broker": "b", "ctid_trader_account": "acc", "symbol_id": sym,
                 "symbol_name": name, "standardized_name": name, "asset_class": "FX",
@@ -42,14 +49,14 @@ def synthetic_bars(n=1800, phi=-0.35, seed=1):
                 "realised_vol_pct": abs(rng.normal(10, 2)), "acf_lag1": rng.normal(0, 0.2),
                 "flow_imbalance": rng.normal(), "book_imbalance": 0.0,
                 "tick_median_gap_ms": abs(rng.normal(500, 100)), "computed_at": "2026-11-20T00:00:00Z",
-                **{c: price for c in VAP},
+                **{c: price for c in vap_columns(tf)},
             })
     return pd.DataFrame(rows)
 
 
-def write_db(path, df):
+def write_db(path, df, table="metrics_5m"):
     conn = sqlite3.connect(path)
-    df.to_sql("metrics_5m", conn, index=False)
+    df.to_sql(table, conn, index=False)
     conn.close()
 
 
@@ -108,6 +115,10 @@ class ScreenTest(unittest.TestCase):
         f = features.build_features(clean.clean_metrics(synthetic_bars(n=600)))
         disc, hold, cut = screen.split(f, 0.6)
         self.assertLessEqual(disc["slot_end"].max(), cut - 12 * screen.SLOT)
+        f1 = features.build_features(clean.clean_metrics(synthetic_bars(n=600, tf=TF_1M), TF_1M), tf=TF_1M)
+        disc, hold, cut = screen.split(f1, 0.6, tf=TF_1M)
+        self.assertLessEqual(disc["slot_end"].max(), cut - 12 * pd.Timedelta(minutes=1))
+        self.assertGreater(disc["slot_end"].max(), cut - pd.Timedelta(minutes=13))
         self.assertGreater(hold["slot_end"].min(), cut)
 
     def test_screen_finds_and_confirms_a_planted_reversal(self):
@@ -150,6 +161,119 @@ class ScreenTest(unittest.TestCase):
         ranked, picks = screen.select(table, top=3)
         self.assertNotIn("vol_clustering", set(ranked["hypothesis"]))
         self.assertTrue(BY_KEY["vol_clustering"].baseline)
+
+
+class FiveMinuteRegressionTest(unittest.TestCase):
+    """The 5-minute screen must reproduce the outputs it produced before timeframes existed."""
+
+    def test_features_unchanged(self):
+        golden = json.loads((GOLDEN / "features_5m_sums.json").read_text())
+        f = features.build_features(clean.clean_metrics(synthetic_bars(n=400)))
+        self.assertEqual(len(f), golden.pop("_rows"))
+        for c, total in golden.items():
+            self.assertAlmostEqual(float(np.nansum(f[c].to_numpy())), total, delta=1e-9 * max(1.0, abs(total)), msg=c)
+
+    def test_screen_outputs_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            write_db(db, synthetic_bars())
+            run_screen.run(db, tmp, log=lambda *a: None)
+            tmp = pathlib.Path(tmp)
+            pd.testing.assert_frame_equal(pd.read_csv(tmp / "ranking.csv"),
+                                          pd.read_csv(GOLDEN / "screen_5m_ranking.csv"), rtol=1e-9)
+            got = json.loads((tmp / "top_hypotheses.json").read_text())
+            want = json.loads((GOLDEN / "screen_5m_top_hypotheses.json").read_text())
+            self.assertEqual(got.pop("timeframe")["key"], "5m")   # the only addition: metadata
+            self.assertEqual(got, want)
+            self.assertEqual((tmp / "report.md").read_text(), (GOLDEN / "screen_5m_report.md").read_text())
+
+    def test_5m_hypothesis_names_are_frozen(self):
+        self.assertEqual([h.key for h in HYPOTHESES], [
+            "reversal_5m", "momentum_15m", "momentum_1h", "tick_flow", "range_reversal_1h", "poc_reversion_1h",
+            "poc_reversion_4h", "wide_spread_reversal", "micro_trend_continuation", "cross_asset_lead",
+            "vol_clustering", "spread_predicts_vol", "activity_predicts_vol", "tick_speed_predicts_vol"])
+
+
+class OneMinuteTest(unittest.TestCase):
+    def test_hypothesis_names_follow_the_timeframe(self):
+        hs = hypotheses_for(TF_1M)
+        self.assertEqual([h.key for h in hs][:7], [
+            "reversal_1m", "momentum_3m", "momentum_12m", "tick_flow", "range_reversal_12m",
+            "poc_reversion_15m", "poc_reversion_1h"])
+        self.assertEqual([h.key for h in hs][7:], [h.key for h in HYPOTHESES][7:])
+        self.assertEqual(len(hs), 14)
+        self.assertEqual(sum(h.baseline for h in hs), 1)
+        by = {h.key: h for h in hs}
+        self.assertIn("1-minute move", by["reversal_1m"].statement)
+        self.assertIn("15-minute point of control", by["poc_reversion_15m"].statement)
+        self.assertIn("1-hour point of control", by["poc_reversion_1h"].statement)
+        self.assertIn("12-minute range", by["range_reversal_12m"].statement)
+
+    def test_feature_windows_are_rescaled(self):
+        bars = synthetic_bars(n=200, tf=TF_1M)
+        bars["vap_15m_poc"], bars["vap_15m_va_low"], bars["vap_15m_va_high"] = (
+            bars["mid_close"] * 0.999, bars["mid_close"] * 0.99, bars["mid_close"] * 1.01)
+        f = features.build_features(clean.clean_metrics(bars, TF_1M), tf=TF_1M)
+        for c in ("poc_dist_15", "poc_dist_30", "poc_dist_60"):
+            self.assertIn(c, f)
+        self.assertNotIn("poc_dist_240", f)
+        g = f[f["symbol_id"] == 1].reset_index(drop=True)
+        self.assertTrue((g["slot_end"].diff().dropna() == pd.Timedelta(minutes=1)).all())
+        # z-window: 60 bars, min_periods 15 -> first value at index 14, computed from 15 observations
+        self.assertTrue(g["flow_imbalance_z"].iloc[:14].isna().all())
+        self.assertTrue(np.isfinite(g.loc[14, "flow_imbalance_z"]))
+        x = g["flow_imbalance"]
+        i = 100
+        w = x.iloc[i - 59:i + 1]
+        self.assertAlmostEqual(g.loc[i, "flow_imbalance_z"], (x[i] - w.mean()) / w.std())
+        # bar counts stay in bars: ret_3 is 3 minutes, the forward horizons are 1/3/6/12 bars
+        lp = np.log(g["mid_close"])
+        self.assertAlmostEqual(g.loc[i, "ret_3"], lp[i] - lp[i - 3])
+        self.assertAlmostEqual(g.loc[i, "fwd_ret_12"], lp[i + 12] - lp[i])
+        self.assertAlmostEqual(g.loc[i, "poc_dist_15"],
+                               (g.loc[i, "mid_close"] - g.loc[i, "vap_15m_poc"])
+                               / (g.loc[i, "vap_15m_va_high"] - g.loc[i, "vap_15m_va_low"]))
+
+    def test_1m_does_not_look_ahead(self):
+        bars = clean.clean_metrics(synthetic_bars(n=300, tf=TF_1M), TF_1M)
+        base = features.build_features(bars, tf=TF_1M)
+        changed = bars.copy()
+        future = changed["slot_end"] > changed["slot_end"].iloc[200]
+        for c in ("mid_close", "mid_high", "mid_low", "events"):
+            changed.loc[future, c] = changed.loc[future, c] * 1.5
+        after = features.build_features(changed, tf=TF_1M)
+        past = base["slot_end"] <= base["slot_end"].iloc[200]
+        for c in ("ret_3", "range_pos_12", "events_z", "rel_spread_z", "cross_ret_1"):
+            pd.testing.assert_series_equal(base.loc[past, c], after.loc[past, c], check_names=False)
+
+    def test_screen_runs_end_to_end_on_1m_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "t.db")
+            write_db(db, synthetic_bars(n=6000, tf=TF_1M), "metrics_1m")
+            out = os.path.join(tmp, "o")
+            result = run_screen.run(db, out, log=lambda *a: None, tf=TF_1M)
+            self.assertEqual(result["timeframe"]["key"], "1m")
+            self.assertEqual(result["timeframe"]["poc_windows"], [15, 30, 60])
+            self.assertEqual(result["split"]["block_hours"], 1)
+            self.assertEqual(result["split"]["embargo_bars"], 12)
+            picks = {p["hypothesis"]: p for p in result["picks"]}
+            self.assertIn("reversal_1m", picks)
+            self.assertEqual(picks["reversal_1m"]["horizon_minutes"], picks["reversal_1m"]["horizon_bars"])
+            self.assertEqual(picks["reversal_1m"]["verdict"], "confirmed")
+            ranking = pd.read_csv(os.path.join(out, "ranking.csv"))
+            self.assertIn("momentum_3m", set(ranking["hypothesis"]))
+            self.assertNotIn("reversal_5m", set(ranking["hypothesis"]))
+            text = (pathlib.Path(out) / "report.md").read_text()
+            self.assertTrue(text.startswith("# Hypothesis screen (1m bars)"))
+            self.assertNotIn(" 5 min", text)
+
+    def test_cli_defaults_pick_the_timeframe_output_dir(self):
+        self.assertEqual(run_screen.default_out(TF_1M).name, "screen_1m")
+        self.assertEqual(run_screen.default_out(TF_5M).name, "screen")
+
+    def test_backtest_annualisation_comes_from_the_timeframe(self):
+        self.assertEqual(TF_5M.bars_per_year, 252 * 24 * 12)
+        self.assertEqual(TF_1M.bars_per_year, 252 * 24 * 60)
 
 
 if __name__ == "__main__":

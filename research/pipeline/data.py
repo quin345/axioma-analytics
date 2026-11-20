@@ -4,6 +4,8 @@ from contextlib import closing
 
 import pandas as pd
 
+from .timeframe import TF_5M
+
 
 def connect(path):
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -14,9 +16,10 @@ def _query(path, sql, params=()):
         return pd.read_sql_query(sql, conn, params=params)
 
 
-def load_metrics_5m(path, symbols=None, start=None, end=None):
-    """5-minute research bars. `symbols` filters on standardized_name or symbol_name."""
-    sql, params = "SELECT * FROM metrics_5m WHERE 1=1", []
+def load_metrics(path, tf=TF_5M, symbols=None, start=None, end=None):
+    """Research bars of timeframe `tf` (metrics_5m or metrics_1m). `symbols` filters on
+    standardized_name or symbol_name."""
+    sql, params = f"SELECT * FROM {tf.table} WHERE 1=1", []
     if symbols:
         marks = ",".join("?" * len(symbols))
         sql += f" AND (standardized_name IN ({marks}) OR symbol_name IN ({marks}))"
@@ -28,3 +31,8 @@ def load_metrics_5m(path, symbols=None, start=None, end=None):
         sql += " AND slot_end <= ?"
         params.append(end)
     return _query(path, sql + " ORDER BY ctid_trader_account, symbol_id, slot_end", params)
+
+
+def load_metrics_5m(path, symbols=None, start=None, end=None):
+    """5-minute research bars."""
+    return load_metrics(path, TF_5M, symbols, start, end)

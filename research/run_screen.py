@@ -1,10 +1,15 @@
-"""Hypothesis screen over metrics_5m: score every pre-registered hypothesis on a
-discovery sample, pick the top N, then test only those once on held-out data.
+"""Hypothesis screen over metrics_5m or metrics_1m: score every pre-registered
+hypothesis on a discovery sample, pick the top N, then test only those once on
+held-out data.
 
-    venv/bin/python research/run_screen.py [--db PATH] [--out DIR] [--split 0.6]
-                                           [--top 3] [--fdr 0.10] [--block-hours 4]
+    venv/bin/python research/run_screen.py [--timeframe {5m,1m}] [--db PATH] [--out DIR]
+                                           [--split 0.6] [--top 3] [--fdr 0.10] [--block-hours H]
 
-The data comes from KQL via webapp/export_flat.py (metrics_5m in axioma.db);
+--timeframe 5m (default) reads metrics_5m and writes research/output/screen; 1m reads
+metrics_1m and writes research/output/screen_1m. --block-hours defaults to the
+timeframe's aggregation window (4 h on 5m, 1 h on 1m); see pipeline/timeframe.py.
+
+The data comes from KQL via webapp/export_flat.py (metrics_5m / metrics_1m in axioma.db);
 this script only reads the local database, read-only. See pipeline/screen.py
 for the protocol and pipeline/hypotheses.py for the hypotheses.
 """
@@ -20,8 +25,8 @@ import pandas as pd  # noqa: E402
 
 import config  # noqa: E402
 from pipeline import INSTRUMENT, clean, data, features  # noqa: E402
-from pipeline import screen  # noqa: E402
-from pipeline.hypotheses import BY_KEY, HYPOTHESES  # noqa: E402
+from pipeline import screen, timeframe  # noqa: E402
+from pipeline.hypotheses import hypotheses_for  # noqa: E402
 
 
 def _coverage(df):
@@ -35,26 +40,32 @@ def _coverage(df):
     return rows
 
 
-def run(db, out, frac=0.6, top=3, fdr=0.10, block_hours=4, log=print):
+def default_out(tf):
+    return config.OUTPUT_DIR / ("screen" if tf.key == "5m" else f"screen_{tf.key}")
+
+
+def run(db, out, frac=0.6, top=3, fdr=0.10, block_hours=None, log=print, tf=timeframe.TF_5M):
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    raw = data.load_metrics_5m(db)
+    block_hours = tf.block_hours if block_hours is None else block_hours
+    hyps = hypotheses_for(tf)
+    raw = data.load_metrics(db, tf)
     if raw.empty:
-        log(f"no metrics_5m rows in {db}; run webapp/export_flat.py --start ... first")
+        log(f"no {tf.table} rows in {db}; run webapp/export_flat.py --start ... first")
         return {}
-    feats = screen.add_hypothesis_signals(features.build_features(clean.clean_metrics(raw)))
+    feats = screen.add_hypothesis_signals(features.build_features(clean.clean_metrics(raw, tf), tf=tf), hyps)
     block = pd.Timedelta(hours=block_hours)
-    disc, hold, cut = screen.split(feats, frac)
+    disc, hold, cut = screen.split(feats, frac, tf=tf)
     coverage = _coverage(feats)
     log(f"loaded {len(raw)} rows; split at {cut} "
         f"(discovery {int(disc['has_data'].sum())} bars with data, holdout {int(hold['has_data'].sum())})")
 
-    disc_table = screen.score(disc, block=block)
-    ranked, picks = screen.select(disc_table, top=top, fdr=fdr, discovery=disc)
-    hold_table = screen.score(hold, block=block)  # every hypothesis, for reference only
-    confirmed = screen.confirm(hold, picks, block=block)
-    econ = screen.economics(hold, picks)
-    robust = screen.robustness(hold, picks, disc, block=block)
+    disc_table = screen.score(disc, hyps, block=block, tf=tf)
+    ranked, picks = screen.select(disc_table, hyps, top=top, fdr=fdr, discovery=disc)
+    hold_table = screen.score(hold, hyps, block=block, tf=tf)  # every hypothesis, for reference only
+    confirmed = screen.confirm(hold, picks, hyps, block=block, tf=tf)
+    econ = screen.economics(hold, picks, hyps, tf=tf)
+    robust = screen.robustness(hold, picks, disc, hyps, block=block, tf=tf)
     final = (picks.merge(confirmed, on=["hypothesis", "horizon_bars"]).merge(econ, on="hypothesis")
              .merge(robust, on="hypothesis"))
 
@@ -62,13 +73,14 @@ def run(db, out, frac=0.6, top=3, fdr=0.10, block_hours=4, log=print):
     hold_table.to_csv(out / "holdout_scores_reference.csv", index=False)
     ranked.to_csv(out / "ranking.csv", index=False)
     result = {
-        "split": {"cut": str(cut), "fraction": frac, "embargo_bars": max(features.HORIZONS),
+        "split": {"cut": str(cut), "fraction": frac, "embargo_bars": tf.embargo_bars,
                   "block_hours": block_hours, "fdr": fdr, "top": top},
+        "timeframe": {**tf.to_dict(), "hypotheses": len(hyps), "baselines": sum(h.baseline for h in hyps)},
         "coverage": coverage,
-        "picks": _records(final),
+        "picks": _records(final, hyps, tf),
     }
     (out / "top_hypotheses.json").write_text(json.dumps(result, indent=2, default=_json))
-    (out / "report.md").write_text(report(result, ranked))
+    (out / "report.md").write_text(report(result, ranked, hyps, tf))
 
     log("\nranking on discovery (best horizon per hypothesis):")
     log(ranked[["rank", "hypothesis", "target", "horizon_bars", "ic", "t", "q", "sign_consistent",
@@ -88,12 +100,13 @@ def _json(v):
     return str(v)
 
 
-def _records(df):
+def _records(df, hyps, tf):
+    by_key = {h.key: h for h in hyps}
     recs = df.replace({np.nan: None}).to_dict(orient="records")
     for r in recs:
-        h = BY_KEY[r["hypothesis"]]
+        h = by_key[r["hypothesis"]]
         r.update({"statement": h.statement, "mechanism": h.mechanism, "control": h.control,
-                  "horizon_minutes": 5 * int(r["horizon_bars"])})
+                  "horizon_minutes": tf.minutes(r["horizon_bars"])})
     return recs
 
 
@@ -101,9 +114,10 @@ def _f(v, fmt="{:+.3f}"):
     return "n/a" if v is None or (isinstance(v, float) and not np.isfinite(v)) else fmt.format(v)
 
 
-def report(result, ranked):
+def report(result, ranked, hyps=None, tf=timeframe.TF_5M):
     s = result["split"]
-    lines = ["# Hypothesis screen", "",
+    hyps = hyps or hypotheses_for(tf)
+    lines = ["# Hypothesis screen" + ("" if tf.key == "5m" else f" ({tf.key} bars)"), "",
              f"Split at **{s['cut']}** ({int(s['fraction'] * 100)}% of bars with data in discovery; "
              f"{s['embargo_bars']}-bar embargo). Rank IC per {s['block_hours']} h block, t across blocks; "
              f"BH FDR {s['fdr']} on discovery; top {s['top']} tested once on holdout "
@@ -146,11 +160,11 @@ def report(result, ranked):
               "|---|---|---|---|---|---|---|---|---|---|---|"]
     for _, r in ranked.iterrows():
         dup = r.get("redundant_with")
-        lines.append(f"| {r['rank']} | `{r['hypothesis']}` | {r['target']} | {5 * int(r['horizon_bars'])} min | "
+        lines.append(f"| {r['rank']} | `{r['hypothesis']}` | {r['target']} | {tf.minutes(r['horizon_bars'])} min | "
                      f"{_f(r['ic'])} | {_f(r['t'], '{:.2f}')} | {_f(r['q'], '{:.4f}')} | "
                      f"{r['sign_consistent']} | {r['passed_discovery']} | {dup if isinstance(dup, str) else ''} | "
                      f"{r['picked']} |")
-    base = [h for h in HYPOTHESES if h.baseline]
+    base = [h for h in hyps if h.baseline]
     if base:
         lines += ["", "Baselines (scored, never picked): " + ", ".join(f"`{h.key}`" for h in base)
                   + ". See `discovery_scores.csv`."]
@@ -159,14 +173,16 @@ def report(result, ranked):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--timeframe", choices=sorted(timeframe.TIMEFRAMES), default="5m")
     p.add_argument("--db", default=str(config.db_path()))
-    p.add_argument("--out", default=str(config.OUTPUT_DIR / "screen"))
+    p.add_argument("--out", default=None, help="default: output/screen (5m) or output/screen_1m (1m)")
     p.add_argument("--split", type=float, default=0.6, help="fraction of bars in discovery")
     p.add_argument("--top", type=int, default=3)
     p.add_argument("--fdr", type=float, default=0.10)
-    p.add_argument("--block-hours", type=float, default=4)
+    p.add_argument("--block-hours", type=float, default=None, help="default: the timeframe's window (5m: 4, 1m: 1)")
     a = p.parse_args(argv)
-    run(a.db, a.out, a.split, a.top, a.fdr, a.block_hours)
+    tf = timeframe.get(a.timeframe)
+    run(a.db, a.out or default_out(tf), a.split, a.top, a.fdr, a.block_hours, tf=tf)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+hypothesis,target,horizon_bars,instrument,blocks,ic,t,p,q,sign_consistent,passed_discovery,instruments_voting,rank,redundant_with,picked
+reversal_5m,ret,1,ALL,46,0.3474177840457912,16.63797619114479,1.8495515232702058e-62,6.658385483772741e-61,True,True,2,1,,True
+range_reversal_1h,ret,1,ALL,46,0.24210274767008783,13.943903594716168,1.7133675679560328e-44,3.0840616223208592e-43,True,True,2,2,,True
+micro_trend_continuation,ret,1,ALL,46,0.030632534525726365,1.301699066405375,0.09650963943358332,0.38603855773433327,True,False,2,3,,True
+tick_flow,ret,12,ALL,46,0.028181221950290734,1.2142331591157918,0.11232935077940286,0.4043856628058503,True,False,2,4,,False
+cross_asset_lead,ret,12,ALL,46,0.004049744141590316,0.318053440070214,0.37522220028188175,0.7949231106706235,True,False,2,5,,False
+tick_speed_predicts_vol,vol,6,ALL,46,0.0035366729877879836,0.12003817090239126,0.45222645527494204,0.8809875565887891,False,False,2,6,,False
+activity_predicts_vol,vol,1,ALL,46,0.0020207072987914886,0.08793126151677297,0.4649656548663054,0.8809875565887891,False,False,2,7,,False
+momentum_15m,ret,6,ALL,46,-0.12156074929646528,-4.8919323985360705,0.9999995007462846,1.0,False,False,2,8,range_reversal_1h (rho -0.73),False
+momentum_1h,ret,6,ALL,46,-0.2370524549391379,-6.262419491333176,0.9999999998104752,1.0,False,False,2,9,range_reversal_1h (rho -0.82),False
+poc_reversion_1h,ret,1,ALL,0,,,,,False,False,0,10,,False
+poc_reversion_4h,ret,1,ALL,0,,,,,False,False,0,11,,False
+spread_predicts_vol,vol,1,ALL,0,,,,,False,False,0,12,,False
+wide_spread_reversal,ret,1,ALL,0,,,,,False,False,0,13,,False

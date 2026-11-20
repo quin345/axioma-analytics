@@ -1,4 +1,4 @@
-"""Trade-level simulators on 5-minute bars (mid OHLC + mean spread).
+"""Trade-level simulators on bars (5-minute or 1-minute; mid OHLC + mean spread).
 
 Conservative fill rules, because only bar high/low are known:
 
