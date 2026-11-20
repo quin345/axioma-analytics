@@ -107,6 +107,3 @@ def panel_guide():
   "Volume" falls back to book-event count where no traded size exists.</p></aside>
   {''.join(groups)}
 </section>"""
-
-
-TOC_ENTRY = ("panel-guide", "Panel guide", False)

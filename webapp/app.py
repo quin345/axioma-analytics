@@ -204,9 +204,11 @@ def terminal_redirect():
 
 @app.get("/terminal/")
 def terminal():
-    # While we are still working on the terminal, it is the holding page with
-    # a 503; the landing page and API routes stay up. Flip MAINTENANCE_MODE
-    # off in .env and restart to serve the dashboard again.
+    # While we are still working on the terminal, signed-in visitors get the
+    # holding page with a 503 here; only this route changes. The landing page,
+    # /research/ and /api routes are unaffected by MAINTENANCE_MODE, and all of
+    # them (this one included) still sit behind the pilot login. Flip
+    # MAINTENANCE_MODE off in .env and restart to serve the dashboard again.
     if cfg.maintenance:
         return _holding_page()
     return send_from_directory(cfg.terminal_dist, "index.html")
@@ -654,7 +656,9 @@ def volume_at_price_windows():
 
 @app.post("/api/volume-at-price/refresh")
 def volume_at_price_refresh():
-    """Compute and record every window's profile for the symbol. The cron entry."""
+    """Compute and record every window's profile for the symbol.
+
+    Called by the scheduled refresh (cron) and by the terminal on demand."""
     symbol_id, account = _instrument_args()
     _, as_of, profiles = _compute_vap(symbol_id, account)
     return jsonify({
@@ -670,5 +674,6 @@ def volume_at_price_refresh():
 
 
 if __name__ == "__main__":
-    # Bound to localhost only. This app has no login, so don't expose it publicly.
+    # Bound to localhost only. The whole site is behind the pilot login, but keep the
+    # socket local anyway and let the reverse proxy front it.
     app.run(host="127.0.0.1", port=5000, debug=False)

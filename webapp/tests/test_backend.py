@@ -272,21 +272,6 @@ def test_db_load_returns_newest_stop():
         conn.close()
 
 
-def test_db_prune_keeps_newest():
-    conn = db_module.connect(":memory:")
-    try:
-        profile = analytics.volume_at_price(VAP_ROWS, 1.0)
-        for i in range(5):
-            db_module.save_profile(conn, "136", 60, f"2026-11-06T10:0{i}:00+00:00", profile)
-        db_module.prune(conn, keep=2)
-        stops = [r["as_of"] for r in
-                 conn.execute("SELECT as_of FROM vap_run ORDER BY as_of DESC").fetchall()]
-        assert stops == ["2026-11-06T10:04:00+00:00", "2026-11-06T10:03:00+00:00"]
-        # Levels persist for the runs that survive.
-        assert conn.execute("SELECT COUNT(*) FROM vap_level").fetchone()[0] > 0
-    finally:
-        conn.close()
-
 def test_db_prune_runs_default_keeps_everything():
     """`prune_runs` with no bounds must not touch the durable record."""
     conn = db_module.connect(":memory:")
@@ -1197,19 +1182,6 @@ def test_asset_classes_reports_unmapped_under_other():
 
     by_class = {c["assetClass"]: c["count"] for c in out}
     assert by_class[db_module.ASSET_CLASS_UNKNOWN] == 1
-
-
-def test_build_vap_collapses_the_triple_to_distinct_symbol_ids():
-    """The VAP job records per symbol id, so it dedupes the triple's ids."""
-    import build_vap
-
-    feed = [
-        feed_row("acgmarkets", "49208255", 136),
-        feed_row("icmarkets", "48449283", 136),  # same id, another broker
-        feed_row("acgmarkets", "49208255", 114),
-    ]
-    ids = build_vap._symbols(FakeSymbolReader(feed), "t")
-    assert ids == ["136", "114"]
 
 
 def test_build_vap_grid_delay_waits_only_when_positive():

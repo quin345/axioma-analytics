@@ -10,7 +10,7 @@ webapp: it never imports Flask or Kusto and opens the database **read-only**
 | Path | Purpose |
 | --- | --- |
 | `config.py` | `DB_PATH` (env var, then `.env`, then `webapp/data/axioma.db`) and the output folder |
-| `pipeline/data.py` | Loaders: `load_metrics_5m`, `load_symbols`, `load_vap` (VAP levels, loaded on request) |
+| `pipeline/data.py` | Loaders: `load_metrics_5m` |
 | `pipeline/clean.py` | UTC timestamps, de-duplication, regular 5-minute grid per instrument; `has_data=0` bars become NaN |
 | `pipeline/features.py` | Features that use only past data, plus `fwd_ret_{1,3,6,12}` targets (forward log returns over that many 5-minute bars) |
 | `pipeline/signals.py` | Candidate signals (`sig_*`), each a trailing rolling z-score |
@@ -115,7 +115,7 @@ the quote-update rate and timing. To add a hypothesis, append to `HYPOTHESES` **
 `studies/build_report.py` writes a static site to `research/site/` (gitignored): `index.html`,
 `report.css`, `charts/`, `slides.html` and `data/`. Flask serves it at `/research/` behind the same
 pilot login as the terminal. It's linked from the landing page header and footer and from the
-terminal's **Research** tab. Signed-out visitors get the sign-in dialog and land back on the report.
+terminal's **Research** tab. Signed-out visitors are sent to the standalone `/login` page, which returns them to the report after sign-in.
 
 The report leads with the hypothesis screen (`output/screen/`: top picks, full ranking, method, downloads
 copied to `data/screen/`). `results.json` from `run_studies.py` is optional: if it exists the older POC

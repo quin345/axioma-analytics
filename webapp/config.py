@@ -31,7 +31,7 @@ class Config:
     sql_database: str    # the database (catalog) to write into
     sql_schema: str      # schema for the mirrored table
     sql_table: str       # the mirrored table name
-    auth_username: str   # login for /terminal/ and /api/*; blank = no login wall
+    auth_username: str   # pilot login for the whole site; blank = no login wall
     auth_password: str
     secret_key: str      # signs the session cookie; shared by every worker
     cookie_secure: bool  # send the session cookie over HTTPS only

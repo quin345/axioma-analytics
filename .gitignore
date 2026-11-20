@@ -27,6 +27,10 @@ dist/
 .vscode/
 .cline/
 
+# Claude Code local state
+.claude/worktrees/
+.claude/settings.local.json
+
 # --- Research pipeline outputs ---
 research/output/
 .ipynb_checkpoints/

@@ -453,17 +453,6 @@ def load_profile(conn, symbol_id, window_minutes, as_of=None):
     }
 
 
-def prune(conn, keep=500):
-    """Keep the newest `keep` stops per (symbol, window); delete the rest.
-
-    Kept for callers and tests written against the original single knob. New
-    code should use `prune_runs` (row cap and/or time cut on `vap_run`) and
-    `prune_levels` (the ladder detail) separately, because the two tables have
-    different lifetimes - see the module docstring.
-    """
-    return prune_runs(conn, keep=keep)
-
-
 def prune_runs(conn, keep=None, before=None):
     """Trim `vap_run` itself. Both bounds are optional and neither is on by default.
 

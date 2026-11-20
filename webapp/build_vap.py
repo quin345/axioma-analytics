@@ -36,21 +36,6 @@ from kusto_client import KustoReader
 WINDOWS = (60, 120, 180, 240)
 
 
-def _symbols(reader, table):
-    """The distinct symbol ids the feed collects, for the volume-at-price job.
-
-    `queries.symbols` returns the full (broker, account, symbol) triple so the
-    dashboard can join on all three, but this job records its profiles per
-    symbol id - `vap_run` is keyed on `(symbol_id, window_minutes, as_of)` - so
-    the ids are collapsed and de-duplicated here.
-    """
-    seen = []
-    for symbol_id, _ in _instruments(reader, table):
-        if symbol_id not in seen:
-            seen.append(symbol_id)
-    return seen
-
-
 def _instruments(reader, table):
     """The distinct (symbol id, trader account) pairs the feed collects.
 

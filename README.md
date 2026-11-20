@@ -1,7 +1,7 @@
 # AXIOMA Analytics
 
 Market microstructure analytics: a Flask API over the Fabric Kusto order-book
-feed, a React analytics terminal, and a public product landing page.
+feed, a React analytics terminal, and a product landing page (behind the pilot login).
 
 ## Repository layout
 
@@ -9,7 +9,7 @@ feed, a React analytics terminal, and a public product landing page.
 .
 ├── run.py              # Local dev launcher (Flask's built-in server)
 ├── gunicorn.conf.py    # Production server settings (gunicorn on 127.0.0.1:8000)
-├── deploy/axioma.service  # systemd unit as installed on the VM
+├── deploy/axioma.service  # reference systemd unit; adjust User, paths and EnvironmentFile to the host
 ├── webapp/             # Flask backend: API, page serving, cron jobs
 │   ├── app.py          #   routes (pages + /api/*)
 │   ├── config.py       #   environment-driven Config
@@ -23,6 +23,7 @@ feed, a React analytics terminal, and a public product landing page.
 │   ├── snapshot_symbols.py
 │   ├── load_symbols.py / symbols_manual.csv  # hand-maintained instrument names (symbol_manual)
 │   ├── static/maintenance.html  # holding page (MAINTENANCE_MODE)
+│   ├── static/login.html        # standalone sign-in page (/login)
 │   └── tests/test_backend.py
 ├── terminal/           # React + Vite analytics terminal  -> served at /terminal/
 ├── landing/            # React + Vite product landing page -> served at /
@@ -34,8 +35,6 @@ feed, a React analytics terminal, and a public product landing page.
 
 ## Routes
 
-| Path | Serves |
-| --- | --- |
 Every route is behind the pilot login except the ones marked public (deny by
 default: new routes and unknown paths need a session too). Signed-out page
 requests redirect to `/login?next=<path>`; `/api/*` answers 401.
