@@ -210,14 +210,17 @@ def build_rows(identity, series_raw, tick_rows, ends, price_scale, data_start):
 # --- Kusto reads -------------------------------------------------------------
 
 def load_mapping(db_path):
-    """The local symbol snapshot keyed on (account, symbol id).
+    """The local symbol catalogue keyed on (account, symbol id).
 
     `ctidTraderAccountId` is globally unique in cTrader, so (account, symbol)
     is a complete key without the broker spelling (see app.BROKER_ALIASES).
+    Hand-maintained `symbol_manual` rows are laid over the Fabric snapshot, as
+    the app does, so a manual name wins and an instrument the snapshot lacks
+    is still named.
     """
     conn = db.connect(db_path)
     try:
-        rows = db.load_symbol_mapping(conn)
+        rows = db.load_symbol_mapping(conn) + db.load_symbol_manual(conn)
     finally:
         conn.close()
     return {(str(r["ctid_trader_account"]), str(r["symbol_id"])): r for r in rows}
