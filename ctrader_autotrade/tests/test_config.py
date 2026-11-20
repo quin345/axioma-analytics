@@ -96,3 +96,24 @@ def test_overrides(make_env, make_toml):
 def test_unknown_setting(make_env, make_toml):
     with pytest.raises(ConfigError, match="unknown"):
         load(make_env(), make_toml("bogus = 1\n"))
+
+
+def test_data_source_defaults_and_toml(make_env):
+    s = load(make_env(), REAL_TOML)
+    assert s.data_source == "kql" and Settings().data_source == "kql"
+    assert (s.data_grace_s, s.data_retries, s.data_deadline_s, s.data_freshness_s, s.data_gap_max_s) == (3, 3, 10, 15, 60)
+    assert s.data_env_path() == Path(config.ROOT).parent / ".env"
+    assert load(make_env(), REAL_TOML, overrides={"data": {"source": "ctrader"}}).data_source == "ctrader"
+
+
+@pytest.mark.parametrize("text,match", [
+    ('[data]\nsource = "kusto"\n', "data.source"),
+    ("[data]\nfreshness_s = 0\n", "data.freshness_s"),
+    ("[data]\nretries = -1\n", "data.retries"),
+    ("[data]\ngrace_s = 5\ndeadline_s = 4\n", "grace_s must be below"),
+    ("[data]\ndeadline_s = 12\n", "backstop"),            # strategy grace_s 2 + EXIT_BACKSTOP_S 10
+    ("[data]\nbogus = 1\n", "unknown"),
+])
+def test_data_source_validation(make_env, make_toml, text, match):
+    with pytest.raises(ConfigError, match=match):
+        load(make_env(), make_toml(text))

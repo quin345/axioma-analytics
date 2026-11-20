@@ -1,7 +1,8 @@
-"""`autotrade` command line: probe | run | flatten | parity | report (README.md has the rollout).
+"""`autotrade` command line: probe | run | flatten | parity | report | kill-reset | kql-check (README.md has the rollout).
 
 Only `probe`, `run` and `flatten` connect to cTrader (demo host only). `report` and `parity` read
-the journal db read-only. Nothing here prints a credential.
+the journal db read-only; `kql-check` only reads KQL (and the journal, read-only). Nothing here prints
+a credential.
 """
 from __future__ import annotations
 
@@ -307,6 +308,73 @@ def cmd_parity(args) -> int:
     return 0
 
 
+def cmd_kql_check(args) -> int:
+    """Read-only smoke check of the [data] source = "kql" path: the bot's bucket query for the last N
+    minutes of its own streams, with counts, watermark lag and gaps; --verify recomputes the buckets in
+    Python from the raw rows (kql_source.reference_rows) and compares. No cTrader connection."""
+    from . import kql_source as kq
+    settings = _load(args)
+    if args.symbol_ids:
+        ids = [int(x) for x in args.symbol_ids.split(",") if x.strip()]
+    else:
+        conn = _open_ro(settings)
+        if conn is None:
+            print("pass --symbol-ids (no journal to take them from)")
+            return 1
+        since = int(time.time() * 1000) - 2 * 86_400_000
+        ids = [r[0] for r in conn.execute("SELECT DISTINCT symbol_id FROM bars WHERE slot_end_ms>=? ORDER BY 1",
+                                          (since,))]
+        conn.close()
+        if not ids:
+            print("no recent bars in the journal: pass --symbol-ids")
+            return 1
+    try:
+        cfg = kq.load_kql_config(settings.data_env_path())
+        reader = kq.KustoReader(cfg, settings.data_timeout_s)
+    except Exception as exc:
+        print(f"KQL not usable: {type(exc).__name__}: {exc}")
+        return 1
+    acct = str(settings.secrets.account_id)
+    now = int(time.time() * 1000)
+    to_ms = now // 10_000 * 10_000
+    req = kq.KqlRequest(cfg.table, acct, tuple(ids), to_ms - int(args.minutes * 60_000), to_ms)
+    t0 = time.time()
+    try:
+        rows = reader.rows(req)
+    except Exception as exc:
+        print(f"KQL query failed: {type(exc).__name__}: {str(exc)[:300]}")
+        return 1
+    res = kq.parse_result(req, rows)
+    print(f"KQL {cfg.database}.{cfg.table}: account {acct}, symbolIds {ids}, last {args.minutes:g} min "
+          f"(query {time.time() - t0:.2f}s)")
+    code = 0
+    for sid in ids:
+        bks = res.buckets[sid]
+        wm = res.watermark[sid]
+        gaps = kq.window_gaps([b.start_ms for b in bks], req.from_ms, to_ms, settings.data_gap_max_s * 1000)
+        lag = "n/a" if wm is None else f"{(now - wm) / 1000:.1f}s"
+        print(f"  symbolId {sid}: {len(bks)} buckets, {sum(b.events for b in bks)} events, watermark lag {lag}, "
+              f"gaps > {settings.data_gap_max_s:g}s: {len(gaps)} (session schedule not applied here)")
+        if not bks:
+            code = 1
+    if args.verify:
+        raw_q = (f"{cfg.table}\n| where ctidTraderAccountId == '{int(acct)}' and symbolId in "
+                 f"({', '.join(repr(str(i)) for i in ids)}) and timestamp >= {kq._kdt(req.from_ms)}\n| project symbol_id = toint(symbolId), ts_ms = "
+                 f"datetime_diff('millisecond', timestamp, datetime(1970-01-01)), seq = eventSeq, best_bid, best_ask")
+        raw = reader.run(raw_q)
+        ref = kq.parse_result(req, kq.reference_rows(req, raw))
+        for sid in ids:
+            a = [(b.start_ms, b.best_bid, b.best_ask, b.events) for b in res.buckets[sid]]
+            b = [(x.start_ms, x.best_bid, x.best_ask, x.events) for x in ref.buckets[sid]]
+            diff = sum(1 for x, y in zip(a, b) if x != y) + abs(len(a) - len(b))
+            wm_ok = res.watermark[sid] is None or ref.watermark[sid] is None or ref.watermark[sid] <= res.watermark[sid]
+            print(f"  verify symbolId {sid}: {len(a)} KQL buckets vs {len(b)} recomputed from {sum(1 for r in raw if r['symbol_id'] == sid)} "
+                  f"raw rows: {diff} differ; watermark {'ok' if wm_ok else 'MISMATCH'}")
+            if diff or not wm_ok:
+                code = 1
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="autotrade", description=__doc__.splitlines()[0])
     p.add_argument("--env", help="path to .env (default: ctrader_autotrade/.env)")
@@ -323,6 +391,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("parity", help="P4 drift: research features over the bars table vs journalled features")
     rp = sub.add_parser("report", help="forward-test report from the journal")
     rp.add_argument("--since-hours", type=float, help="only the last N hours")
+    kc = sub.add_parser("kql-check", help="read-only: the bot's KQL bucket query for its streams, counts and lag")
+    kc.add_argument("--minutes", type=float, default=30)
+    kc.add_argument("--symbol-ids", help="comma-separated cTrader symbolIds (default: from the journal's bars)")
+    kc.add_argument("--verify", action="store_true", help="recompute the buckets from raw rows and compare")
     return p
 
 
@@ -331,7 +403,7 @@ def main(argv=None) -> int:
     from . import config
     try:
         code = {"probe": cmd_probe, "run": cmd_run, "flatten": cmd_flatten, "report": cmd_report,
-                "parity": cmd_parity, "kill-reset": cmd_kill_reset}[args.cmd](args)
+                "parity": cmd_parity, "kill-reset": cmd_kill_reset, "kql-check": cmd_kql_check}[args.cmd](args)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         code = 1

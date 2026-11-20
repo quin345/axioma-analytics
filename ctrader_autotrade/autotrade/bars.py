@@ -25,6 +25,9 @@ PRICE_SCALE = 100000
 # 240 min of VAP + the slot being closed + one slot of slack for the open bucket / late closing.
 RETAIN_MS = (VAP_MINUTES + 2 * _ef.SLOT_MINUTES) * 60 * 1000
 NAN = float("nan")
+# Buckets built from every depth event: the bot's own feed or the KQL agg_dom table. "tick" (spot
+# changes) and "store" (reloaded own buckets) are approximate and count toward Bar.approx_share.
+EXACT_SOURCES = frozenset({"live", "kql"})
 
 
 class Bucketiser:
@@ -119,7 +122,7 @@ def slot_bar(symbol_id: int, slot_end: datetime, buckets: list[Bucket],
     vap_rows = _ef._between(raw, vstart, slot_end)
     v = _ef.vap_metrics(vap_rows, slot_end, PRICE_SCALE, vstart if data_start is None else data_start)
     window = [b for b in buckets if end_ms - VAP_MINUTES * 60_000 <= b.start_ms < end_ms]
-    approx = (sum(1 for b in window if b.source != "live") / len(window)) if window else 0.0
+    approx = (sum(1 for b in window if b.source not in EXACT_SOURCES) / len(window)) if window else 0.0
     return Bar(
         symbol_id=symbol_id, slot_end=slot_end, has_data=bool(m["has_data"]), events=int(m["events"]),
         mid_open=_f(m["mid_open"]), mid_high=_f(m["mid_high"]), mid_low=_f(m["mid_low"]),

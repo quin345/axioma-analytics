@@ -4,15 +4,18 @@ Lifecycle (DESIGN.md sections 3-5):
 
 1. `Bot.start()` starts the session. Every (re)connect handshake ends in `_on_ready`.
 2. First `_on_ready`: journal run record, broker (SimBroker in DRY_RUN, DemoBroker in DEMO and only
-   when the session is a verified demo), startup reconcile (DEMO), warm-up (stored buckets plus tick
-   gap fill), bars and features rebuilt for the last HISTORY_SLOTS slots, then subscribe.
-   Later `_on_ready` calls (reconnects) only gap-fill ticks and, when the order manager is idle,
-   reconcile again.
-3. Live: spot/depth feed the order manager, the sim broker, the stamper and the bucketiser.
-4. Slot timer at every 5 minute boundary + grace_s: close the bar, append features, decide, check
-   risk, hand the intent to the order manager and journal one signal row (with the taker and
-   maker-sim shadows, in both modes). A 5 s risk tick handles KILL, session close and long
-   disconnects between slots.
+   when the session is a verified demo), startup reconcile (DEMO), warm-up, bars and features
+   rebuilt for the last HISTORY_SLOTS slots, then subscribe. Warm-up with [data] source = "kql"
+   (default): one KQL query for the whole history, exact buckets; with "ctrader": stored buckets
+   plus tick gap fill (approximate). Later `_on_ready` calls (reconnects) gap-fill ticks (ctrader
+   only) and, when the order manager is idle, reconcile again.
+3. Live: spots feed the order manager, the sim broker and the stamper; with "ctrader" depth events
+   feed the bucketiser too (with "kql" depth is not subscribed).
+4. Slot timer at every 5 minute boundary + grace (grace_s; data.grace_s with "kql", after which the
+   slot's buckets are fetched from KQL with retries and the data gate is evaluated, see
+   `_kql_slot`): close the bar, append features, decide, check risk, hand the intent to the order
+   manager and journal one signal row (with the taker and maker-sim shadows, in both modes). A 5 s
+   risk tick handles KILL, session close and long disconnects between slots.
 5. Shutdown (SIGTERM/SIGINT, KILL file, SAFE, refusal, --hours): stop entries, cancel own resting
    orders, flatten, flush, record the end of the run, fire `Bot.done` with the exit code
    (0 ok, 2 refused, 3 SAFE).
@@ -33,12 +36,13 @@ from twisted.internet.defer import inlineCallbacks
 
 from ctrader_open_api.messages import OpenApiMessages_pb2 as oa
 
-from .bars import VAP_MINUTES, BarBuilder, Bucketiser, replay_bars
+from .bars import RETAIN_MS, VAP_MINUTES, BarBuilder, Bucketiser, replay_bars
 from .book import Stamper
 from .execution import DemoBroker, OrderManager
 from .features import FeatureEngine
 from .journal import Journal
 from . import killswitch
+from .kql_source import KqlFetch, KqlSource, stream_state, window_gaps
 from .resetday import day_start_ms, next_reset_ms
 from .risk import RiskManager, SessionCalendar
 from .session import Session
@@ -60,6 +64,7 @@ PERSIST_BACK_MS = 3 * SLOT_MS  # buckets re-saved at each slot close
 KEEP_BUCKETS_MS = 2 * 86_400_000
 EXIT_OK, EXIT_REFUSED, EXIT_SAFE = 0, 2, 3
 PARITY_MARKER = "PARITY_OK"    # state/PARITY_OK: the approximate-bar gate (DESIGN 4) was reviewed
+REPAIR_SLOTS = 48              # kql: bars closed on stale/failed data are rebuilt this far back
 
 
 @dataclass
@@ -85,7 +90,8 @@ def _finite(x) -> bool:
 class Bot:
     def __init__(self, settings, mode: RunMode, exec_mode: ExecMode, clock, transport,
                  journal: Optional[Journal] = None, hours: Optional[float] = None,
-                 history_slots: int = HISTORY_SLOTS, engine: Optional[FeatureEngine] = None):
+                 history_slots: int = HISTORY_SLOTS, engine: Optional[FeatureEngine] = None,
+                 kql: Optional[KqlSource] = None):
         self.settings = dataclasses.replace(settings, exec=exec_mode.value)
         self.mode, self.exec_mode = mode, exec_mode
         self.clock = clock
@@ -97,8 +103,18 @@ class Bot:
         self.risk = RiskManager(self.settings)
         self.engine = engine or FeatureEngine()
         self.stamper = Stamper()
-        self.bucketiser = Bucketiser()
+        self.kql_mode = self.settings.data_source == "kql"
+        self.kql = kql
+        # kql: keep enough buckets to rebuild REPAIR_SLOTS bars once stale data has caught up
+        self.bucketiser = Bucketiser(RETAIN_MS + REPAIR_SLOTS * SLOT_MS) if self.kql_mode else Bucketiser()
         self.builder = BarBuilder(self.bucketiser)
+        self._kql_warmed = False       # the history fetch succeeded
+        self._kql_to: Optional[int] = None    # end of the last successful fetch
+        self._warm_wm: dict[int, Optional[int]] = {}
+        self._good_until: dict[int, int] = {}  # last slot_end whose bar was built from complete data
+        self._gate: dict[int, str] = {}         # last data gate per symbol ("ok" or a reason)
+        self._slot_lock = defer.DeferredLock()
+        self._first_slot_ms: Optional[int] = None   # first slot closed by this run
         self.om: Optional[OrderManager] = None
         self.broker = None
         self.specs: dict = {}
@@ -133,6 +149,7 @@ class Bot:
         self._unreal_err = False         # server unrealised request failed, warning once per streak
 
         s = self.session
+        s.subscribe_depth = not self.kql_mode
         s.on_ready = self._on_ready
         s.on_spot = self._on_spot
         s.on_depth = self._on_depth
@@ -337,6 +354,10 @@ class Bot:
     @inlineCallbacks
     def _warmup(self, now: int, first: bool):
         self._persist_buckets(back_ms=None)
+        if self.kql_mode:
+            if first:      # KQL does not depend on the bot's connection: nothing to do on a reconnect
+                yield self._warmup_kql(now)
+            return
         hours = self.warmup_hours()
         self._warm_start_ms = now - int(hours * 3600_000)
         out = yield warmup(self.session, sorted(self.specs), self.journal.load_buckets, now, hours)
@@ -353,6 +374,36 @@ class Bot:
                 self._warm_buckets[sid] = new   # bars are replayed from the full set, see _rebuild_bars
             self.bucketiser.load(new)           # keeps only the retention window for live operation
             log.info("warm-up %s: %d buckets loaded", self.specs[sid].name, len(new))
+
+    def _kql_source(self) -> KqlSource:
+        if self.kql is None:
+            self.kql = KqlSource.from_settings(self.settings, reactor=self.clock.reactor)
+        return self.kql
+
+    @inlineCallbacks
+    def _warmup_kql(self, now: int):
+        """One query for the whole history window (history_slots bars + their 240 min VAP windows)."""
+        start = now - int(self.warmup_hours() * 3600_000)
+        res = yield self._kql_source().fetch(sorted(self.specs), start, now)
+        self._install_kql(res, history=True)
+        self._warm_start_ms = res.request.from_ms
+
+    def _install_kql(self, res: KqlFetch, history: bool) -> None:
+        for sid, bks in res.buckets.items():
+            if sid not in self.specs:
+                continue
+            if history:
+                self._warm_buckets[sid] = bks
+                self._warm_wm[sid] = res.watermark.get(sid)
+                log.info("warm-up %s: %d KQL buckets", self.specs[sid].name, len(bks))
+                if not bks:
+                    log.error("warm-up %s: agg_dom has no rows for account %s symbolId %s since %s: is its "
+                              "ctrader-collector@ unit running?", self.specs[sid].name, res.request.account,
+                              sid, _utc(res.request.from_ms).isoformat())
+            self.bucketiser.load(bks)
+        self._kql_to = res.request.to_ms
+        if history:
+            self._kql_warmed = True
 
     def warmup_hours(self) -> float:
         """Fetch depth: enough that each of the history_slots bars (so each z-window bar) has a full
@@ -376,9 +427,19 @@ class Bot:
                             buckets[0].start_ms // SLOT_MS * SLOT_MS + SLOT_MS)
             have = self.journal.bar_slots(sid, start_end)
             bars = replay_bars(sid, buckets, start_end, last_end, self._warm_start_ms)
-            self.engine.load(bars, live=False)
+            if self.kql_mode:
+                # exact buckets: the bars count as live (events_z uses them). A history fetch made after
+                # failed slots replaces the placeholder bars those slots appended.
+                self.engine.drop_from(sid, _utc(start_end))
+                self._vol[sid] = []
+                if stream_state(self._warm_wm.get(sid), last_end, self.settings.data_freshness_s * 1000) != "stale":
+                    self._good_until[sid] = last_end
+            self.engine.load(bars, live=self.kql_mode)
             for b in bars:
-                if int(b.slot_end.timestamp() * 1000) not in have:
+                ms = int(b.slot_end.timestamp() * 1000)
+                # kql: a history fetch after failed slots replaces the placeholder bars this run journalled
+                # (never the bars of earlier runs: their signals were computed from them)
+                if ms not in have or (self.kql_mode and self._first_slot_ms is not None and ms >= self._first_slot_ms):
                     self.journal.record_bar(b)
                 if b.has_data and _finite(b.realised_vol_pct):
                     self._vol.setdefault(sid, []).append(b.realised_vol_pct)
@@ -421,6 +482,8 @@ class Bot:
 
     def _on_depth(self, symbol_id, new_quotes, deleted_ids, raw) -> None:
         self.last_data_ms[symbol_id] = self.clock.now_ms()
+        if self.kql_mode:   # not subscribed with kql; never mix own rows into the KQL buckets
+            return
         row = self.stamper.on_depth(symbol_id, new_quotes, deleted_ids)
         if row is not None:
             self.bucketiser.on_row(row)
@@ -429,7 +492,7 @@ class Bot:
 
     def _arm_slot(self) -> None:
         now = self.clock.now_ms()
-        grace = self.settings.grace_s * 1000
+        grace = int((self.settings.data_grace_s if self.kql_mode else self.settings.grace_s) * 1000)
         b = max((now - grace) // SLOT_MS * SLOT_MS + SLOT_MS, self._last_slot_ms + SLOT_MS)
         self._calls["slot"] = self.clock.call_later(max(b + grace - now, 0) / 1000, self._on_slot, b)
 
@@ -439,21 +502,153 @@ class Bot:
         if self._stopping:
             return
         self._arm_slot()
+        if self.kql_mode:
+            d = self._slot_lock.run(self._kql_slot, slot_end_ms)
+            d.addErrback(self._slot_failed, slot_end_ms)
+            return
         try:
             self._process_slot(slot_end_ms)
         except Exception:
             log.exception("slot %d failed", slot_end_ms)
             self.journal.record_risk_event("slot_error", str(slot_end_ms))
 
-    def _process_slot(self, slot_end_ms: int) -> None:
+    def _slot_failed(self, failure, slot_end_ms: int) -> None:
+        log.error("slot %d failed: %s", slot_end_ms, failure.getTraceback())
+        try:
+            self.journal.record_risk_event("slot_error", str(slot_end_ms))
+        except Exception:
+            pass
+
+    # ---- KQL data path ([data] source = "kql") ----
+
+    def _sleep(self, seconds: float) -> defer.Deferred:
+        d: defer.Deferred = defer.Deferred()
+        self.clock.call_later(seconds, lambda: d.called or d.callback(None))
+        return d
+
+    def _spot_ref_ms(self, sid: int) -> Optional[int]:
+        """The bot's latest spot timestamp, only while its own feed is up (stream_state's quiet-market rule)."""
+        if not self.trading_ready or self._down_since is not None:
+            return None
+        return self.stamper.last_spot_ms(sid)
+
+    @inlineCallbacks
+    def _kql_slot(self, slot_end_ms: int):
+        """Fetch the slot's buckets from KQL, then close the bars.
+
+        First attempt at slot_end + data.grace_s; while a stream is not complete (stream_state) retry
+        every data.retry_s, at most data.retries more times and not past slot_end + data.deadline_s.
+        Then every symbol gets a data gate (_kql_gate) and the slot is processed. A failed fetch never
+        raises: the gate is "kql_error". Until the history fetch has succeeded once, each slot retries it.
+        """
+        if self._stopping or not self.specs:
+            return
+        st = self.settings
+        sids = sorted(self.specs)
+        t = slot_end_ms
+        deadline = t + int(st.data_deadline_s * 1000)
+        history = not self._kql_warmed
+        if history:
+            from_ms = t - int(self.warmup_hours() * 3600_000)
+        else:
+            from_ms = max((self._kql_to or t) - SLOT_MS,                      # re-read the previous tail
+                          t - VAP_MINUTES * 60_000 - (REPAIR_SLOTS + 1) * SLOT_MS)
+        res: Optional[KqlFetch] = None
+        err = ""
+        attempts = 0
+        while True:
+            attempts += 1
+            left = (deadline - self.clock.now_ms()) / 1000
+            try:
+                res = yield self._kql_source().fetch(sids, from_ms, t, timeout_s=max(1.0, min(st.data_timeout_s, left)))
+                err = ""
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"[:300]
+                log.warning("KQL fetch for slot %s failed (attempt %d): %s", _utc(t).strftime("%H:%M"),
+                            attempts, err)
+            if self._stopping:
+                return
+            if res is not None and all(
+                    stream_state(res.watermark.get(s), t, st.data_freshness_s * 1000, self._spot_ref_ms(s))
+                    == "complete" for s in sids):
+                break
+            if attempts > st.data_retries or self.clock.now_ms() + st.data_retry_s * 1000 >= deadline:
+                break
+            yield self._sleep(st.data_retry_s)
+            if self._stopping:
+                return
+        if res is None:
+            self.journal.record_risk_event("kql_error", f"slot {t}: {attempts} attempts: {err}")
+        else:
+            self._install_kql(res, history)
+            if history:
+                self._warm_start_ms = res.request.from_ms
+                self._rebuild_bars(t - 1)        # bars up to the previous slot; this slot is closed below
+        gates = {sid: self._kql_gate(sid, t, res) for sid in sids}
+        self._process_slot(t, gates)
+
+    def _kql_gate(self, sid: int, t: int, res: Optional[KqlFetch]) -> Optional[str]:
+        """None = tradable. "kql_error": no data; "kql_stale": KQL lags more than data.freshness_s;
+        "kql_gap": the 240 min window has an open-session stretch without buckets > data.gap_max_s."""
+        st = self.settings
+        if res is None:
+            gate = "kql_error"
+        elif stream_state(res.watermark.get(sid), t, st.data_freshness_s * 1000, self._spot_ref_ms(sid)) == "stale":
+            gate = "kql_stale"
+        else:
+            vstart = t - VAP_MINUTES * 60_000
+            cal = self.calendars.get(sid)
+            gaps = window_gaps((b.start_ms for b in self.bucketiser.buckets_between(sid, vstart, t)), vstart, t,
+                               st.data_gap_max_s * 1000, cal.open_predicate(t) if cal else None)
+            gate = "kql_gap" if gaps else None
+            if gaps:
+                g = max(gaps, key=lambda x: x[2])
+                detail = (f"{len(gaps)} gap(s), longest {(g[1] - g[0]) / 1000:.0f}s from "
+                          f"{_utc(g[0]).strftime('%H:%M:%S')} to {_utc(g[1]).strftime('%H:%M:%S')}")
+        prev = self._gate.get(sid, "ok")
+        cur = gate or "ok"
+        if cur != prev:
+            wm = None if res is None else res.watermark.get(sid)
+            text = f"{prev} -> {cur}" + (f" ({detail})" if gate == "kql_gap" else "") + \
+                (f" watermark {_utc(wm).isoformat()}" if wm is not None else "")
+            (log.info if cur == "ok" else log.warning)("data gate %s: %s", self.specs[sid].name, text)
+            self.journal.record_risk_event("data_gate", text, sid, self.clock.now_ms())
+            self._gate[sid] = cur
+        return gate
+
+    def _kql_bar(self, sid: int, slot_end_ms: int, gate: Optional[str]):
+        """(bar, live). With complete data, bars closed earlier on stale/failed data (up to REPAIR_SLOTS
+        back) are rebuilt first, so the feature history matches what research will see."""
+        t = slot_end_ms
+        live = gate in (None, "kql_gap")      # a gap is real (exact) data; stale/error is not
+        if live:
+            lo = self._good_until.get(sid)
+            first = t - REPAIR_SLOTS * SLOT_MS if lo is None else max(lo + SLOT_MS, t - REPAIR_SLOTS * SLOT_MS)
+            if first < t:
+                bars = [self.builder.close_slot(sid, _utc(e)) for e in range(first, t, SLOT_MS)]
+                self.engine.drop_from(sid, _utc(first))
+                self.engine.load(bars, live=True)
+                for b in bars:
+                    self.journal.record_bar(b)
+                vols = [b.realised_vol_pct for b in self.engine.bars(sid) if b.has_data and _finite(b.realised_vol_pct)]
+                self._vol[sid] = vols[-12:]
+                log.info("%s: rebuilt %d bar(s) from %s with complete KQL data", self.specs[sid].name, len(bars),
+                         _utc(first).strftime("%H:%M"))
+            self._good_until[sid] = t
+        return self.builder.close_slot(sid, _utc(t)), live
+
+    def _process_slot(self, slot_end_ms: int, gates: Optional[dict] = None) -> None:
         now = self.clock.now_ms()
+        if self._first_slot_ms is None:
+            self._first_slot_ms = slot_end_ms
         self._persist_buckets()
         self.journal.prune_buckets(slot_end_ms - KEEP_BUCKETS_MS)
         if self._check_kill():
             return
         for sid in sorted(self.specs):
             try:
-                self._process_symbol(self.specs[sid], slot_end_ms, now)
+                self._process_symbol(self.specs[sid], slot_end_ms, now,
+                                     None if gates is None else gates.get(sid, "kql_error"))
             except Exception:
                 log.exception("symbol %s slot %d failed", self.specs[sid].name, slot_end_ms)
                 self.journal.record_risk_event("symbol_error", str(slot_end_ms), sid)
@@ -464,12 +659,17 @@ class Bot:
             return self.mode is RunMode.DRY_RUN   # dry-run still journals; DEMO waits for the gate
         return True
 
-    def _process_symbol(self, spec, slot_end_ms: int, now: int) -> None:
+    def _process_symbol(self, spec, slot_end_ms: int, now: int, gate: Optional[str] = None) -> None:
+        """gate (kql only): None = tradable, else the data-gate reason; entries are dropped (reason = gate),
+        an open position is time-exited as usual (no rollover); must_flatten and the server stop are untouched."""
         sid = spec.symbol_id
         slot_dt = _utc(slot_end_ms)
-        bar = self.builder.close_slot(sid, slot_dt)
-        live = all(b.source == "live" for b in self.bucketiser.buckets_between(
-            sid, slot_end_ms - SLOT_MS, slot_end_ms))
+        if self.kql_mode:
+            bar, live = self._kql_bar(sid, slot_end_ms, gate)
+        else:
+            bar = self.builder.close_slot(sid, slot_dt)
+            live = all(b.source == "live" for b in self.bucketiser.buckets_between(
+                sid, slot_end_ms - SLOT_MS, slot_end_ms))
         self.journal.record_bar(bar)
         row = self.engine.append(bar, live=live)
         if bar.has_data and _finite(bar.realised_vol_pct):
@@ -498,7 +698,8 @@ class Bot:
                 decision, reason = "hold", "not_due"
             else:
                 intent = decide(row, q, position, spec, self.settings, now, slot_end_ms,
-                                self._approx_ok(row), self._vol.get(sid))
+                                self._approx_ok(row) and gate is None, self._vol.get(sid),
+                                gate_reason=gate or "approx")
                 ok, rreason, mult = self.risk.check(intent, ctx)
                 if intent.kind in (IntentKind.ENTER, IntentKind.FLIP):
                     if not ok:
@@ -526,8 +727,9 @@ class Bot:
             approx_share=row.approx_share, decision=decision, reason=reason, taker_entry=taker_entry)
         spread_bp = NAN if q is None else (q.ask - q.bid) / ((q.ask + q.bid) / 2) * 1e4
         log.info("slot %s %s mid=%.5g z_poc=%.2f z_range=%.2f events_z=%.2f spread_bp=%.2f approx=%.2f "
-                 "-> %s (%s)", slot_dt.strftime("%H:%M"), spec.name, bar.mid_close, row.z_poc, row.z_range,
-                 row.events_z, spread_bp, row.approx_share, decision, reason or "-")
+                 "data=%s -> %s (%s)", slot_dt.strftime("%H:%M"), spec.name, bar.mid_close, row.z_poc, row.z_range,
+                 row.events_z, spread_bp, row.approx_share,
+                 (gate or "kql") if self.kql_mode else "ctrader", decision, reason or "-")
 
     def _handle(self, intent: Intent, spec, q, now: int) -> tuple[str, str]:
         self.om.handle(intent, spec, q, now)

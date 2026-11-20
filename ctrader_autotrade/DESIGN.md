@@ -6,9 +6,10 @@ Status: **accepted** (2026-11-20). Lives in `axioma-analytics/ctrader_autotrade/
 ## 1. Summary
 
 A separate Python/Twisted process trades `poc_reversion_4h` on a **demo** cTrader account.
-It rebuilds the research 5-minute bars from its own spot and depth subscriptions, computes the
-features with a vendored copy of the research code (parity tested), and journals everything for a
-forward test against the research holdout.
+It builds the research 5-minute bars from the same per-event depth data research uses (the Fabric
+KQL table `dom_ctrader.agg_dom`, section 4; its own depth subscription is the fallback), computes the
+features with the research code itself (parity tested), and journals everything for a forward test
+against the research holdout. Orders, spreads and the stale-data guard use its own spot subscription.
 
 **Expected P&L is negative.** This is a forward test of the signal, not a money-maker.
 
@@ -40,7 +41,9 @@ as filled if the next bar's range reaches it) gave:
 
 ## 2. Strategy (frozen defaults)
 
-Decisions are made once per instrument per 5-minute bar, at `slot_end + 2 s`.
+Decisions are made once per instrument per 5-minute bar: at `slot_end + 3 s` with the KQL data
+source (later, up to `slot_end + 10 s`, only while KQL catches up; section 4), at `slot_end + 2 s`
+with the `ctrader` source.
 
 **Features** are identical to research (`features.py`):
 
@@ -78,8 +81,11 @@ autotrade/
   book.py       order book and the collector's stamping rule (row per depth event, last spot timestamp)
   bars.py       10 s buckets to 5-minute bars: vendored analytics.kpis/spread/volume_at_price/value_area
                 and export_flat slot/VAP metrics
+  kql_source.py [data] source = "kql": 10 s bucket query on agg_dom, watermark, data gates (stream_state,
+                window_gaps), Kusto reader in the reactor thread pool
   features.py   FeatureEngine: 5-minute grid with NaN rows, vendored research pandas expressions
-  warmup.py     own bucket store reload, plus ProtoOAGetTickDataReq gap fill; provenance in approx_share
+  warmup.py     source = "ctrader" only: own bucket store reload, plus ProtoOAGetTickDataReq gap fill;
+                provenance in approx_share
   strategy.py   pure decide() -> Intent
   risk.py       limits, KILL/PAUSE files, breakers, sessions, spread and stale-data guards
   execution.py  order/position state machine; DemoBroker (Open API)
@@ -97,7 +103,7 @@ autotrade/
 4. SymbolsList (resolve by name), then SymbolById
 5. Reconcile
 6. Warm-up
-7. Subscribe to spots (with timestamps) and depth
+7. Subscribe to spots (with timestamps), and depth only with `[data] source = "ctrader"`
 
 The host is `demo.ctraderapi.com:5035` only.
 
@@ -120,9 +126,72 @@ Research definitions to reproduce:
 - VAP over 240 minutes: 60 equal bins, event-weighted, POC = first max bin, greedy 70% value area;
 - a 5-minute grid with NaN rows (weekends and gold's daily break count against the windows).
 
-**Warm-up.** On restart the bot reloads its own stored buckets, then gap-fills from tick data,
-about 9 hours back. Tick data counts spot changes, not depth events, so weighting differs.
-`events_z` uses live bars only. Every signal journals `approx_share`.
+### Data source (`[data]` in `config.toml`)
+
+**`source = "kql"` (default).** The bars come from `dom_ctrader.agg_dom`, the table research and the
+webapp read. The `ctrader-collector@<broker>-<account>-<SYMBOL>` units write one row per depth event with
+the stamping rule above; ingestion takes under 1 s. The bot selects its own streams by
+`ctidTraderAccountId` (its account) and `symbolId` (resolved through cTrader, compared as a string).
+`autotrade/kql_source.py` asks for 10 s buckets in KQL:
+
+- each bucket holds the last book state and the event count, as in `Bucketiser` and `webapp/queries.py`
+  `series_range`;
+- ties go to the greatest `eventSeq`, which is what `Bucketiser` does when rows share the last timestamp
+  (it keeps the later one). The plain `arg_max(timestamp, ...)` in the webapp picks arbitrarily: about 1%
+  of buckets on acgmarkets have such ties. The key is a fixed-width string, so it does not care where
+  `eventSeq` starts;
+- one query also returns the stream's **watermark** (latest `timestamp`, no upper bound).
+
+Tests prove the query semantics equal `Bucketiser` on recorded and synthetic rows, and the bars equal
+`export_flat.build_rows` to 1e-9. `autotrade kql-check --verify` repeats the first check against live KQL.
+
+- **Warm-up.** One query covers the whole history window (`history_slots` × 5 min + 240 min = 16.5 h).
+  The buckets are exact (`source "kql"`), so they do not count toward `approx_share`, and the warm-up
+  bars count as live for `events_z`. A restart can trade at the next slot close. There is no tick fill and
+  no 4-hour wait. If the query fails, every later slot retries the history fetch first.
+- **Slot close.** At `slot_end + data.grace_s` (3 s) the bot fetches `[last fetch − 5 min, t)` for all its
+  streams. A stream is *complete* when the watermark is at or after `t`, or, while the bot's own spot
+  feed is up, when the watermark has reached the latest spot timestamp the bot has seen (a quiet
+  market). Until every stream is complete the bot retries every `retry_s` (2 s), at most `retries` (3)
+  more times, and never past `slot_end + deadline_s` (10 s). Then it decides.
+  `deadline_s` must stay below `grace_s + EXIT_BACKSTOP_S` (12 s). Past that, the order manager has
+  already time-exited a position the strategy might have rolled over.
+- **Data gate** (per symbol and bar; `None` means tradable):
+  - `kql_error`: every attempt failed (network, auth, timeout, bad config);
+  - `kql_stale`: the watermark is older than `t − freshness_s` (15 s);
+  - `kql_gap`: the 240-minute VAP window has a stretch without buckets longer than `gap_max_s` (60 s),
+    counting only time when the symbol's session schedule (`SessionCalendar`) is open. Gold's daily
+    break and weekends are therefore not gaps. A stream that started less than 4 hours ago also has a
+    gap, because its window is truncated.
+
+  Measured on the live feed: in an open session, depth events arrive in every 10 s bucket. The only
+  in-session gaps found in 3 days were collector outages.
+- **What a gate does.** A gated bar gives no entry and no rollover (reason = the gate in `signals`).
+  An open position is time-exited at the slot close, as for any bar without a trusted signal.
+  `must_flatten` (session close, disconnect, KILL) runs on the 5 s risk tick from spots and the
+  journal, and the server-side protective stop is never touched, so data trouble never blocks
+  flattening. Every change of a symbol's gate is a `data_gate` risk event; every slot that got no data
+  at all is a `kql_error` risk event. KQL errors never raise into the bot.
+- **Repair.** A bar closed on `kql_stale` or `kql_error` data enters the features as non-live. At the next
+  complete slot the bot rebuilds the bars since the last complete one (up to 48 back) from the
+  re-fetched buckets, in the FeatureEngine and the `bars` table. The feature history then matches what
+  research will compute. The signal rows of the gated slots keep what was decided at the time.
+- KQL does not depend on the bot's cTrader connection, so a reconnect needs no gap fill.
+- Kusto settings: `KUSTO_CLUSTER_URI`, `KUSTO_DATABASE`, `KUSTO_TABLE` and `AZURE_TENANT_ID` /
+  `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` (service principal; without them `DefaultAzureCredential`).
+  They are read from `data.env_file` (default `../.env`, the webapp's file; only these keys are read)
+  or from the process environment, which wins. The Kusto client is blocking, so it runs in the
+  reactor's thread pool, with a per-query timeout.
+
+**`source = "ctrader"` (fallback).** The bot subscribes to depth, feeds `Stamper` → `Bucketiser`
+itself, stores its buckets in `state/autotrade.db` and warms up from them.
+- **Warm-up.** On restart the bot reloads its stored buckets, then gap-fills from tick data over the
+  same history window (16.5 h). Tick data counts spot changes, not depth events, so the weighting
+  differs: those buckets are approximate (`approx_share > 0`). `events_z` uses live bars only.
+  Without `state/PARITY_OK`, DEMO entries wait until the 240-minute window is fully live, about
+  4 hours after every restart.
+
+Every signal journals `approx_share` (0 with `kql`).
 
 **Parity tests:**
 
@@ -205,8 +274,13 @@ about 9 hours back. Tick data counts spot changes, not depth events, so weightin
 
 ## 6. Isolation and deployment
 
-- Own process, connection, venv (`.venv`) and files. It must never touch the depth collector (`/root/data-mining-project/collector`).
-- systemd unit (described, not installed): non-root user, `Restart=on-failure`, `MemoryMax=512M`, `CPUQuota=50%`. The caps are there because this host serves the production webapp.
+- Own process, connection, venv (`.venv`) and files. It must never touch the depth collector
+  (`/root/data-mining-project/collector`). With `source = "kql"` it reads the collector's output in KQL,
+  read-only, and needs those collector units running for its own account and symbols.
+- systemd unit `ctrader-autotrade.service` (installed at `/etc/systemd/system`). It runs as root with
+  sandboxing (`ProtectSystem=strict`, write access only to `state/` and `logs/`), `Restart=on-failure`,
+  `MemoryMax=512M` and `CPUQuota=50%`. The caps are there because this host serves the production
+  webapp. The Kusto settings come from `data.env_file`, so the unit needs no extra `EnvironmentFile`.
 
 ## 7. Build plan
 

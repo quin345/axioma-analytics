@@ -3,8 +3,8 @@
 Demo-account cTrader autotrader for the `poc_reversion_4h` hypothesis, a forward test of the
 research signal (expected P&L is negative). Design and decisions: [DESIGN.md](DESIGN.md).
 
-Status: built (T0-T5): runnable bot, CLI, forward-test report and end-to-end tests. Not yet run
-against the live demo server: start with `probe`.
+Status: built and running on the demo account as the `ctrader-autotrade` systemd unit (see
+Deployment). Its bars come from the Fabric KQL table `dom_ctrader.agg_dom` by default (see Data source).
 
 ## Setup
 
@@ -15,7 +15,9 @@ against the live demo server: start with `probe`.
     cp .env.example .env   # fill in credentials (never committed)
 
 `ctrader_open_api` comes from `/root/data-mining-project/src` via a .pth file, because installing
-that whole project would pull the Azure/pyodbc dependencies. Non-secret settings live in `config.toml`.
+that whole project would pull the Azure/pyodbc dependencies. `requirements.txt` includes
+`azure-identity` and `azure-kusto-data` for the KQL data source; they are imported only when
+`[data] source = "kql"`. Non-secret settings live in `config.toml`.
 
 ## Tests
 
@@ -39,6 +41,7 @@ Run from this directory (`state/` and `logs/` are relative to it, see `config.to
 | `autotrade parity` | P4 drift check: runs the research feature code over the bot's own `bars` table and compares with the features journalled in `signals`. |
 | `autotrade report [--since-hours N]` | Forward-test report from the journal (see below), including the kill-switch numbers. |
 | `autotrade kill-reset` | Re-arms the P&L kill switch: writes a new baseline at now. Does not remove `state/KILL` or `state/PAUSE` (it prints the command). |
+| `autotrade kql-check [--minutes 30] [--symbol-ids 41,10026] [--verify]` | Read-only. Runs the bot's KQL bucket query for its own streams and prints buckets, events, watermark lag and gaps. `--verify` recomputes the buckets from the raw rows and compares them. Does not connect to cTrader. Symbol ids default to those in the journal's recent bars. |
 
 Exit codes: 0 normal (including KILL), 1 error or timeout, 2 refused (live account, wrong host,
 account not in the token's list), 3 SAFE mode (token expired without a refresh token).
@@ -48,14 +51,15 @@ account not in the token's list), 3 SAFE mode (token expired without a refresh t
 1. `autotrade probe`. Check: not live, the right broker, both symbols resolved (aliases in
    `config.toml`), plausible spreads, slDistance/distanceSetIn (the PERCENTAGE unit is an assumption in
    `strategy.py`), account type HEDGED/NETTED, money digits.
-2. `autotrade run --mode dry-run` for 24-48 hours (e.g. `--hours 48`, or under `nohup`). It trades
-   only in the simulator but journals everything. The first ~4 hours rely on approximated history
-   (`approx_share > 0`); dry-run journals those signals anyway.
+2. `autotrade kql-check --verify` (the KQL data source; needs the account's collector units running), then
+   `autotrade run --mode dry-run` for 24-48 hours (e.g. `--hours 48`, or under `nohup`). It trades only
+   in the simulator but journals everything.
 3. `autotrade report` and `autotrade parity`. A forward IC t of about 3 needs ~7 four-hour blocks (about 28 h of
    market). Check the taker shadow against the research figures, the maker-sim numbers, spreads, risk
    events, and the parity drift.
-4. Only then `autotrade run --mode demo` (or the systemd unit, see below). In demo mode entries on
-   approximated bars are blocked (reason `approx`) until `state/PARITY_OK` exists: create it (empty
+4. Only then `autotrade run --mode demo` (or the systemd unit, see below). With the default
+   `source = "kql"` the bars are exact from the start. With `source = "ctrader"`, demo entries on
+   approximated bars are blocked (reason `approx`) until `state/PARITY_OK` exists. Create it (an empty
    file) after reviewing the parity report and the DESIGN.md section 4 gate
    (Spearman(poc_dist_240) >= 0.98, side agreement >= 97%). Without it the bot waits for four hours
    of fully live history after every restart.
@@ -68,8 +72,46 @@ account not in the token's list), 3 SAFE mode (token expired without a refresh t
 - `state/PAUSE`: no new entries (existing positions still exit on schedule). Delete to resume. Written by the
   kill switch when `profit_action = "pause"`.
 - `state/kill_baseline.json`, `state/kill_status.json`: the kill switch's baseline and its latest numbers (mode 0600).
-- `state/PARITY_OK`: demo only, lifts the approximate-bar block (see rollout step 4).
+- `state/PARITY_OK`: demo with `source = "ctrader"` only. It lifts the approximate-bar block (see
+  rollout step 4). KQL bars are never approximate.
 - `state/token.json`: refreshed access token (mode 0600), only if `refresh_token` is configured.
+
+## Data source
+
+    [data]
+    source = "kql"        # or "ctrader": own depth feed + bucket store + tick gap fill (the old path)
+    env_file = "../.env"  # KUSTO_CLUSTER_URI, KUSTO_DATABASE, KUSTO_TABLE, AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET
+    grace_s = 3           # first query 3 s after each slot end
+    retry_s = 2           # retry while KQL has not reached the slot end
+    retries = 3
+    deadline_s = 10       # then decide with what is there (must be < strategy grace_s + 10)
+    timeout_s = 10
+    freshness_s = 15      # KQL behind by more than this -> "kql_stale"
+    gap_max_s = 60        # open-session hole in the 240 min window longer than this -> "kql_gap"
+
+With `kql` the bot reads 10 s buckets for its account and symbols from `dom_ctrader.agg_dom`, which the
+`ctrader-collector@<broker>-<account>-<SYMBOL>` units fill. It subscribes to spots only (for orders,
+spreads and the stale guard), never depth.
+
+- **Start-up.** One query fetches 16.5 h of history, the bars are exact, and the bot can trade at the next
+  slot close. There is no 4-hour approximate period and no tick fill.
+- **Each slot.** The bot queries KQL 3 s after the slot end, retrying until the data reaches the slot end
+  (normally the first attempt does).
+- **Data gate.** A bar is not tradable when KQL failed (`kql_error`), lags more than 15 s (`kql_stale`),
+  or the 240-minute window has a hole of more than 60 s while the market was open (`kql_gap`). The gold
+  break and weekends do not count. A stream that started less than 4 hours ago is still a hole. Such a
+  bar opens nothing and rolls nothing over, and an open position is time-exited as usual. Flattening
+  (KILL, session close, disconnect) and the server-side stop do not depend on KQL.
+- **Logging.** `signals.reason` holds the gate. Each change of gate is a `data_gate` risk event, and each
+  slot without any data is a `kql_error` risk event. Once KQL catches up, the affected bars are rebuilt.
+
+Prerequisites:
+
+- the bot's account (`ctidTradeAccountId` in `.env`) must have running collector units for its symbols
+  (`systemctl status 'ctrader-collector@*'`);
+- the Kusto keys must be in `env_file`.
+
+Switch back with `source = "ctrader"` and a restart. DESIGN.md section 4 has the details.
 
 ## Kill switch and daily reset
 
@@ -145,14 +187,17 @@ the service to apply a change.
 - **Trades**: closed trades by run mode (`dry_run` = simulator, `demo` = real demo orders): mean
   price-based bp, net account-currency pnl, the share closed by the protective stop, exit reasons.
   Dry-run money is an approximation (USD-quoted, zero commission).
-- **Risk events**: counts by kind (entry_blocked, order_reject, disconnected, flatten, kill, ...).
+- **Risk events**: counts by kind (entry_blocked, order_reject, disconnected, flatten, kill, data_gate,
+  kql_error, ...).
 - **Kill switch**: baseline, realised and unrealised P&L against `max_loss` / `profit_target`, today's P&L against
   `daily_max_loss`, the next daily reset and whether KILL / PAUSE exist. Unrealised comes from the running bot's
   `state/kill_status.json` (n/a when it is not running).
 
 ## Deployment
 
-`deploy/ctrader-autotrade.service` is a systemd unit as text only; it is not installed by anything.
-It runs as `User=autotrade` with `Restart=on-failure`, `MemoryMax=512M` and `CPUQuota=50%` because this
-host serves the production webapp. The repo currently lives under `/root`; running as root from
-there (or giving an unprivileged user access) means adjusting `User=` and the paths in the unit.
+`deploy/ctrader-autotrade.service` is the unit installed at `/etc/systemd/system/ctrader-autotrade.service`
+(copy it there by hand after a change, then `systemctl daemon-reload`). It runs
+`autotrade run --mode demo --exec taker` as root from this directory with sandboxing (`ProtectSystem=strict`,
+writes only to `state/` and `logs/`), `Restart=on-failure`, `MemoryMax=512M` and `CPUQuota=50%` because this
+host serves the production webapp. The KQL settings are read from `[data] env_file`, so the unit needs no
+`EnvironmentFile`.

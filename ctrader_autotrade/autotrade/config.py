@@ -124,6 +124,17 @@ class Settings:
     kill_daily_max_loss: float = 200  # today's P&L <= -this: flatten, no entries until the next reset; 0 = off
     kill_check_interval_s: float = 5
     kill_since: Optional[str] = None  # ISO UTC instant; overrides state/kill_baseline.json
+    # [data] market-data source for bars (DESIGN.md section 4); keys get a data_ prefix
+    data_source: str = "kql"         # "kql": 10 s buckets from Fabric KQL agg_dom; "ctrader": own depth feed
+    data_env_file: str = "../.env"   # KUSTO_* / AZURE_* are read from here (process env wins); relative to ROOT
+    data_grace_s: float = 3.0        # first KQL query this long after each slot end
+    data_retry_s: float = 2.0        # pause between attempts while KQL has not caught up with the slot end
+    data_retries: int = 3            # extra attempts after the first
+    data_deadline_s: float = 10.0    # stop waiting for the slot's data this long after the slot end; must stay
+                                     # below grace_s + execution.EXIT_BACKSTOP_S (the order manager's own exit)
+    data_timeout_s: float = 10.0     # per-query timeout
+    data_freshness_s: float = 15.0   # data up to slot_end - this is still tradable when KQL lags
+    data_gap_max_s: float = 60.0     # longer stretch without a bucket in an open session = gap (no entries)
     label: str = "axq-poc4h-v1"
     grace_s: int = 2
     warmup_hours: int = 9
@@ -140,13 +151,18 @@ class Settings:
         p = Path(self.log_dir)
         return p if p.is_absolute() else ROOT / p
 
+    def data_env_path(self) -> Path:
+        p = Path(self.data_env_file)
+        return p if p.is_absolute() else (ROOT / p).resolve()
+
 
 def _flatten(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict; [kill] keys get a kill_ prefix."""
+    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict; [kill] and [data] keys get a
+    kill_ / data_ prefix."""
     out: dict[str, Any] = {}
     for k, v in d.items():
-        if isinstance(v, dict) and k == "kill":
-            out.update({f"kill_{kk}": vv for kk, vv in v.items()})
+        if isinstance(v, dict) and k in ("kill", "data"):
+            out.update({f"{k}_{kk}": vv for kk, vv in v.items()})
         elif isinstance(v, dict) and k != "aliases":
             out.update(v)
         else:
@@ -162,7 +178,7 @@ def _num(name: str, v: Any, positive: bool = False) -> None:
 
 
 def validate(s: Settings) -> None:
-    """Reject bad daily-reset and kill-switch settings at start-up."""
+    """Reject bad daily-reset, kill-switch and data-source settings at start-up."""
     from .resetday import parse_reset
     try:
         parse_reset(s.daily_reset, s.daily_reset_tz)
@@ -181,6 +197,23 @@ def validate(s: Settings) -> None:
     if s.kill_since is not None:
         from .killswitch import parse_since
         parse_since(s.kill_since)
+    if s.data_source not in ("kql", "ctrader"):
+        raise ConfigError(f"data.source must be 'kql' or 'ctrader', got {s.data_source!r}")
+    for name in ("grace_s", "retry_s", "deadline_s", "timeout_s", "freshness_s", "gap_max_s"):
+        v = getattr(s, f"data_{name}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v < float("inf") \
+                or (v == 0 and name != "grace_s"):
+            raise ConfigError(f"data.{name} must be a {'non-negative' if name == 'grace_s' else 'positive'} "
+                              f"number of seconds, got {v!r}")
+    if isinstance(s.data_retries, bool) or not isinstance(s.data_retries, int) or s.data_retries < 0:
+        raise ConfigError(f"data.retries must be an integer >= 0, got {s.data_retries!r}")
+    if s.data_grace_s >= s.data_deadline_s:
+        raise ConfigError("data.grace_s must be below data.deadline_s")
+    from .execution import EXIT_BACKSTOP_S
+    if s.data_deadline_s >= s.grace_s + EXIT_BACKSTOP_S:
+        # past it the order manager has already time-exited a position the strategy might roll over
+        raise ConfigError(f"data.deadline_s must be below strategy grace_s + {EXIT_BACKSTOP_S:g} "
+                          f"(the order manager's exit backstop), got {s.data_deadline_s!r}")
 
 
 def load(env_path=None, toml_path=None, overrides: Optional[Mapping[str, Any]] = None,

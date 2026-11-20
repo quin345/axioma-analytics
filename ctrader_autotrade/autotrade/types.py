@@ -84,7 +84,8 @@ class Bucket:
     best_bid: Optional[int]
     best_ask: Optional[int]
     events: int
-    source: str  # "live" | "tick" | "store"
+    # "live" (own depth feed) | "kql" (agg_dom, exact) | "tick" | "store" (approximate, see bars.EXACT_SOURCES)
+    source: str
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ class Bar:
     vap_240m_va_low: float
     vap_240m_va_high: float
     vap_240m_volume_events: float
-    approx_share: float  # share of the VAP window built from non-live (tick/store) data
+    approx_share: float  # share of the VAP window built from approximate (tick/store) buckets
     # share of the 240 min VAP window after the start of the data read (export_flat vap_*_coverage);
     # < 1 only for warm-up bars whose window reaches back before the fetched history
     vap_coverage: float = 1.0

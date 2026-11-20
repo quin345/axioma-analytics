@@ -67,6 +67,19 @@ class FeatureEngine:
         for b in bars:
             self._store(b, live)
 
+    def drop_from(self, symbol_id: int, slot_end) -> int:
+        """Forget the held bars with slot_end >= slot_end (to rebuild them); returns how many."""
+        st = self._s.get(symbol_id)
+        n = 0
+        while st and st.bars and st.bars[-1][0].slot_end >= slot_end:
+            st.bars.pop()
+            n += 1
+        return n
+
+    def bars(self, symbol_id: int) -> list[Bar]:
+        st = self._s.get(symbol_id)
+        return [b for b, _ in st.bars] if st else []
+
     def append(self, bar: Bar, live: Optional[bool] = None) -> FeatureRow:
         st = self._store(bar, live)
         return self._compute(bar.symbol_id, st)

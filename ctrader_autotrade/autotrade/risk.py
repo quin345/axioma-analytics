@@ -137,6 +137,19 @@ class SessionCalendar:
                 return False
         return not self._in_holiday(now_ms)
 
+    def open_predicate(self, around_ms: int):
+        """is_open for instants within a few days of around_ms, holiday windows computed once (the KQL
+        gap check samples hundreds of instants per slot)."""
+        windows = self._holiday_windows(around_ms) if self.holidays else []
+
+        def is_open(ms: int) -> bool:
+            if not self.always_open:
+                t = self._week_seconds(ms)
+                if not any(s <= t < e for s, e in self.intervals):
+                    return False
+            return not any(s <= ms < e for s, e in windows)
+        return is_open
+
     def minutes_to_close(self, now_ms: int) -> Optional[float]:
         """Minutes until the next close; 0.0 if already closed; None if none within 8 days."""
         if not self.is_open(now_ms):

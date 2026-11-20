@@ -75,5 +75,9 @@ class Stamper:
         bid, ask = book.best()
         return DepthRow(symbol_id, ts, bid, ask, self.source)
 
+    def last_spot_ms(self, symbol_id: int) -> Optional[int]:
+        """Latest spot (exchange) timestamp seen for the symbol."""
+        return self._last_spot_ms.get(symbol_id)
+
     def book(self, symbol_id: int) -> Optional[OrderBook]:
         return self._books.get(symbol_id)

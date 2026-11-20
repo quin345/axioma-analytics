@@ -26,3 +26,6 @@ typing_extensions==4.16.0
 tzdata==2026.6
 urllib3==2.8.0
 zope.interface==8.7
+# [data] source = "kql" (autotrade/kql_source.py); imported lazily, not needed for source = "ctrader"
+azure-identity==1.27.0
+azure-kusto-data==5.0.5

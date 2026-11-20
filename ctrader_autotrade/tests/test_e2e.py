@@ -61,7 +61,7 @@ class Harness:
                  history_slots=30, preload=True, hours=None, overrides=None):
         self.settings = config.load(make_env(), make_toml(), overrides={
             "state_dir": str(tmp_path / "state"), "log_dir": str(tmp_path / "logs"), "warmup_hours": HOURS,
-            **(overrides or {})})
+            "data_source": "ctrader", **(overrides or {})})   # the own-feed path; tests/test_kql_e2e.py: kql
         self.state = self.settings.state_path()
         self.state.mkdir(parents=True, exist_ok=True)
         self.clock = TestClock(BASE)

@@ -98,6 +98,7 @@ class Session:
         self.refused_reason: Optional[str] = None
         self.ready = False
         self.hist_limiter = None  # set lazily by warmup (shared 5 req/s budget)
+        self.subscribe_depth = True   # False with [data] source = "kql": bars come from KQL, spots only
 
         self._link_up = False
         self._gen = 0
@@ -141,20 +142,23 @@ class Session:
 
     @inlineCallbacks
     def subscribe(self):
-        """SubscribeSpots (with timestamps) then SubscribeDepthQuotes for every resolved symbol."""
+        """SubscribeSpots (with timestamps) then, unless subscribe_depth is off, SubscribeDepthQuotes
+        for every resolved symbol."""
         if not self.ready:
             raise RuntimeError("subscribe() before the handshake completed")
         self._auto_subscribe = True
         ids = sorted(self.specs)
-        spots = oa.ProtoOASubscribeSpotsReq(symbolId=ids, subscribeToSpotTimestamp=True)
-        depth = oa.ProtoOASubscribeDepthQuotesReq(symbolId=ids)
-        for req in (spots, depth):
+        reqs = [oa.ProtoOASubscribeSpotsReq(symbolId=ids, subscribeToSpotTimestamp=True)]
+        if self.subscribe_depth:
+            reqs.append(oa.ProtoOASubscribeDepthQuotesReq(symbolId=ids))
+        for req in reqs:
             try:
                 yield self.request(req)
             except ApiError as exc:
                 if exc.code != "ALREADY_SUBSCRIBED":
                     raise
-        log.info("subscribed to spots+depth for %s", [self.specs[i].name for i in ids])
+        log.info("subscribed to %s for %s", "spots+depth" if self.subscribe_depth else "spots",
+                 [self.specs[i].name for i in ids])
 
     # ---- link events ----
 

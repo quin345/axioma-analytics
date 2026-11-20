@@ -123,8 +123,12 @@ def taker_shadow(quote_at_t: Quote, quote_at_t1: Quote, side: Side) -> float:
 
 def decide(feature: Optional[FeatureRow], quote: Optional[Quote], position: Optional[PositionView],
            spec: SymbolSpec, settings, now_ms: int, slot_end_ms: int, approx_ok: bool = True,
-           recent_vol: Optional[Sequence[float]] = None) -> Intent:
-    """One decision per symbol per bar (called at slot_end + grace)."""
+           recent_vol: Optional[Sequence[float]] = None, gate_reason: str = "approx") -> Intent:
+    """One decision per symbol per bar (called at slot_end + grace).
+
+    approx_ok False (approximate bar without the parity gate, or untrusted KQL data) drops a
+    signal: no entry, an open position is time-exited (no rollover), reason `gate_reason`.
+    """
     sid = spec.symbol_id
     sig = signal_id(sid, slot_end_ms)
     side, why = signal_side(feature, settings)
@@ -147,7 +151,7 @@ def decide(feature: Optional[FeatureRow], quote: Optional[Quote], position: Opti
                   stop_rel=stop_distance(quote, spec, settings, recent_vol))
 
     if side is not None and not approx_ok:
-        side, why = None, "approx"
+        side, why = None, gate_reason
 
     if position is None:
         return entry(IntentKind.ENTER) if side is not None else mk(IntentKind.NONE, reason=why)

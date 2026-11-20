@@ -322,3 +322,18 @@ def test_calendar_feeds_risk_context_semantics():
     c = ctx(now_ms=t, last_data_ms=t - 1, session_open=cal.is_open(t),
             minutes_to_close=cal.minutes_to_close(t), bars_since_open=cal.bars_since_open(t))
     assert chk(c)[1] == "near_close"
+
+
+def test_open_predicate_matches_is_open():
+    from types import SimpleNamespace
+    from autotrade.risk import SessionCalendar
+    hol = [SimpleNamespace(holidayId=i, name="h", scheduleTimeZone="UTC", holidayDate=20400 + i * 3,
+                           isRecurring=i % 2 == 0, startSecond=0 if i % 3 else 3600, endSecond=86400 if i % 3 else 7200)
+           for i in range(8)]
+    spec = SimpleNamespace(schedule=[(d * 86400 + 3600, d * 86400 + 82800) for d in range(1, 6)],
+                           schedule_tz="America/New_York", holidays=hol)
+    cal = SessionCalendar(spec)
+    t0 = 20400 * 86_400_000
+    f = cal.open_predicate(t0 + 86_400_000 * 10)
+    for ms in range(t0, t0 + 86_400_000 * 20, 1_234_567):
+        assert f(ms) == cal.is_open(ms)

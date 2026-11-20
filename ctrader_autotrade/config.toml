@@ -41,6 +41,20 @@ close_on_shutdown = true
 daily_reset = "00:00"      # HH:MM local time in daily_reset_tz: where every "day" (loss latch, trades_today, ...) starts
 daily_reset_tz = "UTC"     # IANA name, e.g. "America/New_York" with "17:00" for the forex day
 
+[data]                     # where the 5-minute bars come from (DESIGN.md section 4)
+source = "kql"             # "kql": 10 s buckets from Fabric KQL dom_ctrader.agg_dom (exact, ready at start-up);
+                           # "ctrader": own depth subscription + bucket store + tick gap fill (approximate warm-up)
+env_file = "../.env"       # KUSTO_CLUSTER_URI / KUSTO_DATABASE / KUSTO_TABLE / AZURE_* (only these keys are read;
+                           # the process environment wins)
+grace_s = 3                # first KQL query this long after each slot end
+retry_s = 2                # pause between attempts while KQL has not reached the slot end
+retries = 3                # extra attempts
+deadline_s = 10            # stop waiting this long after the slot end and decide with what is there; must be
+                           # below grace_s + 10 (the order manager's own time-exit backstop)
+timeout_s = 10             # per-query timeout
+freshness_s = 15           # KQL lagging by at most this is still tradable; more = "kql_stale" (no entries)
+gap_max_s = 60             # an open-session stretch without buckets longer than this in the 240 min window = "kql_gap"
+
 [kill]                     # P&L kill switch; amounts in the account currency (positive numbers)
 enabled = true
 max_loss = 500             # cumulative P&L since the baseline <= -max_loss: flatten, write state/KILL, stop (exit 0)
