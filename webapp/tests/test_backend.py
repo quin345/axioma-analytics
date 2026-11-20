@@ -514,13 +514,15 @@ def test_login_wall_blocks_terminal_and_api():
 
 
 def test_login_wall_denies_by_default():
-    """Every route except the login page, the sign-in endpoints and the icons
-    needs a session - the landing page, its assets, the holding page and even
-    unknown paths redirect to /login, remembering where the visitor was headed."""
+    """Every route except the landing page and its bundle, the login page, the
+    sign-in endpoints and the icons needs a session - the terminal, the report,
+    the holding page and even unknown paths redirect to /login, remembering
+    where the visitor was headed."""
     with _gated() as client:
         expected = {
-            "/": "/login",
-            "/assets/x.js": "/login?next=%2Fassets%2Fx.js",
+            "/assets": "/login?next=%2Fassets",
+            "/assetsX": "/login?next=%2FassetsX",
+            "/terminal/assets/x.js": "/login?next=%2Fterminal%2Fassets%2Fx.js",
             "/terminal/": "/login?next=%2Fterminal%2F",
             "/research/": "/login?next=%2Fresearch%2F",
             "/research/?a=1": "/login?next=%2Fresearch%2F%3Fa%3D1",
@@ -536,6 +538,48 @@ def test_login_wall_denies_by_default():
         assert client.get("/login").status_code == 200
         assert client.get("/api/session").status_code == 200
         assert client.get("/favicon.svg").status_code == 200
+
+
+def test_landing_page_and_bundle_are_public():
+    """Signed out, exactly "/" and the landing bundle are open; nothing outside
+    landing_dist/assets becomes reachable through /assets."""
+    with _gated() as client:
+        landing = pathlib.Path(app_module.cfg.landing_dist)
+        (landing / "assets" / "index-abc.js").write_text("console.log('landing')")
+        r = client.get("/")
+        assert r.status_code == 200 and b"landing" in r.data
+        assert client.head("/").status_code == 200
+        # Flask binds the static folder when the app is created, so point it at
+        # the fixture's assets directory for this test.
+        original = app_module.app.static_folder
+        app_module.app.static_folder = str(landing / "assets")
+        try:
+            r = client.get("/assets/index-abc.js")
+            assert r.status_code == 200 and b"landing" in r.data
+            assert client.head("/assets/index-abc.js").status_code == 200
+            assert client.get("/assets/missing.js").status_code == 404
+            r = client.get("/assets/../index.html")
+            assert r.status_code != 200
+            # the landing index.html sits one level above the static folder
+            for path in ("/assets/../index.html", "/assets/%2e%2e/index.html",
+                         "/assets/..%2findex.html", "/assets/%2e%2e%2findex.html",
+                         "/assets/../../terminal/index.html", "/assets/../app.py",
+                         "/assets/%2e%2e/app.py", "/assets//etc/passwd"):
+                r = client.get(path)
+                assert r.status_code in (301, 302, 308, 400, 404), (path, r.status_code)
+                assert b"landing</title>" not in r.data and b"import hmac" not in r.data, path
+            # only GET/HEAD open anything
+            assert client.post("/").status_code in (302, 401, 405)
+            assert client.post("/").status_code != 200
+            assert client.post("/assets/index-abc.js").status_code != 200
+            assert client.put("/").status_code != 200
+        finally:
+            app_module.app.static_folder = original
+        # still gated
+        assert client.get("/terminal/").status_code == 302
+        assert client.get("/research/").status_code == 302
+        assert client.get("/api/symbols").status_code == 401
+        assert client.get("/terminal/assets/app.js").status_code == 302
 
 
 def test_signed_in_reaches_landing_and_login_follows_next():

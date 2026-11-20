@@ -51,9 +51,10 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 # --- Pilot login wall ----------------------------------------------------------
 #
-# The whole site sits behind a shared pilot login (TERMINAL_USERNAME /
+# The site sits behind a shared pilot login (TERMINAL_USERNAME /
 # TERMINAL_PASSWORD in .env), deny by default: every route needs a session
-# except the allow-list below, so a new route or an unknown path is gated
+# except the allow-list below (the public landing page, its bundle, the login
+# page and the sign-in endpoints), so a new route or an unknown path is gated
 # without anyone having to remember to add it. The check lives here, not in the
 # browser. A signed, HttpOnly session cookie carries the login; SECRET_KEY must
 # be the same for every gunicorn worker. With no credentials configured the wall
@@ -80,6 +81,12 @@ LANDING_ICONS = {
     "icon-512.png": None,
 }
 PUBLIC_PATHS = {LOGIN_PAGE} | PUBLIC_API | {"/" + name for name in LANDING_ICONS}
+# The public landing page, matched on the endpoint Flask resolved rather than on
+# a "/assets/" path prefix: "index" is exactly "/" and "static" is only the
+# landing bundle (GET/HEAD, served by send_from_directory, which refuses
+# anything outside landing_dist/assets). "/assets", "/assetsX", a POST to "/" and
+# "/terminal/assets/..." resolve to other endpoints or to none, so they stay gated.
+PUBLIC_ENDPOINTS = {"index", "static"}
 
 
 def _auth_enabled():
@@ -111,13 +118,11 @@ def _safe_next(target):
 @app.before_request
 def _require_login():
     path = request.path
-    if path in PUBLIC_PATHS or _signed_in():
+    if path in PUBLIC_PATHS or request.endpoint in PUBLIC_ENDPOINTS or _signed_in():
         return None
     if path.startswith("/api/"):
         return jsonify(error="login required"), 401
     # Remember where the visitor was headed; the login page sends them back.
-    if path == "/":
-        return redirect(LOGIN_PAGE, code=302)
     target = path + ("?" + request.query_string.decode("latin-1") if request.query_string else "")
     return redirect(f"{LOGIN_PAGE}?next={quote(target, safe='')}", code=302)
 
@@ -193,7 +198,7 @@ def _int_arg(name, default, low, high):
 
 @app.get("/")
 def index():
-    """The product landing page (behind the pilot login)."""
+    """The product landing page (public, outside the pilot login)."""
     return send_from_directory(cfg.landing_dist, "index.html")
 
 
@@ -206,8 +211,8 @@ def terminal_redirect():
 def terminal():
     # While we are still working on the terminal, signed-in visitors get the
     # holding page with a 503 here; only this route changes. The landing page,
-    # /research/ and /api routes are unaffected by MAINTENANCE_MODE, and all of
-    # them (this one included) still sit behind the pilot login. Flip
+    # /research/ and /api routes are unaffected by MAINTENANCE_MODE; all but the
+    # landing page (this route included) sit behind the pilot login. Flip
     # MAINTENANCE_MODE off in .env and restart to serve the dashboard again.
     if cfg.maintenance:
         return _holding_page()

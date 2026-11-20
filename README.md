@@ -1,7 +1,7 @@
 # AXIOMA Analytics
 
 Market microstructure analytics: a Flask API over the Fabric Kusto order-book
-feed, a React analytics terminal, and a product landing page (behind the pilot login).
+feed, a React analytics terminal, and a product landing page (public; the rest is behind the pilot login).
 
 ## Repository layout
 
@@ -35,15 +35,16 @@ feed, a React analytics terminal, and a product landing page (behind the pilot l
 
 ## Routes
 
-Every route is behind the pilot login except the ones marked public (deny by
+Every route is behind the pilot login except the landing page and the ones
+marked public (deny by
 default: new routes and unknown paths need a session too). Signed-out page
 requests redirect to `/login?next=<path>`; `/api/*` answers 401.
 
 | Path | Serves |
 | --- | --- |
 | `/login` | Standalone sign-in page (public); redirects on if already signed in |
-| `/` | Landing page (`landing/dist/index.html`) |
-| `/assets/*` | Landing page bundle and images |
+| `/` | Landing page (`landing/dist/index.html`, public) |
+| `/assets/*` | Landing page bundle and images (public) |
 | `/favicon.*`, `/icon-*.png` | Landing page icons (public) |
 | `/terminal/` | Analytics terminal (holding page with 503 when `MAINTENANCE_MODE=1`) |
 | `/terminal/*` | Terminal bundle, images and icons (built with `base: '/terminal/'`) |
@@ -70,12 +71,13 @@ requests redirect to `/login?next=<path>`; `/api/*` answers 401.
 
 ## Terminal login
 
-The whole site is behind the login. A signed-out visitor to any page lands on
+The landing page is public; everything else is behind the login. A signed-out
+visitor to any other page lands on
 `/login`; the server checks the credentials and sets a signed, HttpOnly session
 cookie that lasts 12 hours, then sends them on to the page they asked for.
 The check is server-side, so deep links redirect to `/login?next=...` and the
-API answers 401. Only `/login`, the sign-in endpoints and the landing icons are
-public; with `TERMINAL_USERNAME`/`TERMINAL_PASSWORD` blank there is no wall.
+API answers 401. Only `/` and `/assets/*` (the landing page and its bundle), `/login`, the
+sign-in endpoints and the landing icons are public; with `TERMINAL_USERNAME`/`TERMINAL_PASSWORD` blank there is no wall.
 To change the credentials, edit `.env` and
 `sudo systemctl restart axioma`; changing `SECRET_KEY` signs everyone out.
 
