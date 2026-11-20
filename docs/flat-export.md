@@ -83,7 +83,7 @@ python export_flat.py --start 2026-11-05      # backfill to now
 python export_flat.py --symbol 136 --account 49208255 --start 2026-11-13
 python export_flat.py --list                  # slots on record per instrument (no Kusto)
 python export_flat.py --coverage              # feed's first/last tick
-python export_flat.py --timeframe 1m --start 2026-11-05 --chunk-minutes 240   # 1-minute bars
+python export_flat.py --timeframe 1m --start 2026-11-05 --chunk-minutes 30   # 1-minute bars
 ```
 
 `--chunk-minutes` (default 60) sets how many slots one Kusto query covers.
@@ -104,7 +104,7 @@ Cron keeps it current (see Schedule below). To refresh a range by hand (idempote
 
 ```bash
 cd webapp
-python export_flat.py --timeframe 1m --start 2026-11-19 --chunk-minutes 240
+python export_flat.py --timeframe 1m --start 2026-11-19 --chunk-minutes 30
 ```
 
 With `--start` the VAP `coverage` is measured against the table-wide first tick,
