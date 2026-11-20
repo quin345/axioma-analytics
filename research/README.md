@@ -70,6 +70,46 @@ venv/bin/python research/studies/build_presentation.py
 Slide numbers are read from `results.json`, so the deck updates with the data. The written interpretation
 (verdicts, explanations) was written for the 2026-11-05 → 11-15 run; review it after re-running on new data.
 
+## Hypothesis screen (`run_screen.py`)
+
+Picks the top N hypotheses from a pre-registered set, honestly: choose on one stretch
+of time, then test the picks once on a later stretch that played no part in choosing them.
+
+| File | Purpose |
+| --- | --- |
+| `pipeline/hypotheses.py` | The hypothesis set: claim, mechanism, signal (positive = predicts a higher target), target (`ret` or `vol`), optional control, baseline flag |
+| `pipeline/screen.py` | Split with embargo, block rank IC (partial when controlled), BH FDR, top-N selection, holdout confirmation, trade/volatility economics |
+| `run_screen.py` | End-to-end run; writes `output/screen/` |
+
+```bash
+# 1. Pull the data from KQL into metrics_5m (webapp side; the research code never talks to Kusto)
+cd webapp && ../venv/bin/python export_flat.py --start 2026-11-05T08:00 --chunk-minutes 360 && cd ..
+# 2. Screen
+venv/bin/python research/run_screen.py            # --split 0.6 --top 3 --fdr 0.10 --block-hours 4
+```
+
+Outputs: `report.md` (the top N with discovery vs holdout evidence, then the full ranking),
+`top_hypotheses.json`, `ranking.csv`, `discovery_scores.csv`, and `holdout_scores_reference.csv`
+(every hypothesis on holdout, **for reference only**: picking from it would defeat the holdout).
+
+Protocol, in order:
+
+1. One chronological cut for all instruments (default 60% of bars with data), with a 1-hour embargo
+   so no discovery target reaches into holdout.
+2. Spearman IC per 4-hour block and t across blocks, because forward returns overlap. Volatility
+   hypotheses use the partial rank IC with current volatility held fixed. p-values are one-sided in
+   the pre-registered direction: a strong opposite result counts against a hypothesis.
+3. Per hypothesis, its best horizon. A hypothesis passes discovery if BH q <= 0.10 over all
+   hypothesis x horizon pairs **and** the IC has the predicted sign on every instrument. Passers rank
+   first, then by t. Baselines (`vol_clustering`) are scored but never picked.
+4. The picks are scored once on holdout. "confirmed" means one-sided p < 0.05 / N.
+5. Return picks get a taker test on holdout (|z| > 1, hold = horizon, half spread each way); volatility
+   picks get future vol in the top vs bottom signal quintile within current-vol terciles.
+
+What the feed supports: the LPs quote fixed, symmetric ladder sizes, so depth imbalance and VWAP skew are
+almost always zero and book-pressure hypotheses are left out. Signals come from the mid path, the spread,
+the quote-update rate and timing. To add a hypothesis, append to `HYPOTHESES` **before** looking at results.
+
 ## Publishing to the webapp (`/research/`)
 
 `studies/build_report.py` writes a static site to `research/site/` (gitignored): `index.html`,
