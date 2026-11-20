@@ -58,9 +58,10 @@ def symbol_res(ids):
 
 class Harness:
     def __init__(self, tmp_path, make_env, make_toml, mode=RunMode.DRY_RUN, live=False, exec_mode=ExecMode.TAKER,
-                 history_slots=30, preload=True, hours=None):
+                 history_slots=30, preload=True, hours=None, overrides=None):
         self.settings = config.load(make_env(), make_toml(), overrides={
-            "state_dir": str(tmp_path / "state"), "log_dir": str(tmp_path / "logs"), "warmup_hours": HOURS})
+            "state_dir": str(tmp_path / "state"), "log_dir": str(tmp_path / "logs"), "warmup_hours": HOURS,
+            **(overrides or {})})
         self.state = self.settings.state_path()
         self.state.mkdir(parents=True, exist_ok=True)
         self.clock = TestClock(BASE)

@@ -37,7 +37,8 @@ Run from this directory (`state/` and `logs/` are relative to it, see `config.to
 | `autotrade run ... --hours N` | Stop after N hours (flattens, flushes, exits 0). For bounded test runs. |
 | `autotrade flatten` | Connects (demo), cancels own resting orders (label `axq-poc4h-v1`), closes own positions. Foreign orders and positions are never touched. |
 | `autotrade parity` | P4 drift check: runs the research feature code over the bot's own `bars` table and compares with the features journalled in `signals`. |
-| `autotrade report [--since-hours N]` | Forward-test report from the journal (see below). |
+| `autotrade report [--since-hours N]` | Forward-test report from the journal (see below), including the kill-switch numbers. |
+| `autotrade kill-reset` | Re-arms the P&L kill switch: writes a new baseline at now. Does not remove `state/KILL` or `state/PAUSE` (it prints the command). |
 
 Exit codes: 0 normal (including KILL), 1 error or timeout, 2 refused (live account, wrong host,
 account not in the token's list), 3 SAFE mode (token expired without a refresh token).
@@ -61,11 +62,60 @@ account not in the token's list), 3 SAFE mode (token expired without a refresh t
 
 ## Control files (in `state/`)
 
-- `state/KILL`: cancels own orders, flattens, exits the process (code 0). Checked every 5 s. Remove
+- `state/KILL`: cancels own orders, flattens, exits the process (code 0). Checked every 5 s and at start-up
+  (a file present at start flattens and exits at once). Written by the kill switch too. Remove
   the file before restarting or the bot stops again at once.
-- `state/PAUSE`: no new entries (existing positions still exit on schedule). Delete to resume.
+- `state/PAUSE`: no new entries (existing positions still exit on schedule). Delete to resume. Written by the
+  kill switch when `profit_action = "pause"`.
+- `state/kill_baseline.json`, `state/kill_status.json`: the kill switch's baseline and its latest numbers (mode 0600).
 - `state/PARITY_OK`: demo only, lifts the approximate-bar block (see rollout step 4).
 - `state/token.json`: refreshed access token (mode 0600), only if `refresh_token` is configured.
+
+## Kill switch and daily reset
+
+Settings in `config.toml` (amounts in the account currency, positive numbers):
+
+    [kill]
+    enabled = true
+    max_loss = 500            # cumulative P&L since the baseline <= -500: flatten, write state/KILL, stop
+    profit_target = 1000      # cumulative P&L since the baseline >= 1000: profit_action; 0 = off
+    profit_action = "kill"    # "kill" (as max_loss) or "pause" (write state/PAUSE: no new entries, exits continue)
+    daily_max_loss = 200      # P&L since the last daily reset <= -200: flatten, no entries until the next reset; 0 = off
+    check_interval_s = 5
+    # since = "2026-11-20T05:00:00Z"   # optional; overrides the baseline file
+
+    [risk]
+    daily_reset = "00:00"     # HH:MM local time in daily_reset_tz
+    daily_reset_tz = "UTC"    # IANA name, e.g. "America/New_York" with "17:00" for the forex day
+
+What it does. Every `check_interval_s` the bot adds the realised P&L (closed trades of this account and run
+mode since the baseline, net of commission and swap) and the unrealised P&L of its own open positions (DEMO: the
+server's `netUnrealizedPnL`, falling back to the touch mark; DRY_RUN: the touch mark; unknown, so realised-only,
+if a symbol's quote asset is not the deposit asset, with a one-off warning). On a breach it logs a WARNING, writes
+a `risk_events` row (`kill_max_loss`, `kill_profit_target`, `daily_max_loss`) with the numbers, then:
+
+- `max_loss`, or `profit_target` with `profit_action = "kill"`: cancels orders, closes positions, writes
+  `state/KILL` and exits with code 0 (systemd's `Restart=on-failure` leaves it stopped).
+- `profit_target` with `"pause"`: writes `state/PAUSE`; exits still run.
+- `daily_max_loss`: closes positions and blocks entries until the next daily reset; no `KILL` file. It is
+  derived from the journal, so a restart on the same day restores it. The day's unrealised P&L is the whole
+  current unrealised, including a position opened before the reset.
+
+The baseline is `state/kill_baseline.json`, created the first time the bot runs with `kill.enabled` (a new
+one when the account id changes). The cumulative limits survive restarts because they are recomputed from the
+journal, so deleting `KILL` is not enough: re-arm with
+
+    rm state/KILL && .venv/bin/autotrade kill-reset && systemctl start ctrader-autotrade
+
+(`kill-reset` also needs `rm state/PAUSE` after a profit pause; it removes neither file.) `kill.since` in
+`config.toml` overrides the file, so remove it if you want `kill-reset` to take effect. `autotrade report` has a
+"Kill switch" section: baseline, realised and unrealised P&L against the limits, today's P&L and the next reset.
+
+Daily reset. Every daily quantity uses `daily_reset` in `daily_reset_tz`: the daily loss latch
+(`daily_loss_pct` / `daily_loss_bps`), `daily_max_loss`, `trades_today` / `max_trades_day`, `pnl_today_*` and
+its start-of-day balance. The reset is wall-clock time in that zone, so a DST change moves it in UTC (that day
+is 23 or 25 hours long). A bad time or zone is a config error at start-up. Settings are read at start: restart
+the service to apply a change.
 
 ## Where things live
 
@@ -96,6 +146,9 @@ account not in the token's list), 3 SAFE mode (token expired without a refresh t
   price-based bp, net account-currency pnl, the share closed by the protective stop, exit reasons.
   Dry-run money is an approximation (USD-quoted, zero commission).
 - **Risk events**: counts by kind (entry_blocked, order_reject, disconnected, flatten, kill, ...).
+- **Kill switch**: baseline, realised and unrealised P&L against `max_loss` / `profit_target`, today's P&L against
+  `daily_max_loss`, the next daily reset and whether KILL / PAUSE exist. Unrealised comes from the running bot's
+  `state/kill_status.json` (n/a when it is not running).
 
 ## Deployment
 

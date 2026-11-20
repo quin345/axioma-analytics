@@ -80,6 +80,28 @@ FILL_COLS = ("ts_ms", "symbol_id", "client_order_id", "order_id", "position_id",
              "volume", "commission", "gross", "swap", "money_digits")
 
 
+def utc_day_bounds(now_ms: int) -> tuple[int, int]:
+    """The plain UTC day: the default until a daily reset is configured (resetday.day_start_ms)."""
+    d0 = now_ms - now_ms % DAY_MS
+    return d0, d0 + DAY_MS
+
+
+def pnl_net_window(conn, since_ms: int, until_ms: Optional[int] = None, account_id: Optional[int] = None,
+                   mode=None) -> float:
+    """Realised net pnl (commission and swap included, account currency) of trades closed in
+    [since_ms, until_ms), only those of runs on this account and in this run mode (kill switch, report)."""
+    sql = ("SELECT COALESCE(SUM(COALESCE(t.pnl_net,0)),0) FROM trades t JOIN runs r ON r.run_id=t.run_id "
+           "WHERE t.exit_ms>=? AND t.exit_ms<?")
+    args: list = [since_ms, until_ms if until_ms is not None else 2 ** 62]
+    if account_id is not None:
+        sql += " AND r.account_id=?"
+        args.append(account_id)
+    if mode is not None:
+        sql += " AND r.mode=?"
+        args.append(_plain(mode))
+    return float(conn.execute(sql, args).fetchone()[0])
+
+
 def settings_to_json(settings: Any) -> str:
     """Settings as JSON without secrets (the `secrets` field is dropped)."""
     if dataclasses.is_dataclass(settings):
@@ -117,6 +139,7 @@ class Journal:
     def __init__(self, db_path, jsonl_path, max_bytes: int = 5_000_000, backups: int = 5,
                  time_fn=time.time):
         self._time_fn = time_fn
+        self.day_bounds = utc_day_bounds   # (now_ms) -> (day start, next reset); the Bot installs the configured one
         self.run_id: Optional[int] = None
         db_path = str(db_path)
         if db_path != ":memory:":
@@ -136,7 +159,14 @@ class Journal:
 
     @classmethod
     def from_settings(cls, settings, **kw) -> "Journal":
-        return cls(settings.state_path() / "autotrade.db", settings.log_path() / "autotrade.jsonl", **kw)
+        j = cls(settings.state_path() / "autotrade.db", settings.log_path() / "autotrade.jsonl", **kw)
+        j.use_daily_reset(settings)
+        return j
+
+    def use_daily_reset(self, settings) -> None:
+        """Make every "today" query run from the configured daily reset (resetday) to the next."""
+        from .resetday import day_start_ms, next_reset_ms
+        self.day_bounds = lambda now_ms: (day_start_ms(now_ms, settings), next_reset_ms(now_ms, settings))
 
     def close(self) -> None:
         self._log.removeHandler(self._handler)
@@ -280,22 +310,18 @@ class Journal:
         self.log("transition", ts_ms=ts, symbol_id=symbol_id, from_state=from_state, to_state=to_state,
                  client_order_id=client_order_id, detail=detail)
 
-    # --- queries for risk (UTC day) ---
-    @staticmethod
-    def _day_start(now_ms: int) -> int:
-        return now_ms - now_ms % DAY_MS
-
+    # --- queries for risk (the trading day: see resetday) ---
     def trades_today(self, now_ms: int) -> int:
-        d0 = self._day_start(now_ms)
+        d0, d1 = self.day_bounds(now_ms)
         return self.db.execute("SELECT COUNT(*) FROM trades WHERE exit_ms>=? AND exit_ms<?",
-                               (d0, d0 + DAY_MS)).fetchone()[0]
+                               (d0, d1)).fetchone()[0]
 
     def pnl_today_bps(self, now_ms: int) -> float:
         """Sum of per-trade price-based bp (mid-based when the price is unknown)."""
-        d0 = self._day_start(now_ms)
+        d0, d1 = self.day_bounds(now_ms)
         return float(self.db.execute(
             "SELECT COALESCE(SUM(COALESCE(pnl_bps_price, pnl_bps_mid)),0) FROM trades "
-            "WHERE exit_ms>=? AND exit_ms<?", (d0, d0 + DAY_MS)).fetchone()[0])
+            "WHERE exit_ms>=? AND exit_ms<?", (d0, d1)).fetchone()[0])
 
     def consec_losses(self) -> int:
         n = 0
@@ -317,11 +343,16 @@ class Journal:
                                (since_ms,)).fetchone()[0]
 
     def pnl_net_today(self, now_ms: int) -> float:
-        """Realised account-currency pnl of trades closed today (UTC)."""
-        d0 = self._day_start(now_ms)
+        """Realised account-currency pnl of trades closed in the current trading day."""
+        d0, d1 = self.day_bounds(now_ms)
         return float(self.db.execute(
             "SELECT COALESCE(SUM(COALESCE(pnl_net,0)),0) FROM trades WHERE exit_ms>=? AND exit_ms<?",
-            (d0, d0 + DAY_MS)).fetchone()[0])
+            (d0, d1)).fetchone()[0])
 
     def pnl_net_total(self) -> float:
         return float(self.db.execute("SELECT COALESCE(SUM(COALESCE(pnl_net,0)),0) FROM trades").fetchone()[0])
+
+    def pnl_net_window(self, since_ms: int, until_ms: Optional[int] = None, account_id: Optional[int] = None,
+                       mode=None) -> float:
+        """See pnl_net_window() below."""
+        return pnl_net_window(self.db, since_ms, until_ms, account_id, mode)

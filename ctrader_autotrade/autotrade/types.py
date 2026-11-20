@@ -54,6 +54,7 @@ class SymbolSpec:
     schedule: list[tuple[int, int]]  # (start, end) intervals in seconds from week start
     schedule_tz: str
     holidays: list
+    quote_asset_id: Optional[int] = None  # from the symbols list; None = unknown (kill switch P&L)
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from .resetday import day_label, day_start_ms, next_reset_ms
 from .types import Intent, IntentKind, PositionView, RiskContext, SymbolSpec
 
 WEEK_S = 7 * 86400
@@ -28,11 +29,6 @@ UTC = timezone.utc
 
 def _utc_date(ms: int) -> date:
     return datetime.fromtimestamp(ms / 1000, UTC).date()
-
-
-def _next_utc_midnight_ms(ms: int) -> int:
-    d = _utc_date(ms) + timedelta(days=1)
-    return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp() * 1000)
 
 
 def _get(h, name, default=None):
@@ -180,7 +176,7 @@ class RiskManager:
         self.s = settings
         self.force_flatten = False
         self.force_reason = ""
-        self._day: Optional[date] = None
+        self._day: Optional[int] = None   # start (utc ms) of the current trading day, see resetday
         self._loss_pause_until = 0
         self._loss_handled = 0       # consec_losses value already paused for
         self._reject_pause_until = 0
@@ -189,13 +185,23 @@ class RiskManager:
 
     # -- helpers -----------------------------------------------------------------------
     def _roll_day(self, now_ms: int) -> None:
-        d = _utc_date(now_ms)
+        d = day_start_ms(now_ms, self.s)
         if self._day is not None and d != self._day:
             self._daily_latched_until = 0
             self._daily_reason = ""
             self.force_flatten = False
             self.force_reason = ""
         self._day = d
+
+    def latch_daily(self, reason: str, now_ms: int) -> None:
+        """Block entries until the next daily reset (the kill switch's daily_max_loss)."""
+        self._roll_day(now_ms)
+        self._daily_reason = reason
+        self._daily_latched_until = next_reset_ms(now_ms, self.s)
+
+    def daily_latched(self, now_ms: int) -> bool:
+        self._roll_day(now_ms)
+        return now_ms < self._daily_latched_until
 
     def _daily_breach(self, ctx: RiskContext) -> str:
         s = self.s
@@ -237,7 +243,7 @@ class RiskManager:
             self.force_flatten, self.force_reason = False, ""
         if self._daily_latched_until <= ctx.now_ms and self._daily_breach(ctx):
             self._daily_reason = self._daily_breach(ctx)
-            self._daily_latched_until = _next_utc_midnight_ms(ctx.now_ms)
+            self._daily_latched_until = next_reset_ms(ctx.now_ms, s)
         if ctx.consec_losses < s.max_consec_losses:
             self._loss_handled = 0
         elif ctx.consec_losses > self._loss_handled:
@@ -302,7 +308,7 @@ class RiskManager:
             reason = self._daily_breach(ctx)
             if self._daily_latched_until <= ctx.now_ms:
                 self._daily_reason = reason
-                self._daily_latched_until = _next_utc_midnight_ms(ctx.now_ms)
+                self._daily_latched_until = next_reset_ms(ctx.now_ms, s)
             return True, reason
         if not ctx.session_open:
             return True, "session_closed"
@@ -316,7 +322,7 @@ class RiskManager:
     def state(self) -> dict:
         """Snapshot for the journal."""
         return {
-            "day": self._day.isoformat() if self._day else None,
+            "day": day_label(self._day, self.s) if self._day is not None else None,
             "force_flatten": self.force_flatten,
             "force_reason": self.force_reason,
             "loss_pause_until_ms": self._loss_pause_until,

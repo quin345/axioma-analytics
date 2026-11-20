@@ -147,8 +147,38 @@ about 9 hours back. Tick data counts spot changes, not depth events, so weightin
 
 **Loss limits**
 
-- Daily loss of -1.0% of start-of-day balance or -150 bp: go flat until 00:00 UTC.
+- Daily loss of -1.0% of start-of-day balance or -150 bp: go flat until the next daily reset.
 - 15 consecutive losses: pause for 1 hour.
+
+**Daily reset time**
+
+- Every "daily" quantity (the daily loss latch, `trades_today` / `max_trades_day`, `pnl_today_bps` / `pnl_today_pct`
+  and its start-of-day balance, the kill switch's daily loss, the `RiskManager` day roll) runs from one reset
+  instant to the next: `[risk] daily_reset = "HH:MM"` in `daily_reset_tz` (IANA name). Default `00:00` UTC.
+  Example: `17:00` `America/New_York` for the forex day.
+- The reset is wall-clock time in that zone, so a DST change moves it in UTC and makes that day 23 or 25 hours
+  long. One helper, `autotrade/resetday.py` (`day_start_ms`, `next_reset_ms`), serves all of them.
+- A bad time or zone is a `ConfigError` at start-up.
+
+**P&L kill switch** (`[kill]` in `config.toml`, `autotrade/killswitch.py`; off unless `enabled = true`)
+
+- P&L = realised (journal trades of this account and run mode, net of commission and swap, account currency)
+  + unrealised of the bot's own open positions. Unrealised: in DEMO the server's `netUnrealizedPnL` per own
+  position (`ProtoOAGetPositionUnrealizedPnLReq`, read-only, at most once per `check_interval_s`); on error and in
+  DRY_RUN the touch mark `side * (exit touch - entry) * volume / 100`. The mark assumes the quote currency is
+  the deposit currency; if a symbol's quote asset differs, a warning is logged once and unrealised is unknown
+  (realised-only) unless the server value is available.
+- Cumulative P&L counts from a baseline, `state/kill_baseline.json` (0600): created the first time the bot runs
+  with the switch on, new when the account id changes, re-armed by `autotrade kill-reset`. `kill.since` overrides it.
+- `max_loss`: cumulative <= -max_loss: flatten, write `state/KILL`, exit 0 (the unit's `Restart=on-failure` leaves
+  it stopped; a `KILL` file present at start flattens and exits at once).
+- `profit_target` (0 = off): cumulative >= target: `profit_action = "kill"` as above, or `"pause"` (write
+  `state/PAUSE`: no new entries, exits continue).
+- `daily_max_loss` (0 = off): P&L since the last daily reset (realised that day + all current unrealised)
+  <= -daily_max_loss: flatten and block entries until the next reset (the same latch as the daily loss limits;
+  no `KILL` file).
+- Every trigger is a WARNING log and a `risk_events` row (`kill_max_loss`, `kill_profit_target`,
+  `daily_max_loss`) holding the numbers. The latest numbers are in `state/kill_status.json` for `autotrade report`.
 
 **Kill switches**
 

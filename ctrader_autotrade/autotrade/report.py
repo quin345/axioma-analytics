@@ -24,6 +24,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from . import killswitch
 from ._research import screen
 
 SLOT_MS = 300_000
@@ -140,8 +141,53 @@ def _trades_section(conn, since_ms) -> dict:
     return out
 
 
-def compute_report(conn, since_ms: Optional[int] = None, entry_z: Optional[float] = None) -> dict:
-    """Everything the text report shows, from an open sqlite3 connection to the journal."""
+STATUS_STALE_S = 120   # kill_status.json older than this: the bot is probably not running
+
+
+def _kill_section(conn, settings, now_ms: int) -> Optional[dict]:
+    """Kill-switch numbers: realised from the journal now, unrealised from the bot's latest
+    state/kill_status.json (the server value is only known to the running bot)."""
+    if settings is None:
+        return None
+    from . import killswitch
+    from .journal import pnl_net_window
+    from .resetday import day_start_ms, next_reset_ms
+    sd = settings.state_path()
+    acct = settings.secrets.account_id if settings.secrets else None
+    row = conn.execute("SELECT mode FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
+    mode = row[0] if row else None
+    out = {"enabled": settings.kill_enabled, "account_id": acct, "mode": mode,
+           "max_loss": settings.kill_max_loss, "profit_target": settings.kill_profit_target,
+           "profit_action": settings.kill_profit_action, "daily_max_loss": settings.kill_daily_max_loss,
+           "daily_reset": f"{settings.daily_reset} {settings.daily_reset_tz}",
+           "kill_file": (sd / "KILL").exists(), "pause_file": (sd / "PAUSE").exists(),
+           "day_start_ms": day_start_ms(now_ms, settings), "next_reset_ms": next_reset_ms(now_ms, settings),
+           "since_ms": None, "baseline_source": None, "realised": None, "realised_today": None,
+           "unrealised": None, "unrealised_source": None, "status_age_s": None}
+    if settings.kill_since:
+        out["since_ms"], out["baseline_source"] = killswitch.parse_since(settings.kill_since), "config"
+    else:
+        b = killswitch.read_baseline(sd)
+        if b is not None and b["account_id"] == acct:
+            out["since_ms"], out["baseline_source"] = b["since_ms"], "state/kill_baseline.json"
+    if out["since_ms"] is not None:
+        out["realised"] = pnl_net_window(conn, out["since_ms"], None, acct, mode)
+    out["realised_today"] = pnl_net_window(conn, out["day_start_ms"], out["next_reset_ms"], acct, mode)
+    stat = killswitch.read_status(sd)
+    if stat and stat.get("account_id") == acct:
+        age = (now_ms - stat["ts_ms"]) / 1000
+        out["status_age_s"] = age
+        if age <= STATUS_STALE_S:
+            out["unrealised"], out["unrealised_source"] = stat.get("unrealised"), stat.get("unrealised_source")
+    return out
+
+
+def compute_report(conn, since_ms: Optional[int] = None, entry_z: Optional[float] = None,
+                   settings=None, now_ms: Optional[int] = None) -> dict:
+    """Everything the text report shows, from an open sqlite3 connection to the journal.
+    With `settings` it adds the "Kill switch" section (baseline and limits from config and state/)."""
+    import time
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
     entry_z = _entry_z(conn) if entry_z is None else entry_z
     bars = _bars_frame(conn, since_ms)
     sig = _signals(conn, since_ms, entry_z, bars)
@@ -167,6 +213,7 @@ def compute_report(conn, since_ms: Optional[int] = None, entry_z: Optional[float
         "maker": _maker_section(sig),
         "trades": _trades_section(conn, since_ms),
         "risk_events": risk,
+        "kill": _kill_section(conn, settings, now_ms),
     }
 
 
@@ -241,4 +288,27 @@ def render(r: dict) -> str:
         add("  none")
     for k, n in r["risk_events"].items():
         add(f"  {k:<34}{n}")
+    k = r.get("kill")
+    if k:
+        add("")
+        add("Kill switch" + ("" if k["enabled"] else " (disabled in config.toml)"))
+        stamp = lambda ms: "n/a" if ms is None else killswitch.iso(ms)
+        row("baseline since", stamp(k["since_ms"]),
+            k["baseline_source"] or "none yet: created when the bot runs with kill.enabled")
+        unreal = k["unrealised"]
+        u_note = ("bot not running or no recent status" if k["status_age_s"] is None
+                  or k["status_age_s"] > STATUS_STALE_S else k["unrealised_source"] or "")
+        cum = None if k["realised"] is None else k["realised"] + (unreal or 0.0)
+        row("realised since baseline", _n(k["realised"]), f"run mode {k['mode']}")
+        row("unrealised (own positions)", _n(unreal), u_note)
+        row("cumulative", _n(cum),
+            f"stop at <= -{k['max_loss']:g}" + (f", {k['profit_action']} at >= {k['profit_target']:g}"
+                                                 if k["profit_target"] else ", no profit target"))
+        daily = None if k["realised_today"] is None else k["realised_today"] + (unreal or 0.0)
+        row("today (since last reset)", _n(daily),
+            f"limit <= -{k['daily_max_loss']:g}" if k["daily_max_loss"] else "no daily limit")
+        row("day started / next reset", f"{stamp(k['day_start_ms'])}", f"{stamp(k['next_reset_ms'])}  "
+            f"({k['daily_reset']})")
+        row("KILL / PAUSE files", f"{'present' if k['kill_file'] else 'absent'} / "
+            f"{'present' if k['pause_file'] else 'absent'}")
     return "\n".join(L)

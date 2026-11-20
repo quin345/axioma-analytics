@@ -9,6 +9,7 @@ import argparse
 import logging
 import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -274,7 +275,25 @@ def cmd_report(args) -> int:
     if args.since_hours:
         import time
         since = int((time.time() - args.since_hours * 3600) * 1000)
-    print(report.render(report.compute_report(conn, since_ms=since)))
+    print(report.render(report.compute_report(conn, since_ms=since, settings=settings)))
+    return 0
+
+
+def cmd_kill_reset(args) -> int:
+    """Re-arm the P&L kill switch: a new baseline at now. KILL / PAUSE are left for the operator."""
+    from . import killswitch
+    settings = _load(args)
+    sd = settings.state_path()
+    now = int(time.time() * 1000)
+    b = killswitch.write_baseline(sd, settings.secrets.account_id, now)
+    print(f"kill switch re-armed: baseline now {b['created']} (state/{killswitch.BASELINE_FILE})")
+    if settings.kill_since:
+        print(f"WARNING: kill.since = {settings.kill_since!r} in config.toml overrides the baseline file")
+    if not settings.kill_enabled:
+        print("note: kill.enabled is false in config.toml")
+    for name in ("KILL", "PAUSE"):
+        if (sd / name).exists():
+            print(f"state/{name} is still present (not removed); remove it with: rm {sd / name}")
     return 0
 
 
@@ -300,6 +319,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--exec", choices=("taker", "maker"), help="entry style (default: config.toml)")
     r.add_argument("--hours", type=float, help="stop after N hours (bounded test runs)")
     sub.add_parser("flatten", help="close own positions and cancel own orders on the demo account")
+    sub.add_parser("kill-reset", help="re-arm the P&L kill switch: new baseline at now (KILL/PAUSE not removed)")
     sub.add_parser("parity", help="P4 drift: research features over the bars table vs journalled features")
     rp = sub.add_parser("report", help="forward-test report from the journal")
     rp.add_argument("--since-hours", type=float, help="only the last N hours")
@@ -311,7 +331,7 @@ def main(argv=None) -> int:
     from . import config
     try:
         code = {"probe": cmd_probe, "run": cmd_run, "flatten": cmd_flatten, "report": cmd_report,
-                "parity": cmd_parity}[args.cmd](args)
+                "parity": cmd_parity, "kill-reset": cmd_kill_reset}[args.cmd](args)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         code = 1

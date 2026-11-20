@@ -10,6 +10,7 @@ Token values are never logged.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -90,6 +91,7 @@ class Session:
         self.specs: dict[int, SymbolSpec] = {}
         self.broker_names: dict[int, str] = {}
         self.unresolved: list[str] = []
+        self.quote_assets: dict[int, int] = {}
         self.trader_info: dict = {}
         self.safe = False
         self.safe_reason: Optional[str] = None
@@ -295,7 +297,8 @@ class Session:
                     self.unresolved.append(name)
                     log.warning("SymbolById returned nothing for %s (id %d)", name, sid)
                     continue
-                specs[sid] = self._build_spec(name, by_id[sid])
+                specs[sid] = dataclasses.replace(self._build_spec(name, by_id[sid]),
+                                                 quote_asset_id=self.quote_assets.get(sid))
         self.specs = specs
         log.info("handshake ok: account type %s, symbols %s", self.trader_info.get("account_type"),
                  [sp.name for sp in specs.values()])
@@ -332,12 +335,15 @@ class Session:
         resolved: dict[int, str] = {}
         self.unresolved = []
         self.broker_names = {}
+        self.quote_assets = {}
         for name in self.settings.symbols:
             for cand in [name, *self.settings.aliases.get(name, [])]:
                 ls = by_name.get(cand.lower())
                 if ls is not None:
                     resolved[ls.symbolId] = name
                     self.broker_names[ls.symbolId] = ls.symbolName
+                    if ls.HasField("quoteAssetId"):
+                        self.quote_assets[ls.symbolId] = ls.quoteAssetId
                     break
             else:
                 self.unresolved.append(name)

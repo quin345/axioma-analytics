@@ -38,3 +38,14 @@ stale_s = 30
 reject_breaker = [3, 10]   # rejects, window in minutes
 flatten_after_disconnect_s = 120
 close_on_shutdown = true
+daily_reset = "00:00"      # HH:MM local time in daily_reset_tz: where every "day" (loss latch, trades_today, ...) starts
+daily_reset_tz = "UTC"     # IANA name, e.g. "America/New_York" with "17:00" for the forex day
+
+[kill]                     # P&L kill switch; amounts in the account currency (positive numbers)
+enabled = true
+max_loss = 500             # cumulative P&L since the baseline <= -max_loss: flatten, write state/KILL, stop (exit 0)
+profit_target = 1000       # cumulative P&L since the baseline >= profit_target: profit_action; 0 = off
+profit_action = "kill"     # "kill" = as max_loss; "pause" = no new entries (writes state/PAUSE), exits continue
+daily_max_loss = 200       # P&L since the last daily reset <= -daily_max_loss: flatten, no entries until the next reset; 0 = off
+check_interval_s = 5
+# since = "2026-11-20T05:00:00Z"   # optional: overrides state/kill_baseline.json (see `autotrade kill-reset`)

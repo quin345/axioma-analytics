@@ -20,6 +20,7 @@ Lifecycle (DESIGN.md sections 3-5):
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -30,11 +31,15 @@ from typing import Optional
 from twisted.internet import defer
 from twisted.internet.defer import inlineCallbacks
 
+from ctrader_open_api.messages import OpenApiMessages_pb2 as oa
+
 from .bars import VAP_MINUTES, BarBuilder, Bucketiser, replay_bars
 from .book import Stamper
 from .execution import DemoBroker, OrderManager
 from .features import FeatureEngine
 from .journal import Journal
+from . import killswitch
+from .resetday import day_start_ms, next_reset_ms
 from .risk import RiskManager, SessionCalendar
 from .session import Session
 from .simbroker import SimBroker
@@ -87,6 +92,7 @@ class Bot:
         self.hours = hours
         self.history_slots = history_slots
         self.journal = journal or Journal.from_settings(self.settings)
+        self.journal.use_daily_reset(self.settings)
         self.session = Session(self.settings, transport, clock)
         self.risk = RiskManager(self.settings)
         self.engine = engine or FeatureEngine()
@@ -120,6 +126,11 @@ class Bot:
         self._ready_ms: Optional[int] = None
         self._balance: Optional[float] = None
         self._balance_pnl_ref = 0.0
+        self._kill_busy = False          # a kill-switch check (maybe a server request) is in flight
+        self._kill_profit_done = False   # profit_target already acted on (pause) while it stays reached
+        self._kill_daily_day: Optional[int] = None   # day start for which daily_max_loss already fired
+        self._unreal_warned = False      # quote asset != deposit asset warning, once
+        self._unreal_err = False         # server unrealised request failed, warning once per streak
 
         s = self.session
         s.on_ready = self._on_ready
@@ -158,7 +169,7 @@ class Bot:
         log.info("shutdown: %s", reason)
         self._ensure_run(None)
         self.journal.log("shutdown", reason=reason, exit_code=self.exit_code)
-        for k in ("slot", "risk", "hours"):
+        for k in ("slot", "risk", "hours", "kill"):
             c = self._calls.pop(k, None)
             if c is not None and c.active():
                 c.cancel()
@@ -275,6 +286,8 @@ class Bot:
             except Exception as exc:
                 log.error("startup reconcile failed: %s", exc)
                 self.journal.record_risk_event("reconcile_failed", str(exc))
+        if self._check_kill():           # KILL present at start (or on a reconnect): flatten, exit 0
+            return
         try:
             yield self._warmup(now, first)
         except Exception as exc:
@@ -285,6 +298,8 @@ class Bot:
             self.initialised = True
             self._arm_slot()
             self._arm_risk()
+            if self.settings.kill_enabled:
+                self._calls["kill"] = self.clock.call_later(0, self._kill_tick)
             self.clock.call_later(0, self._first_subscribe)
         self.trading_ready = True
 
@@ -615,3 +630,132 @@ class Bot:
             self._pending_outage_s = None
         except Exception:
             log.exception("risk tick failed")
+
+    # ---- P&L kill switch (DESIGN.md section 5) ----
+
+    def _kill_tick(self) -> None:
+        self._calls.pop("kill", None)
+        if self._stopping:
+            return
+        self._calls["kill"] = self.clock.call_later(self.settings.kill_check_interval_s, self._kill_tick)
+        if self._kill_busy:              # the previous check still waits for the server: do not pile up
+            return
+        self._kill_busy = True
+        d = self._kill_check()
+        d.addErrback(lambda f: log.error("kill-switch check failed: %s", f.getErrorMessage()))
+        d.addBoth(lambda _: setattr(self, "_kill_busy", False))
+
+    def _own_views(self) -> list:
+        return [v for v in (self.om.position_view(sid) for sid in sorted(self.specs)) if v is not None]
+
+    def _fallback_ok(self, views) -> bool:
+        """The fallback assumes quote currency == deposit currency; warn once and refuse when known otherwise."""
+        dep = self.session.trader_info.get("deposit_asset_id")
+        bad = sorted({self.specs[v.symbol_id].name for v in views
+                      if self.specs[v.symbol_id].quote_asset_id not in (None, dep)})
+        if bad and not self._unreal_warned:
+            self._unreal_warned = True
+            log.warning("kill switch: quote asset of %s differs from the deposit asset: no client-side "
+                        "unrealised P&L (realised-only unless the server value is available)", bad)
+        return not bad
+
+    @inlineCallbacks
+    def _unrealised(self, views):
+        """(unrealised net pnl of the bot's own open positions in account currency or None if unknown, source).
+        DEMO: the server's netUnrealizedPnL per position (read-only request), per-position fallback to the
+        touch mark; DRY_RUN: the touch mark."""
+        if not views:
+            return 0.0, "none"
+        server: dict = {}
+        if self.mode is RunMode.DEMO and self.session.ready:
+            ids = {v.position_id for v in views if v.position_id is not None}
+            try:
+                res = yield self.session.request(oa.ProtoOAGetPositionUnrealizedPnLReq(), timeout=5)
+                server = killswitch.unrealised_from_server(res, ids)
+                self._unreal_err = False
+            except Exception as exc:
+                if not self._unreal_err:
+                    self._unreal_err = True
+                    log.warning("kill switch: server unrealised P&L unavailable (%s): using the touch mark",
+                                exc)
+        total, used = 0.0, set()
+        for v in views:
+            if v.position_id is not None and v.position_id in server:
+                total += server[v.position_id]
+                used.add("server")
+                continue
+            if not self._fallback_ok([v]):
+                return None, "unknown"
+            part = killswitch.unrealised_fallback(v, self.last_quote.get(v.symbol_id))
+            if part is None:
+                return None, "unknown"
+            total += part
+            used.add("touch")
+        return total, "+".join(sorted(used))
+
+    @inlineCallbacks
+    def _kill_check(self):
+        st = self.settings
+        if not (st.kill_enabled and self.om is not None and self.initialised):
+            return
+        now = self.clock.now_ms()
+        acct = self.session.account_id
+        base = killswitch.current_baseline(st.state_path(), acct, now, st.kill_since)
+        views = self._own_views()
+        unreal, src = yield self._unrealised(views)
+        if self._stopping:
+            return
+        j = self.journal
+        d0, d1 = j.day_bounds(now)
+        realised = j.pnl_net_window(base["since_ms"], None, acct, self.mode)
+        realised_day = j.pnl_net_window(d0, d1, acct, self.mode)
+        u = unreal or 0.0
+        cum, daily = realised + u, realised_day + u
+        status = {"ts_ms": now, "account_id": acct, "mode": self.mode.value, "since_ms": base["since_ms"],
+                  "realised": realised, "unrealised": unreal, "unrealised_source": src,
+                  "cumulative": cum, "realised_today": realised_day, "daily": daily,
+                  "day_start_ms": d0, "next_reset_ms": d1}
+        try:
+            killswitch.write_status(st.state_path(), status)
+        except OSError as exc:
+            log.warning("kill_status.json not written: %s", exc)
+        kinds = killswitch.evaluate(st, cum, daily)
+        if "kill_profit_target" not in kinds:
+            self._kill_profit_done = False
+        detail = json.dumps({"cumulative": round(cum, 2), "realised": round(realised, 2),
+                             "unrealised": None if unreal is None else round(unreal, 2),
+                             "unrealised_source": src, "daily": round(daily, 2),
+                             "max_loss": st.kill_max_loss, "profit_target": st.kill_profit_target,
+                             "daily_max_loss": st.kill_daily_max_loss, "since_ms": base["since_ms"]},
+                            sort_keys=True)
+        for kind in kinds:
+            if kind == "kill_max_loss" or (kind == "kill_profit_target" and st.kill_profit_action == "kill"):
+                self._kill_fire(kind, detail)
+                return
+            if kind == "kill_profit_target":          # profit_action = pause: no new entries, exits continue
+                if not self._kill_profit_done:
+                    self._kill_profit_done = True
+                    log.warning("KILL SWITCH %s: pausing new entries: %s", kind, detail)
+                    self.journal.record_risk_event(kind, detail)
+                    self._touch_control("PAUSE", f"{kind} {detail}")
+            elif self._kill_daily_day != d0:          # daily_max_loss
+                self._kill_daily_day = d0
+                log.warning("KILL SWITCH %s: flat, no entries until %s: %s", kind,
+                            killswitch.iso(next_reset_ms(now, st)), detail)
+                self.journal.record_risk_event(kind, detail)
+                self.risk.latch_daily("daily_max_loss", now)
+                self.om.flatten_all("risk", now)
+
+    def _touch_control(self, name: str, text: str) -> None:
+        try:
+            p = self.settings.state_path() / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text + "\n")
+        except OSError as exc:
+            log.error("could not write state/%s: %s", name, exc)
+
+    def _kill_fire(self, kind: str, detail: str) -> None:
+        log.warning("KILL SWITCH %s: flattening and stopping: %s", kind, detail)
+        self.journal.record_risk_event(kind, detail)
+        self._touch_control("KILL", f"{kind} {detail}")
+        self.shutdown("kill", code=EXIT_OK, flatten=True)

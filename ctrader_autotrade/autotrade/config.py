@@ -114,6 +114,16 @@ class Settings:
     reject_breaker_window_min: int = 10
     flatten_after_disconnect_s: int = 120
     close_on_shutdown: bool = True
+    daily_reset: str = "00:00"       # HH:MM local time in daily_reset_tz: where every "day" starts
+    daily_reset_tz: str = "UTC"      # IANA name, e.g. America/New_York with 17:00 for the forex day
+    # [kill] P&L kill switch (DESIGN.md section 5); off unless config.toml enables it
+    kill_enabled: bool = False
+    kill_max_loss: float = 500       # account currency; cumulative P&L since the baseline <= -this: KILL
+    kill_profit_target: float = 1000  # cumulative P&L >= this: kill_profit_action; 0 = off
+    kill_profit_action: str = "kill"  # "kill" (flatten, KILL file, stop) or "pause" (PAUSE file, no new entries)
+    kill_daily_max_loss: float = 200  # today's P&L <= -this: flatten, no entries until the next reset; 0 = off
+    kill_check_interval_s: float = 5
+    kill_since: Optional[str] = None  # ISO UTC instant; overrides state/kill_baseline.json
     label: str = "axq-poc4h-v1"
     grace_s: int = 2
     warmup_hours: int = 9
@@ -132,14 +142,45 @@ class Settings:
 
 
 def _flatten(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict."""
+    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict; [kill] keys get a kill_ prefix."""
     out: dict[str, Any] = {}
     for k, v in d.items():
-        if isinstance(v, dict) and k != "aliases":
+        if isinstance(v, dict) and k == "kill":
+            out.update({f"kill_{kk}": vv for kk, vv in v.items()})
+        elif isinstance(v, dict) and k != "aliases":
             out.update(v)
         else:
             out[k] = v
     return out
+
+
+def _num(name: str, v: Any, positive: bool = False) -> None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+        raise ConfigError(f"{name} must be a number, got {v!r}")
+    if v < 0 or (positive and v == 0):
+        raise ConfigError(f"{name} must be {'> 0' if positive else '>= 0'} (a positive loss/profit size), got {v!r}")
+
+
+def validate(s: Settings) -> None:
+    """Reject bad daily-reset and kill-switch settings at start-up."""
+    from .resetday import parse_reset
+    try:
+        parse_reset(s.daily_reset, s.daily_reset_tz)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    if not isinstance(s.kill_enabled, bool):
+        raise ConfigError(f"kill.enabled must be true or false, got {s.kill_enabled!r}")
+    _num("kill.max_loss", s.kill_max_loss, positive=True)
+    _num("kill.profit_target", s.kill_profit_target)
+    _num("kill.daily_max_loss", s.kill_daily_max_loss)
+    _num("kill.check_interval_s", s.kill_check_interval_s)
+    if s.kill_check_interval_s < 1:
+        raise ConfigError("kill.check_interval_s must be >= 1 (it also paces the server P&L request)")
+    if s.kill_profit_action not in ("kill", "pause"):
+        raise ConfigError(f"kill.profit_action must be 'kill' or 'pause', got {s.kill_profit_action!r}")
+    if s.kill_since is not None:
+        from .killswitch import parse_since
+        parse_since(s.kill_since)
 
 
 def load(env_path=None, toml_path=None, overrides: Optional[Mapping[str, Any]] = None,
@@ -169,6 +210,7 @@ def load(env_path=None, toml_path=None, overrides: Optional[Mapping[str, Any]] =
         raise ConfigError("unknown settings: " + ", ".join(sorted(unknown)))
     data.pop("allow_live_host", None)
     s = Settings(**data, allow_live_host=allow_live_host, secrets=secrets)
+    validate(s)
     if s.host != DEMO_HOST and not allow_live_host:
         raise ConfigError(f"host {s.host!r} refused: only {DEMO_HOST} is allowed")
     return s
