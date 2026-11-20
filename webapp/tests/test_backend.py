@@ -1505,6 +1505,83 @@ def test_export_flat_main_writes_the_table():
     os.unlink(path)
 
 
+def _flat_rows(tf_name, ends, data_start=None):
+    import export_flat
+    from datetime import datetime, timezone
+    ident = {"broker": "icmarkets", "ctid_trader_account": "48449283", "symbol_id": "136",
+             "symbol_name": None, "standardized_name": None, "asset_class": None}
+    tf = export_flat.TIMEFRAMES[tf_name]
+    start = data_start or datetime(2026, 11, 6, 9, 0, tzinfo=timezone.utc)
+    return export_flat.export_chunk(app_module.cfg, FlatReader(), ident, ends, start, tf)
+
+
+def test_export_flat_5m_output_is_unchanged():
+    """Golden digest of two 5m rows, taken from the exporter before --timeframe existed."""
+    import export_flat, hashlib, json
+    from datetime import datetime, timezone
+    ends = [datetime(2026, 11, 6, 10, m, tzinfo=timezone.utc) for m in (5, 10)]
+    rows = _flat_rows("5m", ends)
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
+    assert digest == "59f40edf06555a41c48358615128277cfca675f6504d8294ce50f09833386a53"
+    assert export_flat.COLUMNS == export_flat.TIMEFRAMES["5m"].columns and len(export_flat.COLUMNS) == 65
+    assert export_flat.TIMEFRAMES["5m"].table == "metrics_5m"
+
+
+def test_export_flat_1m_slots_are_half_open_and_keyed_on_slot_end():
+    import export_flat
+    from datetime import datetime, timezone
+    tf = export_flat.TIMEFRAMES["1m"]
+    t = lambda h, m, s=0: datetime(2026, 11, 6, h, m, s, tzinfo=timezone.utc)
+    assert export_flat.floor_slot(t(10, 7, 45), tf) == t(10, 7)
+    # (floor(start), floor(end)]: the slot ending exactly at `start` is excluded.
+    assert export_flat.slot_ends(t(10, 0), t(10, 3, 30), tf) == [t(10, 1), t(10, 2), t(10, 3)]
+    [row] = _flat_rows("1m", [t(10, 1)])
+    assert row["slot_start"] == "2026-11-06T10:00:00Z" and row["slot_end"] == "2026-11-06T10:01:00Z"
+    assert row["book_buckets"] == 6                              # 10:00:00..10:00:50
+    assert row["tick_distinct_timestamps"] == 240                # ticks in [10:00, 10:01)
+    raw = FlatReader().run("SERIES_RANGE")
+    k = analytics.kpis(export_flat._scaled(raw[60 * 6:61 * 6], app_module.cfg.price_scale), 10)
+    assert row["events"] == k["ticks"] and close(row["realised_vol_pct"], k["realised_vol_pct"])
+
+
+def test_export_flat_1m_vap_windows_and_columns():
+    import export_flat
+    from datetime import datetime, timezone
+    tf = export_flat.TIMEFRAMES["1m"]
+    assert tf.vap_windows == (15, 30, 60) and tf.table == "metrics_1m"
+    assert tf.vap_columns == [f"vap_{w}m_{f}" for w in (15, 30, 60) for f in export_flat.VAP_FIELDS]
+    assert not any(c.startswith("vap_240m") for c in tf.columns)
+    assert [c for c in tf.columns if not c.startswith("vap_")] == \
+        [c for c in export_flat.COLUMNS if not c.startswith("vap_")]
+    [row] = _flat_rows("1m", [datetime(2026, 11, 6, 10, 20, tzinfo=timezone.utc)])
+    assert set(row) >= set(tf.columns) and "vap_120m_poc" not in row
+    assert row["vap_15m_coverage"] == 1.0 and row["vap_60m_coverage"] == 1.0
+    [early] = _flat_rows("1m", [datetime(2026, 11, 6, 9, 30, tzinfo=timezone.utc)])
+    assert close(early["vap_60m_coverage"], 30 / 60) and early["vap_30m_coverage"] == 1.0
+
+
+def test_export_flat_1m_main_upsert_is_idempotent():
+    import export_flat
+
+    path = _metrics_db()
+    args = ["--timeframe", "1m", "--start", "2026-11-06T10:00:00Z", "--end", "2026-11-06T10:03:00Z"]
+    with mock.patch.dict(os.environ, {"DB_PATH": path}):
+        assert export_flat.main(args, reader=FlatReader()) == 0
+        assert export_flat.main(args, reader=FlatReader()) == 0
+        conn = db_module.connect(path)
+        try:
+            rows = conn.execute("SELECT * FROM metrics_1m ORDER BY slot_end").fetchall()
+            assert [r["slot_end"] for r in rows] == [
+                "2026-11-06T10:01:00Z", "2026-11-06T10:02:00Z", "2026-11-06T10:03:00Z"]
+            assert "vap_15m_poc" in rows[0].keys() and "vap_240m_poc" not in rows[0].keys()
+            assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='metrics_5m'").fetchone() is None
+            [summary] = db_module.metrics_summary(conn, "metrics_1m")
+            assert summary["slots"] == 3
+        finally:
+            conn.close()
+    os.unlink(path)
+
+
 def test_export_flat_closed_market_writes_nothing():
     import export_flat
 
@@ -1529,7 +1606,24 @@ def _with_research(cfg):
     (site / "charts").mkdir()
     (site / "index.html").write_text("<title>research</title>")
     (site / "charts" / "a.png").write_bytes(b"png")
+    (site / "screen-1m").mkdir()
+    (site / "screen-1m" / "index.html").write_text("<title>screen 1m</title>")
     return dataclasses.replace(cfg, research_dist=str(site))
+
+
+def test_research_item_folders_serve_their_index():
+    """/research/<item>/ serves the item's index.html; /research/<item> redirects there;
+    a missing item or an escape attempt is a 404."""
+    with mock.patch.object(app_module, "cfg", _with_research(_built_sites())):
+        client = app_module.app.test_client()
+        page = client.get("/research/screen-1m/")
+        assert page.status_code == 200 and b"screen 1m" in page.data
+        r = client.get("/research/screen-1m")
+        assert r.status_code == 301 and r.headers["Location"].endswith("/research/screen-1m/")
+        assert client.get("/research/screen-1m/index.html").status_code == 200
+        assert client.get("/research/nope/").status_code == 404
+        assert client.get("/research/charts/").status_code == 404  # folder without an index
+        assert client.get("/research/../webapp/").status_code == 404
 
 
 def test_research_report_served():

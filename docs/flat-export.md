@@ -83,10 +83,33 @@ python export_flat.py --start 2026-11-05      # backfill to now
 python export_flat.py --symbol 136 --account 49208255 --start 2026-11-13
 python export_flat.py --list                  # slots on record per instrument (no Kusto)
 python export_flat.py --coverage              # feed's first/last tick
+python export_flat.py --timeframe 1m --start 2026-11-05 --chunk-minutes 240   # 1-minute bars
 ```
 
 `--chunk-minutes` (default 60) sets how many slots one Kusto query covers.
 Exit code is 0 unless every instrument failed.
+
+## 1-minute bars (`metrics_1m`)
+
+`--timeframe 1m` (default `5m`) writes the same schema at one-minute resolution
+to **`metrics_1m`**, same primary key and upsert semantics. The slot is
+`[slot_end - 1 min, slot_end)` on 10-second buckets (6 per slot), and every
+per-slot metric is computed exactly as for 5m. The VAP lookbacks keep the
+1/4, 1/2, 1 ratios of the longest window, now 1 h: the columns are
+`vap_15m_*`, `vap_30m_*`, `vap_60m_*` (no 120m/180m/240m). The timeframes are
+defined in `export_flat.TIMEFRAMES`; the default 5m behaviour and `metrics_5m`
+are unchanged. `--list --timeframe 1m` summarises the table.
+
+There is no cron for 1m. Refresh it by hand (idempotent upsert), e.g. daily:
+
+```bash
+cd webapp
+python export_flat.py --timeframe 1m --start 2026-11-19 --chunk-minutes 240
+```
+
+With `--start` the VAP `coverage` is measured against the table-wide first tick,
+so for an instrument whose own stream starts later than the feed's first tick
+the early windows read `coverage = 1` although they hold less history.
 
 ## Schedule (every 5 minutes, on the grid)
 

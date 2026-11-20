@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, redirect, request, send_from_directory, session
+from werkzeug.security import safe_join
 
 import analytics
 import db
@@ -243,7 +244,16 @@ def research():
 
 @app.get("/research/<path:filename>")
 def research_file(filename):
-    """Report assets (charts, the slide deck, downloadable CSV/JSON)."""
+    """Report items and their assets (charts, slides, downloadable CSV/JSON).
+
+    A research item is a folder with its own index.html: /research/<item>/ serves
+    it and /research/<item> redirects there. safe_join keeps the lookup inside
+    the research site."""
+    path = safe_join(cfg.research_dist, filename)
+    if path and os.path.isdir(path):
+        if not filename.endswith("/"):
+            return redirect(f"/research/{filename}/", code=301)
+        filename = filename + "index.html"
     return send_from_directory(cfg.research_dist, filename)
 
 

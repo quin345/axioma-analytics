@@ -263,41 +263,43 @@ def _metric_type(column):
     return "REAL"
 
 
-def ensure_metrics_table(conn, columns):
-    """Create `metrics_5m` for `columns`, or add any of them it lacks. Idempotent."""
+def ensure_metrics_table(conn, columns, table=METRICS_TABLE):
+    """Create `table` (default `metrics_5m`; `metrics_1m` for the 1-minute export) for
+    `columns`, or add any of them it lacks. Idempotent."""
     columns = list(columns) + ["computed_at"]
     exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (METRICS_TABLE,)
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
     if exists is None:
         body = ",\n    ".join(
             f"{c} {_metric_type(c)}{' NOT NULL' if c in METRICS_KEY else ''}" for c in columns)
-        conn.execute(f"CREATE TABLE {METRICS_TABLE} (\n    {body},\n    "
+        conn.execute(f"CREATE TABLE {table} (\n    {body},\n    "
                      f"PRIMARY KEY ({', '.join(METRICS_KEY)})\n)")
     else:
-        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({METRICS_TABLE})")}
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for c in columns:
             if c not in have:
-                conn.execute(f"ALTER TABLE {METRICS_TABLE} ADD COLUMN {c} {_metric_type(c)}")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {c} {_metric_type(c)}")
     # Research reads are "one slot range, all instruments" or "one instrument
     # over time"; the key covers the second, this index the first.
-    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{METRICS_TABLE}_slot "
-                 f"ON {METRICS_TABLE} (slot_end)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_slot "
+                 f"ON {table} (slot_end)")
     conn.commit()
 
 
-def save_metrics(conn, rows, columns, computed_at=None):
+def save_metrics(conn, rows, columns, computed_at=None, table=METRICS_TABLE):
     """Upsert research rows on (account, symbol, slot_end) in one transaction.
 
     `rows` are dicts keyed by `columns`; a missing key is stored as NULL, as is
-    a NaN or infinite float. Returns the number of rows written.
+    a NaN or infinite float. `table` picks the timeframe (`metrics_5m`/`metrics_1m`).
+    Returns the number of rows written.
     """
     if not rows:
         return 0
-    ensure_metrics_table(conn, columns)
+    ensure_metrics_table(conn, columns, table)
     computed_at = computed_at or _now()
     cols = list(columns) + ["computed_at"]
-    sql = (f"INSERT OR REPLACE INTO {METRICS_TABLE} ({', '.join(cols)}) "
+    sql = (f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) "
            f"VALUES ({', '.join('?' for _ in cols)})")
     with conn:
         conn.executemany(sql, [
@@ -312,10 +314,10 @@ def _metric_value(value):
     return value
 
 
-def metrics_summary(conn):
+def metrics_summary(conn, table=METRICS_TABLE):
     """Rows, slot range and live-slot count per instrument, for `--list`."""
     exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (METRICS_TABLE,)
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
     ).fetchone()
     if exists is None:
         return []
@@ -323,7 +325,7 @@ def metrics_summary(conn):
         f"""SELECT broker, ctid_trader_account, symbol_id, standardized_name,
                    COUNT(*) AS slots, SUM(has_data) AS live_slots,
                    MIN(slot_end) AS first_slot, MAX(slot_end) AS last_slot
-              FROM {METRICS_TABLE}
+              FROM {table}
              GROUP BY ctid_trader_account, symbol_id
              ORDER BY broker, ctid_trader_account, symbol_id""")]
 

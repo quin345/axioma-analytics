@@ -1,4 +1,5 @@
-"""Record every metric the terminal computes in a 5-minute research table.
+"""Record every metric the terminal computes in a 5-minute research table
+(`--timeframe 1m`: a 1-minute `metrics_1m` with VAP lookbacks 15/30/60 min).
 
 One row per instrument per 5-minute slot. Each row carries the instrument's
 identity, the slot's microstructure (the same `analytics` functions behind
@@ -22,11 +23,13 @@ Usage (see docs/flat-export.md):
     python export_flat.py --start 2026-11-10 --end 2026-11-15   # backfill
     python export_flat.py --list               # what is on record, no Kusto
     python export_flat.py --coverage           # how much history the feed holds
+    python export_flat.py --timeframe 1m --start 2026-11-10   # 1-minute bars -> metrics_1m
 """
 import argparse
 import math
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import analytics
@@ -34,9 +37,34 @@ import db
 import queries
 from config import load_config
 
-SLOT_MINUTES = 5
+
+
+@dataclass(frozen=True)
+class Timeframe:
+    """One export resolution: slot width, VAP lookbacks (minutes) and target table."""
+    name: str
+    slot_minutes: int
+    vap_windows: tuple
+    table: str
+
+    @property
+    def vap_columns(self):
+        return [f"vap_{w}m_{f}" for w in self.vap_windows for f in VAP_FIELDS]
+
+    @property
+    def columns(self):
+        return IDENTITY_COLUMNS + SLOT_COLUMNS + self.vap_columns
+
+
+# The VAP card's lookbacks (app.WINDOWS) for 5m; 1m keeps the 1/4, 1/2, 1 ratios of the longest.
+TIMEFRAMES = {
+    "5m": Timeframe("5m", 5, (60, 120, 180, 240), "metrics_5m"),
+    "1m": Timeframe("1m", 1, (15, 30, 60), "metrics_1m"),
+}
+DEFAULT_TIMEFRAME = TIMEFRAMES["5m"]
+SLOT_MINUTES = DEFAULT_TIMEFRAME.slot_minutes
+VAP_WINDOWS = DEFAULT_TIMEFRAME.vap_windows
 BIN_SECONDS = 10                    # the terminal's bucket width (app.BIN_SECONDS)
-VAP_WINDOWS = (60, 120, 180, 240)   # the VAP card's lookbacks (app.WINDOWS)
 ACF_LAGS = 3
 DEFAULT_RECENT_SLOTS = 2            # re-export the previous slot too, to catch late ticks
 DEFAULT_CHUNK_MINUTES = 60
@@ -57,23 +85,23 @@ SLOT_COLUMNS = [
     "tick_distinct_timestamps", "tick_shared_timestamp_share", "tick_median_gap_ms",
 ]
 VAP_FIELDS = ("poc", "va_low", "va_high", "volume_events", "hvn_count", "hvn_top_price", "coverage")
-VAP_COLUMNS = [f"vap_{w}m_{f}" for w in VAP_WINDOWS for f in VAP_FIELDS]
-COLUMNS = IDENTITY_COLUMNS + SLOT_COLUMNS + VAP_COLUMNS
+VAP_COLUMNS = DEFAULT_TIMEFRAME.vap_columns
+COLUMNS = DEFAULT_TIMEFRAME.columns
 
 
 # --- Time grid ---------------------------------------------------------------
 
-def floor_slot(moment):
-    """`moment` floored onto the 5-minute grid (UTC)."""
+def floor_slot(moment, tf=DEFAULT_TIMEFRAME):
+    """`moment` floored onto the timeframe's grid (UTC)."""
     moment = moment.astimezone(timezone.utc).replace(second=0, microsecond=0)
-    return moment.replace(minute=(moment.minute // SLOT_MINUTES) * SLOT_MINUTES)
+    return moment.replace(minute=(moment.minute // tf.slot_minutes) * tf.slot_minutes)
 
 
-def slot_ends(start, end):
+def slot_ends(start, end, tf=DEFAULT_TIMEFRAME):
     """Every slot end in `(floor(start), floor(end)]`, on the grid."""
-    step = timedelta(minutes=SLOT_MINUTES)
-    cursor = floor_slot(start) + step
-    last = floor_slot(end)
+    step = timedelta(minutes=tf.slot_minutes)
+    cursor = floor_slot(start, tf) + step
+    last = floor_slot(end, tf)
     out = []
     while cursor <= last:
         out.append(cursor)
@@ -166,7 +194,7 @@ def slot_metrics(rows, tick_rows):
     return out
 
 
-def vap_metrics(raw_rows, slot_end, price_scale, data_start):
+def vap_metrics(raw_rows, slot_end, price_scale, data_start, tf=DEFAULT_TIMEFRAME):
     """Each lookback's profile summary ending at `slot_end` (raw-price rows).
 
     `coverage` is the share of the window after `data_start` (the earliest
@@ -174,7 +202,7 @@ def vap_metrics(raw_rows, slot_end, price_scale, data_start):
     instead of silently shorter.
     """
     out = {}
-    for window in VAP_WINDOWS:
+    for window in tf.vap_windows:
         start = slot_end - timedelta(minutes=window)
         profile = analytics.volume_at_price(_between(raw_rows, start, slot_end), price_scale)
         area = profile["value_area"] or [None, None]
@@ -191,17 +219,18 @@ def vap_metrics(raw_rows, slot_end, price_scale, data_start):
     return out
 
 
-def build_rows(identity, series_raw, tick_rows, ends, price_scale, data_start):
+def build_rows(identity, series_raw, tick_rows, ends, price_scale, data_start,
+               tf=DEFAULT_TIMEFRAME):
     """One output row per slot end for one instrument."""
     out = []
-    step = timedelta(minutes=SLOT_MINUTES)
+    step = timedelta(minutes=tf.slot_minutes)
     for end in ends:
         start = end - step
         slot_series = _scaled(_between(series_raw, start, end), price_scale)
         slot_ticks = [t for t in tick_rows if _ms(start) <= t["epoch_ms"] < _ms(end)]
         row = {**identity, "slot_start": _iso(start), "slot_end": _iso(end)}
         row.update(slot_metrics(slot_series, slot_ticks))
-        row.update(vap_metrics(series_raw, end, price_scale, data_start))
+        row.update(vap_metrics(series_raw, end, price_scale, data_start, tf))
         out.append(row)
     return out
 
@@ -246,22 +275,22 @@ def instruments(reader, table, start, end, mapping):
     return out
 
 
-def export_chunk(cfg, reader, identity, ends, data_start=None):
+def export_chunk(cfg, reader, identity, ends, data_start=None, tf=DEFAULT_TIMEFRAME):
     """Rows for one instrument's consecutive slot ends: two Kusto reads in total.
 
     The series read starts the widest VAP lookback before the first slot, so
     every window is complete; `data_start` (backfill start) only marks how much
     of each window the feed could actually supply.
     """
-    first_start = ends[0] - timedelta(minutes=SLOT_MINUTES)
-    lookback_start = ends[0] - timedelta(minutes=max(VAP_WINDOWS))
+    first_start = ends[0] - timedelta(minutes=tf.slot_minutes)
+    lookback_start = ends[0] - timedelta(minutes=max(tf.vap_windows))
     symbol_id, account = identity["symbol_id"], identity["ctid_trader_account"]
     series_raw = reader.run(queries.series_range(
         cfg.table, symbol_id, lookback_start, ends[-1], BIN_SECONDS, account))
     tick_rows = reader.run(queries.tick_times_range(
         cfg.table, symbol_id, first_start, ends[-1], account))
     return build_rows(identity, series_raw, tick_rows, ends, cfg.price_scale,
-                      data_start or EPOCH)
+                      data_start or EPOCH, tf)
 
 
 def _chunks(items, size):
@@ -271,11 +300,11 @@ def _chunks(items, size):
 
 # --- Storage -----------------------------------------------------------------
 
-def write_rows(rows, db_path):
-    """Upsert the rows into `metrics_5m` in the local database. Returns the count."""
+def write_rows(rows, db_path, tf=DEFAULT_TIMEFRAME):
+    """Upsert the rows into the timeframe's table in the local database. Returns the count."""
     conn = db.connect(db_path)
     try:
-        return db.save_metrics(conn, rows, COLUMNS)
+        return db.save_metrics(conn, rows, tf.columns, table=tf.table)
     finally:
         conn.close()
 
@@ -292,15 +321,15 @@ def coverage(reader, table):
     return rows[0] if rows else {}
 
 
-def plan_range(args, now):
+def plan_range(args, now, tf=DEFAULT_TIMEFRAME):
     """The slot ends for a backfill (--start/--end) or for the live recent slots."""
     if args.start:
         start = parse_time(args.start)
         end = parse_time(args.end) if args.end else now
-        return slot_ends(start, end)
-    end = floor_slot(now)
-    start = end - timedelta(minutes=SLOT_MINUTES * max(1, args.recent))
-    return slot_ends(start, end)
+        return slot_ends(start, end, tf)
+    end = floor_slot(now, tf)
+    start = end - timedelta(minutes=tf.slot_minutes * max(1, args.recent))
+    return slot_ends(start, end, tf)
 
 
 def feed_start(reader, table):
@@ -316,10 +345,12 @@ def main(argv=None, reader=None):
     parser.add_argument("--end", help="backfill up to this UTC date/time (default: now)")
     parser.add_argument("--recent", type=int, default=DEFAULT_RECENT_SLOTS,
                         help="without --start: the last N completed slots (default 2)")
+    parser.add_argument("--timeframe", choices=sorted(TIMEFRAMES), default="5m",
+                        help="slot width: 5m -> metrics_5m (default), 1m -> metrics_1m")
     parser.add_argument("--symbol", help="only this symbol id")
     parser.add_argument("--account", help="only this trader account")
     parser.add_argument("--list", action="store_true",
-                        help="print what metrics_5m holds per instrument and exit (no Kusto)")
+                        help="print what the timeframe's table holds per instrument and exit (no Kusto)")
     parser.add_argument("--chunk-minutes", type=int, default=DEFAULT_CHUNK_MINUTES,
                         help="slots read per Kusto query, in minutes (default 60)")
     parser.add_argument("--delay", type=float, default=None,
@@ -328,11 +359,12 @@ def main(argv=None, reader=None):
                         help="print the feed's first/last tick and exit")
     args = parser.parse_args(argv)
 
+    tf = TIMEFRAMES[args.timeframe]
     cfg = load_config()
     if args.list:
         conn = db.connect(cfg.db_path)
         try:
-            summary = db.metrics_summary(conn)
+            summary = db.metrics_summary(conn, tf.table)
         finally:
             conn.close()
         for r in summary:
@@ -340,7 +372,7 @@ def main(argv=None, reader=None):
                   f"{r['standardized_name'] or '-'} slots={r['slots']} live={r['live_slots']} "
                   f"{r['first_slot']}..{r['last_slot']}")
         if not summary:
-            print(f"{db.METRICS_TABLE} is empty")
+            print(f"{tf.table} is empty")
         return 0
 
     if reader is None:
@@ -358,15 +390,15 @@ def main(argv=None, reader=None):
         delay = cfg.vap_grid_delay if args.delay is None else args.delay
         if delay and delay > 0:
             time.sleep(delay)
-    ends = plan_range(args, datetime.now(timezone.utc))
+    ends = plan_range(args, datetime.now(timezone.utc), tf)
     # Only a backfill can reach back to the start of history; the live 4h
     # lookback is always inside the feed, so it skips the extra scan.
     data_start = feed_start(reader, cfg.table) if args.start else None
     if not ends:
-        print("no complete 5-minute slot in the requested range", file=sys.stderr)
+        print(f"no complete {tf.name} slot in the requested range", file=sys.stderr)
         return 1
 
-    targets = instruments(reader, cfg.table, ends[0] - timedelta(minutes=SLOT_MINUTES),
+    targets = instruments(reader, cfg.table, ends[0] - timedelta(minutes=tf.slot_minutes),
                           ends[-1], load_mapping(cfg.db_path))
     if args.symbol:
         targets = [t for t in targets if t["symbol_id"] == args.symbol]
@@ -375,26 +407,26 @@ def main(argv=None, reader=None):
 
     if not targets:
         # Normal when the market is shut (weekend): nothing ticked, nothing to write.
-        print(f"no instrument ticked in {_iso(ends[0] - timedelta(minutes=SLOT_MINUTES))}"
+        print(f"no instrument ticked in {_iso(ends[0] - timedelta(minutes=tf.slot_minutes))}"
               f"..{_iso(ends[-1])}; nothing written")
         return 0
 
-    per_chunk = max(1, args.chunk_minutes // SLOT_MINUTES)
+    per_chunk = max(1, args.chunk_minutes // tf.slot_minutes)
     rows, failures = [], 0
     for identity in targets:
         label = db.instrument_key(identity["symbol_id"], identity["ctid_trader_account"])
         try:
             got = []
             for chunk in _chunks(ends, per_chunk):
-                got.extend(export_chunk(cfg, reader, identity, chunk, data_start))
+                got.extend(export_chunk(cfg, reader, identity, chunk, data_start, tf))
             rows.extend(got)
             print(f"OK  {label} slots={len(got)}")
         except Exception as exc:                    # one bad instrument must not stop the run
             failures += 1
             print(f"ERR {label}: {exc}", file=sys.stderr)
 
-    written = write_rows(rows, cfg.db_path)
-    print(f"wrote {db.METRICS_TABLE} rows={written} ({cfg.db_path})")
+    written = write_rows(rows, cfg.db_path, tf)
+    print(f"wrote {tf.table} rows={written} ({cfg.db_path})")
     return 1 if targets and failures == len(targets) else 0
 
 
