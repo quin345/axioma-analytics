@@ -1,12 +1,11 @@
 # Flat bar export from KQL dom_ctrader.agg_dom into webapp/data/axioma.db
-# (metrics_5m and metrics_1m). Runs as root only to read the root-only .env, then
+# (metrics_5m; the 1-minute job was stopped on 2026-11-20, see docs/findings-1m-screen.md). Runs as root only to read the root-only .env, then
 # drops to the axioma user (owner of axioma.db) with runuser. flock -n skips a
 # run if the previous one is still going. --recent re-exports a few closed slots,
 # so one missed or failed run heals itself on the next (idempotent upsert).
-# Logs: /var/log/axioma/flat-{5m,1m}.log (rotated by /etc/logrotate.d/axioma-flat).
+# Logs: /var/log/axioma/flat-5m.log (rotated by /etc/logrotate.d/axioma-flat).
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 APP=/root/axioma-analytics
 
 */5 * * * * root cd $APP/webapp && set -a && . $APP/.env && set +a && flock -n /run/lock/axioma-flat-5m.lock runuser -u axioma -- $APP/venv/bin/python export_flat.py --recent 3 >> /var/log/axioma/flat-5m.log 2>&1
-* * * * * root cd $APP/webapp && set -a && . $APP/.env && set +a && flock -n /run/lock/axioma-flat-1m.lock runuser -u axioma -- $APP/venv/bin/python export_flat.py --timeframe 1m --recent 5 >> /var/log/axioma/flat-1m.log 2>&1
