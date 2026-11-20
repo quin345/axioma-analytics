@@ -36,14 +36,21 @@ feed, a React analytics terminal, and a public product landing page.
 
 | Path | Serves |
 | --- | --- |
+Every route is behind the pilot login except the ones marked public (deny by
+default: new routes and unknown paths need a session too). Signed-out page
+requests redirect to `/login?next=<path>`; `/api/*` answers 401.
+
+| Path | Serves |
+| --- | --- |
+| `/login` | Standalone sign-in page (public); redirects on if already signed in |
 | `/` | Landing page (`landing/dist/index.html`) |
 | `/assets/*` | Landing page bundle and images |
-| `/favicon.*`, `/icon-*.png` | Landing page icons |
-| `/terminal/` | Analytics terminal, behind the pilot login (holding page with 503 when `MAINTENANCE_MODE=1`) |
+| `/favicon.*`, `/icon-*.png` | Landing page icons (public) |
+| `/terminal/` | Analytics terminal (holding page with 503 when `MAINTENANCE_MODE=1`) |
 | `/terminal/*` | Terminal bundle, images and icons (built with `base: '/terminal/'`) |
-| `/research/` | Published research report (`research/site/`, built by `research/studies/build_report.py`), behind the pilot login |
+| `/research/` | Published research report (`research/site/`, built by `research/studies/build_report.py`) |
 | `/unavailable` | Holding page preview |
-| `/api/*` | JSON API used by the terminal, behind the pilot login (401 without a session) |
+| `/api/*` | JSON API used by the terminal (401 without a session) |
 | `/api/login`, `/api/logout`, `/api/session` | Sign-in endpoints (public) |
 
 ## Configuration (`.env`)
@@ -54,7 +61,7 @@ feed, a React analytics terminal, and a public product landing page.
 | `PRICE_SCALE` | yes | Integer price -> decimal divisor |
 | `TERMINAL_DIST` | yes | Path to `terminal/dist` (legacy name `FRONTEND_DIST` still accepted) |
 | `LANDING_DIST` | no | Path to `landing/dist` (defaults to `<repo>/landing/dist`) |
-| `TERMINAL_USERNAME`, `TERMINAL_PASSWORD` | no | Shared pilot login for `/terminal/` and `/api/*`; both blank = no login wall |
+| `TERMINAL_USERNAME`, `TERMINAL_PASSWORD` | no | Shared pilot login for the whole site; both blank = no login wall |
 | `SECRET_KEY` | with login | Signs the session cookie; must be long, random and the same for every worker |
 | `SESSION_COOKIE_SECURE` | no | Default `1` (HTTPS-only cookie); set `0` only for plain-HTTP local testing |
 | `RESEARCH_DIST` | no | Path to the published research site (defaults to `<repo>/research/site`) |
@@ -64,11 +71,13 @@ feed, a React analytics terminal, and a public product landing page.
 
 ## Terminal login
 
-The landing page is public. "Explore the terminal" opens a sign-in dialog; the
-server checks the credentials and sets a signed, HttpOnly session cookie that
-lasts 12 hours. The check is server-side, so going straight to `/terminal/`
-without a session redirects to `/?login=1`, which opens the dialog, and the
-API answers 401. To change the credentials, edit `.env` and
+The whole site is behind the login. A signed-out visitor to any page lands on
+`/login`; the server checks the credentials and sets a signed, HttpOnly session
+cookie that lasts 12 hours, then sends them on to the page they asked for.
+The check is server-side, so deep links redirect to `/login?next=...` and the
+API answers 401. Only `/login`, the sign-in endpoints and the landing icons are
+public; with `TERMINAL_USERNAME`/`TERMINAL_PASSWORD` blank there is no wall.
+To change the credentials, edit `.env` and
 `sudo systemctl restart axioma`; changing `SECRET_KEY` signs everyone out.
 
 ## Build and run

@@ -3,6 +3,7 @@ import json
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, redirect, request, send_from_directory, session
 
@@ -48,13 +49,15 @@ app = Flask(__name__, static_folder=os.path.join(cfg.landing_dist, "assets"), st
 # still renders while the dashboard is being worked on.
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
-# --- Terminal login wall -------------------------------------------------------
+# --- Pilot login wall ----------------------------------------------------------
 #
-# The landing page is public; the terminal and its API sit behind a shared
-# pilot login (TERMINAL_USERNAME / TERMINAL_PASSWORD in .env). The check lives
-# here, not in the browser, so the terminal cannot be reached by skipping the
-# landing page's dialog. A signed, HttpOnly session cookie carries the login;
-# SECRET_KEY must be the same for every gunicorn worker.
+# The whole site sits behind a shared pilot login (TERMINAL_USERNAME /
+# TERMINAL_PASSWORD in .env), deny by default: every route needs a session
+# except the allow-list below, so a new route or an unknown path is gated
+# without anyone having to remember to add it. The check lives here, not in the
+# browser. A signed, HttpOnly session cookie carries the login; SECRET_KEY must
+# be the same for every gunicorn worker. With no credentials configured the wall
+# is off and everything is public.
 app.secret_key = cfg.secret_key or None
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -64,9 +67,19 @@ app.config.update(
 )
 # Reachable without a login: the sign-in endpoints themselves.
 PUBLIC_API = {"/api/login", "/api/logout", "/api/session"}
-# Where an unauthenticated visit to the terminal is sent (the landing page
-# opens its sign-in dialog when it sees ?login=1).
-LOGIN_PAGE = "/?login=1"
+# Where a signed-out visitor is sent: the standalone login page.
+LOGIN_PAGE = "/login"
+# Root-level icons the landing page's index.html links to. Public, so the login
+# page (and its tab) has an icon before anyone has signed in.
+LANDING_ICONS = {
+    "favicon.png": None,
+    "favicon.svg": "image/svg+xml",
+    "favicon.ico": None,
+    "icon-32.png": None,
+    "icon-180.png": None,
+    "icon-512.png": None,
+}
+PUBLIC_PATHS = {LOGIN_PAGE} | PUBLIC_API | {"/" + name for name in LANDING_ICONS}
 
 
 def _auth_enabled():
@@ -77,24 +90,44 @@ def _signed_in():
     return not _auth_enabled() or session.get("user") == cfg.auth_username
 
 
-def _gated_page(path, prefix):
-    return path == prefix or path.startswith(prefix + "/")
+def _safe_next(target):
+    """A same-site path to continue to after signing in, else "/".
+
+    Only a path starting with a single "/" is accepted: no scheme or host, no
+    "//" (protocol-relative), no backslashes (browsers read "/\\" as "//") and
+    no control characters - so the redirect cannot leave this site.
+    """
+    if (
+        not target
+        or not target.startswith("/")
+        or target.startswith("//")
+        or "\\" in target
+        or any(ord(char) < 32 or ord(char) == 127 for char in target)
+    ):
+        return "/"
+    return target
 
 
 @app.before_request
 def _require_login():
     path = request.path
-    research = _gated_page(path, "/research")
-    gated = research or _gated_page(path, "/terminal") or (
-        path.startswith("/api/") and path not in PUBLIC_API
-    )
-    if not gated or _signed_in():
+    if path in PUBLIC_PATHS or _signed_in():
         return None
     if path.startswith("/api/"):
         return jsonify(error="login required"), 401
-    # The research report is behind the same pilot login; after signing in the
-    # landing page sends the visitor on to it instead of the terminal.
-    return redirect(LOGIN_PAGE + ("&next=research" if research else ""), code=302)
+    # Remember where the visitor was headed; the login page sends them back.
+    if path == "/":
+        return redirect(LOGIN_PAGE, code=302)
+    target = path + ("?" + request.query_string.decode("latin-1") if request.query_string else "")
+    return redirect(f"{LOGIN_PAGE}?next={quote(target, safe='')}", code=302)
+
+
+@app.get("/login")
+def login_page():
+    """The standalone sign-in page; already signed in (or no wall) goes straight on."""
+    if _signed_in():
+        return redirect(_safe_next(request.args.get("next", "")), code=302)
+    return send_from_directory(STATIC_DIR, "login.html")
 
 
 @app.post("/api/login")
@@ -158,20 +191,9 @@ def _int_arg(name, default, low, high):
     return value
 
 
-# Root-level icons the landing page's index.html links to.
-LANDING_ICONS = {
-    "favicon.png": None,
-    "favicon.svg": "image/svg+xml",
-    "favicon.ico": None,
-    "icon-32.png": None,
-    "icon-180.png": None,
-    "icon-512.png": None,
-}
-
-
 @app.get("/")
 def index():
-    """The public product landing page."""
+    """The product landing page (behind the pilot login)."""
     return send_from_directory(cfg.landing_dist, "index.html")
 
 

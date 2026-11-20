@@ -514,20 +514,81 @@ def _login(client, username="pilot-test", password="pilot-test"):
 
 
 def test_login_wall_blocks_terminal_and_api():
-    """Without a session the terminal redirects to the landing page's sign-in
-    dialog and the API answers 401 - the wall is enforced server-side."""
+    """Without a session the terminal redirects to the login page and the API
+    answers 401 - the wall is enforced server-side."""
     with _gated() as client:
         page = client.get("/terminal/")
         assert page.status_code == 302
-        assert page.headers["Location"].endswith("/?login=1")
+        assert page.headers["Location"].endswith("/login?next=%2Fterminal%2F")
         assert client.get("/terminal/assets/app.js").status_code == 302
         assert client.get("/terminal").status_code == 302
         api = client.get("/api/symbols")
         assert api.status_code == 401
         assert api.json == {"error": "login required"}
         assert client.get("/api/session").json == {"authenticated": False}
-        # The landing page stays public.
+
+
+def test_login_wall_denies_by_default():
+    """Every route except the login page, the sign-in endpoints and the icons
+    needs a session - the landing page, its assets, the holding page and even
+    unknown paths redirect to /login, remembering where the visitor was headed."""
+    with _gated() as client:
+        expected = {
+            "/": "/login",
+            "/assets/x.js": "/login?next=%2Fassets%2Fx.js",
+            "/terminal/": "/login?next=%2Fterminal%2F",
+            "/research/": "/login?next=%2Fresearch%2F",
+            "/research/?a=1": "/login?next=%2Fresearch%2F%3Fa%3D1",
+            "/unavailable": "/login?next=%2Funavailable",
+            "/nope": "/login?next=%2Fnope",
+        }
+        for path, location in expected.items():
+            r = client.get(path)
+            assert r.status_code == 302, path
+            assert r.headers["Location"].endswith(location), (path, r.headers["Location"])
+        assert client.get("/api/symbols").status_code == 401
+        assert client.get("/api/nope").status_code == 401
+        assert client.get("/login").status_code == 200
+        assert client.get("/api/session").status_code == 200
+        assert client.get("/favicon.svg").status_code == 200
+
+
+def test_signed_in_reaches_landing_and_login_follows_next():
+    with _gated() as client:
+        assert _login(client).status_code == 200
+        r = client.get("/")
+        assert r.status_code == 200 and b"landing" in r.data
+        r = client.get("/login?next=/research/")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/research/")
+        r = client.get("/login")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/")
+
+
+def test_login_next_is_never_an_open_redirect():
+    with _gated() as client:
+        assert _login(client).status_code == 200
+        for target in ("//evil.com", "https://evil.com", "/\\evil.com", "evil.com", "/a\\b", "/a\x0db"):
+            r = client.get("/login", query_string={"next": target})
+            assert r.status_code == 302
+            assert r.headers["Location"] in ("/", "http://localhost/"), (target, r.headers["Location"])
+        r = client.get("/login?next=%2F%2Fevil.com")
+        assert r.headers["Location"] in ("/", "http://localhost/")
+
+
+def test_wall_off_everything_public_and_login_redirects_home():
+    with mock.patch.object(app_module, "cfg", _built_sites()):
+        client = app_module.app.test_client()
         assert client.get("/").status_code == 200
+        assert client.get("/unavailable").status_code == 200
+        r = client.get("/login")
+        assert r.status_code == 302 and r.headers["Location"] in ("/", "http://localhost/")
+
+
+def test_login_page_is_self_contained():
+    with open(os.path.join(app_module.STATIC_DIR, "login.html"), encoding="utf-8") as handle:
+        html = handle.read()
+    assert 'src="http' not in html and 'href="http' not in html
+    assert "/api/login" in html and 'name="robots" content="noindex"' in html
 
 
 def test_login_rejects_wrong_credentials():
@@ -594,7 +655,7 @@ def test_login_config_must_be_complete():
 
 def test_unavailable_page_is_always_reachable():
     """The page is served at its own path regardless of the flag, so it can be
-    previewed while the dashboard is live."""
+    previewed while the dashboard is live (behind the login when the wall is on)."""
     live_cfg = dataclasses.replace(app_module.cfg, maintenance=False)
     with mock.patch.object(app_module, "cfg", live_cfg):
         r = app_module.app.test_client().get("/unavailable")
@@ -1473,13 +1534,13 @@ def test_research_404_until_published():
 
 
 def test_research_behind_login_and_returns_after_sign_in():
-    """The report is behind the pilot login; the redirect tells the landing
-    page to continue to /research/ after signing in."""
+    """The report is behind the pilot login; the redirect tells the login page
+    to continue to /research/ after signing in."""
     with _gated() as client, mock.patch.object(app_module, "cfg", _with_research(app_module.cfg)):
         r = client.get("/research/")
-        assert r.status_code == 302 and r.headers["Location"].endswith("/?login=1&next=research")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/login?next=%2Fresearch%2F")
         assert client.get("/research/charts/a.png").status_code == 302
-        assert client.get("/terminal/").headers["Location"].endswith("/?login=1")
+        assert client.get("/terminal/").headers["Location"].endswith("/login?next=%2Fterminal%2F")
         assert _login(client).status_code == 200
         assert client.get("/research/").status_code == 200
         assert client.get("/research-notes").status_code == 404  # prefix match is exact
