@@ -1,0 +1,54 @@
+# cTrader depth-of-market collector, one instance per (broker, account, symbol):
+#   /root/data-mining-project/collector/main.py -> Azure Event Hub -> Fabric Eventstream
+#   -> KQL dom_ctrader.agg_dom (one row per depth event; what the webapp, research and
+#   ctrader_autotrade read).
+#
+# Instance name = <broker>-<ctidTraderAccountId>-<SYMBOL>; its settings live in
+# /etc/ctrader-collector/<instance>.env (mode 0600, never committed). Variable names are
+# the ones collector/config.py reads (lowercase except CTRADER_HOST and AZURE_*):
+#   ctrader_client_id ctrader_client_secret access_token ctidTraderAccountId
+#   CTRADER_HOST (demo|live) broker symbols (cTrader symbol NAME, e.g. XAUUSD or XAUUSD.pro)
+#   eventhub_namespace eventhub_endpoint AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET
+#
+#   systemctl enable --now ctrader-collector@icmarketssc-48664595-XAUUSD
+#   systemctl status 'ctrader-collector@*'      journalctl -u 'ctrader-collector@*' -f
+#
+# The collector has no reconnect of its own: a disconnect, cTrader error, Event Hub send
+# failure or depth stall (env stall_seconds, default 300, 0 = off) exits 1; SIGTERM
+# flushes pending events and exits 0. Restart=always brings it back either way.
+# Events are sent with partition key "<account>-<symbolId>" (per-stream order) and
+# eventSeq starts at wall-clock microseconds, so eventId stays unique across restarts.
+
+[Unit]
+Description=cTrader depth collector %i -> Event Hub -> KQL
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/data-mining-project
+EnvironmentFile=/etc/ctrader-collector/%i.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/root/axioma-analytics/venv/bin/python collector/main.py
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Small, and below the production webapp.
+Nice=5
+MemoryMax=256M
+CPUQuota=25%
+
+# Sandboxing: the collector only reads its code/venv and talks to the network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
