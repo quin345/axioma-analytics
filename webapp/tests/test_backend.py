@@ -1375,6 +1375,235 @@ def test_sql_mirror_read_runs_preserves_column_order():
         assert name in sql
 
 
+# --- Daily trade analytics (/analytics/, /api/analytics) ---------------------------
+
+def _day_report(instance, day, trades=1):
+    return {"schema_version": 1, "meta": {"instance": instance, "date": day, "partial": False},
+            "summary": {"trades": trades}}
+
+
+def _reports_dir(instances=("ax5m", "ax1m"), days=("2026-11-17", "2026-11-18")):
+    """A reports dir like `autotrade trades-report` writes, plus a file outside it that must never be served."""
+    root = pathlib.Path(tempfile.mkdtemp(prefix="axioma-reports-"))
+    base = root / "reports"
+    for name in instances:
+        (base / name).mkdir(parents=True)
+        for day in days:
+            (base / name / f"{day}.json").write_text(_json.dumps(_day_report(name, day)))
+        (base / name / "index.json").write_text(_json.dumps(
+            {"schema_version": 1, "instance": name, "days": [{"date": d, "trades": 1} for d in days]}))
+    (root / "secret.json").write_text('{"secret": "OUTSIDE-THE-REPORTS-DIR"}')
+    (base / "stray.txt").write_text("not an instance")
+    return base
+
+
+def _with_reports(cfg, base):
+    return dataclasses.replace(cfg, analytics_dir=str(base))
+
+
+def test_analytics_routes_are_behind_the_login_wall():
+    base = _reports_dir()
+    with _gated() as client, mock.patch.object(app_module, "cfg", _with_reports(app_module.cfg, base)):
+        r = client.get("/analytics/")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/login?next=%2Fanalytics%2F")
+        assert client.get("/analytics").status_code in (301, 302, 308)
+        for url in ("/api/analytics", "/api/analytics/ax5m/2026-11-18"):
+            r = client.get(url)
+            assert r.status_code == 401 and r.json == {"error": "login required"}, url
+        for path in ("/analytics/", "/api/analytics", "/analytics"):
+            assert path not in app_module.PUBLIC_PATHS
+        assert _login(client).status_code == 200
+        page = client.get("/analytics/")
+        assert page.status_code == 200 and b"TRADE ANALYTICS" in page.data
+        assert page.headers["Cache-Control"] == "no-store"
+        assert client.get("/api/analytics").status_code == 200
+        assert client.get("/api/analytics/ax5m/2026-11-18").status_code == 200
+
+
+def test_analytics_page_is_self_contained():
+    html = (pathlib.Path(app_module.STATIC_DIR) / "analytics.html").read_text()
+    assert "<script src" not in html and "http://" not in html.replace("http://www.w3.org/2000/svg", "")
+    assert "https://" not in html and "@import" not in html and "/api/analytics" in html
+    assert "/analytics/" in (pathlib.Path(app_module.STATIC_DIR) / "status.html").read_text()
+
+
+def test_analytics_listing_and_day_fetch():
+    base = _reports_dir()
+    with mock.patch.object(app_module, "cfg", _with_reports(app_module.cfg, base)):
+        client = app_module.app.test_client()
+        r = client.get("/api/analytics")
+        assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+        assert [i["name"] for i in r.json["instances"]] == ["ax1m", "ax5m"]            # stray.txt is not an instance
+        assert r.json["instances"][1]["index"]["days"][0] == {"date": "2026-11-17", "trades": 1}
+        r = client.get("/api/analytics/ax1m/2026-11-18")
+        assert r.status_code == 200 and r.headers["Cache-Control"] == "no-store"
+        assert r.json["meta"]["instance"] == "ax1m" and r.json["meta"]["date"] == "2026-11-18"
+        r = client.get("/api/analytics/ax1m/2026-11-19")                                # well-formed, not written
+        assert r.status_code == 404 and r.headers["Cache-Control"] == "no-store"
+        assert client.get("/api/analytics/ax9m/2026-11-18").status_code == 404          # no such instance directory
+        assert client.post("/api/analytics").status_code == 405                         # read-only
+        (base / "ax1m" / "index.json").unlink()                                         # an instance without an index
+        inst = {i["name"]: i for i in client.get("/api/analytics").json["instances"]}
+        assert inst["ax1m"]["index"] is None and inst["ax1m"]["error"] and inst["ax5m"]["index"]
+
+
+def test_analytics_rejects_traversal_and_bad_names():
+    base = _reports_dir()
+    outside = base.parent / "secret.json"
+    (base / "ax5m" / "2026-11-20.json").symlink_to(outside)                             # a symlink out of the dir
+    elsewhere = pathlib.Path(tempfile.mkdtemp(prefix="axioma-elsewhere-"))
+    (elsewhere / "2026-11-18.json").write_text('{"secret": "OUTSIDE-THE-REPORTS-DIR"}')
+    (base / "evil").symlink_to(elsewhere, target_is_directory=True)                     # an instance dir out of the dir
+    urls = [
+        "/api/analytics/../secret.json/2026-11-18", "/api/analytics/%2e%2e/2026-11-18", "/api/analytics/..%2fax5m/2026-11-18",
+        "/api/analytics/ax5m/%2e%2e", "/api/analytics/ax5m/..%2f..%2fsecret", "/api/analytics/ax5m/2026-11-18.json",
+        "/api/analytics/ax5m/2026-11-18%00", "/api/analytics/ax5m/..", "/api/analytics/./2026-11-18",
+        "/api/analytics/%2Froot%2Fx/2026-11-18", "/api/analytics/ax5m/%2Froot", "/api/analytics/AX5M/2026-11-18",
+        "/api/analytics/ax5m/2026-13-45", "/api/analytics/ax5m/2026-1-1", "/api/analytics/ax5m/20261118",
+        "/api/analytics/ax5m/2026-11-18/extra", "/api/analytics/ax5m/index", "/api/analytics/ax5m/latest",
+        "/api/analytics/" + "a" * 33 + "/2026-11-18", "/api/analytics/stray.txt/2026-11-18",
+        "/api/analytics/ax5m/2026-11-20",                       # symlink to a file outside the reports dir
+        "/api/analytics/evil/2026-11-18",                       # symlinked instance dir outside the reports dir
+        "/api/analytics/ax5m%5C..%5C/2026-11-18", "/api/analytics/ax5m/%E2%80%A6",
+    ]
+    with mock.patch.object(app_module, "cfg", _with_reports(app_module.cfg, base)):
+        client = app_module.app.test_client()
+        for url in urls:
+            r = client.get(url, follow_redirects=True)      # werkzeug may merge "//" first: the target must still fail
+            assert r.status_code in (400, 404), (url, r.status_code)
+            assert b"OUTSIDE-THE-REPORTS-DIR" not in r.data, url
+        # an absolute path as the date or instance is rejected before any path is built
+        assert client.get("/api/analytics//etc/passwd", follow_redirects=True).status_code in (400, 404)
+    import trade_reports as tr
+    for bad in ("../x", "/etc", "a/b", "", "A", "x" * 33, "a.b", None):
+        try:
+            tr.instance_index(str(base), bad)
+        except tr.NotFound:
+            pass
+        else:
+            raise AssertionError(bad)
+    for bad in ("2026-02-30", "2026-11-18/../x", "x", "", None, "2026-11-18\n"):
+        assert not tr.valid_day(bad), bad
+    assert tr.valid_day("2026-11-18")
+
+
+def test_analytics_empty_or_missing_reports_dir():
+    empty = pathlib.Path(tempfile.mkdtemp(prefix="axioma-empty-reports-"))
+    for base in (empty, empty / "does-not-exist"):
+        with mock.patch.object(app_module, "cfg", _with_reports(app_module.cfg, base)):
+            client = app_module.app.test_client()
+            r = client.get("/api/analytics")
+            assert r.status_code == 200 and r.json == {"instances": []}
+            assert client.get("/api/analytics/ax5m/2026-11-18").status_code == 404
+            page = client.get("/analytics/")
+            assert page.status_code == 200 and b"No trade reports yet" in page.data
+
+
+def test_analytics_dir_config_default_and_override():
+    import config as config_module
+    assert config_module.DEFAULT_ANALYTICS_DIR.endswith(os.path.join("ctrader_autotrade", "reports"))
+    assert app_module.cfg.analytics_dir == (os.environ.get("ANALYTICS_DIR", "").strip()
+                                            or config_module.DEFAULT_ANALYTICS_DIR)
+
+
+def _trades_cron():
+    path = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "axioma-trades-report.cron"
+    return path.read_text()
+
+
+class _StReportsWorld(_StWorld):
+    """The healthy world plus the trades-report cron file and a reports dir {instance: [file names]}."""
+
+    def __init__(self, reports=None, installed=True):
+        super().__init__()
+        self.reports = {"ax5m": ["2026-11-18.json", "index.json"], "ax1m": ["2026-11-17.json", "index.json"]} \
+            if reports is None else reports
+        if installed:
+            self.files["/etc/cron.d/axioma-trades-report"] = _trades_cron()
+        for inst in ("ax5m", "ax1m"):
+            self.files[f"/var/log/axioma/trades-report-{inst}.log"] = "trades-report: wrote 1 day(s)\n"
+            self.mtimes[f"/var/log/axioma/trades-report-{inst}.log"] = ST_NOW - 43000
+
+    def listdir(self, path):
+        if path == "/etc/cron.d":
+            return ["axioma-flat", "axioma-trades-report", ".placeholder"]
+        if path == "/reports" or path.startswith("/reports/"):
+            if self.reports is None:
+                raise FileNotFoundError(path)
+            return list(self.reports) if path == "/reports" else list(self.reports[path.split("/")[2]])
+        return super().listdir(path)
+
+    def sources(self):
+        src = super().sources()
+        src.listdir = self.listdir
+        src.paths.reports_dir = "/reports"
+        return src
+
+
+def _st_report_jobs(world):
+    payload = status_mod.collect(world.sources())
+    jobs = {j["name"]: j for j in payload["sections"]["cron"]["jobs"] if j["name"].startswith("trades-report")}
+    return payload, jobs
+
+
+def test_status_cron_lists_the_trades_report_jobs():
+    payload, jobs = _st_report_jobs(_StReportsWorld())
+    assert set(jobs) == {"trades-report ax5m", "trades-report ax1m"}
+    five, one = jobs["trades-report ax5m"], jobs["trades-report ax1m"]
+    assert five["status"] == "ok" and five["latest_report"] == "2026-11-18" and five["report_age_days"] == 0
+    assert one["status"] == "ok" and one["latest_report"] == "2026-11-17" and one["report_age_days"] == 1
+    assert "yesterday" in one["detail"] and five["schedule"] == "20 0 * * *" and five["user"] == "root"
+    assert five["command"] == "autotrade --config config.toml trades-report --last-day"
+    assert one["command"] == "autotrade --config config.1m.toml trades-report --last-day"
+    assert five["log"] == "trades-report-ax5m.log" and one["log"] == "trades-report-ax1m.log"
+    assert payload["overall"] == "ok"
+    text = _json.dumps(payload)
+    assert ".venv" not in text and "/var/log" not in text
+    # the existing export jobs are untouched
+    cron_jobs = _st_by_name(payload["sections"]["cron"]["jobs"])
+    assert cron_jobs["metrics_5m"]["status"] == "ok" and cron_jobs["metrics_1m"]["status"] == "ok"
+
+
+def test_status_trades_report_freshness_boundaries():
+    c = status_mod.classify_report_age
+    assert [c(a)[0] for a in (-1, 0, 1, 2, 3, 9)] == ["ok", "ok", "ok", "warn", "down", "down"]
+    assert c(None)[0] == "warn"
+    for newest, want in (("2026-11-18", "ok"), ("2026-11-17", "ok"), ("2026-11-16", "warn"), ("2026-11-15", "down")):
+        world = _StReportsWorld({"ax5m": [f"{newest}.json", "2020-01-01.json", "index.json", "latest.json"],
+                                 "ax1m": ["2026-11-18.json"]})
+        payload, jobs = _st_report_jobs(world)
+        assert jobs["trades-report ax5m"]["status"] == want, (newest, jobs["trades-report ax5m"])
+        assert jobs["trades-report ax1m"]["status"] == "ok"
+        assert payload["overall"] == {"ok": "ok", "warn": "warn", "down": "down"}[want]
+    # no daily file yet (just installed): warn, not down
+    payload, jobs = _st_report_jobs(_StReportsWorld({"ax5m": ["index.json"], "ax1m": []}))
+    assert jobs["trades-report ax5m"]["status"] == "warn" and "no daily report" in jobs["trades-report ax1m"]["detail"]
+
+
+def test_status_trades_report_not_installed_is_na_and_missing_dir_is_quiet():
+    # reports exist but the cron file is not installed: n/a (does not count against overall)
+    payload, jobs = _st_report_jobs(_StReportsWorld(installed=False))
+    assert {j["status"] for j in jobs.values()} == {"n/a"} and len(jobs) == 2
+    assert "not scheduled" in jobs["trades-report ax5m"]["detail"] and payload["overall"] == "ok"
+    # no reports dir and no cron file: nothing to report on
+    world = _StReportsWorld(installed=False)
+    world.reports = None
+    payload, jobs = _st_report_jobs(world)
+    assert jobs == {} and payload["overall"] == "ok"
+    world = _StReportsWorld()
+    world.reports = None
+    _, jobs = _st_report_jobs(world)                        # installed but the dir is not there yet: warn
+    assert [j["status"] for j in jobs.values()] == ["warn", "warn"]
+    # cron.service not running -> the jobs are down like the export jobs
+    world = _StReportsWorld()
+    world.units["cron.service"] = _st_block("cron.service", active="inactive", sub="dead", since=None)
+    _, jobs = _st_report_jobs(world)
+    assert {j["status"] for j in jobs.values()} == {"down"}
+    assert status_mod.trades_report_instance("x >> /var/log/axioma/trades-report-ax1m.log") == "ax1m"
+    assert status_mod.trades_report_instance("flock /run/lock/axioma-trades-ax5m.lock x") == "ax5m"
+    assert status_mod.trades_report_instance("trades-report-../../x.log") is None
+
+
 def test_sql_mirror_login_failure_names_the_grant():
     """An unprovisioned identity must produce the fix, not a raw ODBC error."""
     cfg = _sql_cfg()

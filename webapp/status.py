@@ -78,6 +78,14 @@ CRON_JOBS = (
     CronJob("metrics_1m", "1m", 60, 180, 600),
 )
 CRON_SCRIPT = "export_flat.py"
+# The daily executed-trades report of an autotrader instance (`autotrade trades-report --last-day`, cron
+# file /etc/cron.d/axioma-trades-report): healthy while the newest <reports>/<instance>/YYYY-MM-DD.json is
+# yesterday's or today's (UTC); one day older -> warn; two or more -> down.
+TRADES_REPORT_COMMAND = "trades-report"
+TRADES_REPORT_WARN_DAYS = 2     # newest report this many days old -> warn
+TRADES_REPORT_DOWN_DAYS = 3     # ... this many or more -> down
+INSTANCE_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+REPORT_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.json$")
 CRON_RELEVANT = re.compile(r"axioma|ctrader|export_flat", re.I)
 
 # Instruments with a session: depth goes quiet at the daily break and at the
@@ -107,6 +115,9 @@ class Paths:
     cron_spool: str = "/var/spool/cron/crontabs"
     wants_dirs: tuple = ("/etc/systemd/system/multi-user.target.wants",)
     collector_env_dir: str = "/etc/ctrader-collector"
+    # daily trade reports (ANALYTICS_DIR); the repo default when the caller passes none
+    reports_dir: str = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                    "ctrader_autotrade", "reports")
 
 
 @dataclass
@@ -194,11 +205,12 @@ def call_with_timeout(fn, timeout, *args):
     return box["value"]
 
 
-def default_sources(kusto, kql_table, kql_database, app_db, symbol_names, broker=lambda n: n):
+def default_sources(kusto, kql_table, kql_database, app_db, symbol_names, broker=lambda n: n, reports_dir=None):
     return Sources(run=run_command, read_text=read_text, listdir=os.listdir,
                    mtime=os.path.getmtime, exists=os.path.exists, now=time.time,
                    kusto=kusto, sqlite=sqlite_query, symbol_names=symbol_names,
-                   kql_table=kql_table, kql_database=kql_database, app_db=app_db, broker=broker)
+                   kql_table=kql_table, kql_database=kql_database, app_db=app_db, broker=broker,
+                   paths=Paths(reports_dir=reports_dir) if reports_dir else Paths())
 
 
 # --- Small helpers ----------------------------------------------------------------
@@ -836,6 +848,8 @@ def _short_word(word, previous):
         return "<redacted>"
     if _SECRETISH.search(word) and ("=" in word or not word.startswith("-")):
         return "<redacted>"
+    if word.startswith((".venv/", "venv/")):
+        return os.path.basename(word)
     if word.startswith(("/", "~", "$")) or "/root" in word or "/home/" in word:
         return os.path.basename(word.rstrip("/")) or "<path>"
     if len(word) >= 24 and re.fullmatch(r"[A-Za-z0-9+/=_-]+", word) and re.search(r"\d", word) \
@@ -928,6 +942,70 @@ def _log_info(sources, path, now):
     return info
 
 
+def trades_report_instance(command, env=None):
+    """The instance a `trades-report` cron line is for, from its log (trades-report-<instance>.log) or lock
+    (axioma-trades-<instance>.lock) name; None when neither names one or the name is not a plain identifier."""
+    text = _expand(command or "", env or {})
+    match = re.search(r"trades-report-([a-z0-9_-]+)\.log\b", text) or re.search(r"axioma-trades-([a-z0-9_-]+)\.lock\b", text)
+    return match.group(1) if match and INSTANCE_NAME_RE.fullmatch(match.group(1)) else None
+
+
+def report_instances(sources):
+    """Instance directories present under the reports dir (none when it is missing or unreadable)."""
+    try:
+        names = sources.listdir(sources.paths.reports_dir)
+    except Exception:  # noqa: BLE001
+        return []
+    return sorted(n for n in names if INSTANCE_NAME_RE.fullmatch(n))
+
+
+def newest_report(sources, instance):
+    """The newest YYYY-MM-DD.json date (a datetime.date) of an instance, or None."""
+    names = sources.listdir(os.path.join(sources.paths.reports_dir, instance))
+    days = []
+    for n in names:
+        m = REPORT_FILE_RE.match(n)
+        if m:
+            try:
+                days.append(datetime.strptime(m.group(1), "%Y-%m-%d").date())
+            except ValueError:
+                pass
+    return max(days) if days else None
+
+
+def classify_report_age(age_days):
+    """age_days = today (UTC) minus the newest report's date; None = no report yet."""
+    if age_days is None:
+        return WARN, "no daily report written yet"
+    if age_days >= TRADES_REPORT_DOWN_DAYS:
+        return DOWN, f"newest daily report is {age_days} days old (stale)"
+    if age_days >= TRADES_REPORT_WARN_DAYS:
+        return WARN, f"newest daily report is {age_days} days old (late)"
+    return OK, "newest daily report is " + ("today's" if age_days <= 0 else "yesterday's")
+
+
+def trades_report_item(sources, entry, instance, command, runs_as, cron_active, now):
+    base = dict(schedule=entry["schedule"], user=entry["user"], runs_as=runs_as, command=command,
+                source=entry["source"], instance=instance)
+    base.update(_log_info(sources, _log_path(entry["command"], entry["env"]), now))
+    name = f"trades-report {instance}" if instance else "trades-report"
+    if instance is None:
+        return item(name, NA, "cannot tell which instance this job reports", **base)
+    try:
+        newest = newest_report(sources, instance)
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        age = None if newest is None else (today - newest).days
+        status, detail = classify_report_age(age)
+        base.update(latest_report=None if newest is None else newest.isoformat(), report_age_days=age)
+    except Exception as exc:  # noqa: BLE001
+        status, detail = (WARN, "no daily report written yet") if isinstance(exc, FileNotFoundError) \
+            else (UNKNOWN, f"{instance}: {type(exc).__name__}")
+        base.update(latest_report=None, report_age_days=None)
+    if not cron_active:
+        status, detail = DOWN, "cron.service not active; " + detail
+    return item(name, status, detail, **base)
+
+
 def table_age(sources, table, now):
     rows = sources.sqlite(sources.app_db, f"SELECT max(computed_at) FROM {table}")
     stamp = parse_time(rows[0][0]) if rows else None
@@ -960,10 +1038,19 @@ def cron_section(sources, units, now):
         sources_read.append({"path": path, "readable": True, "relevant_lines": len(found)})
         entries.extend(found)
 
-    jobs, matched = [], set()
+    jobs, matched, matched_reports = [], set(), set()
     for entry in entries:
         job = job_for(entry["command"])
         command, runs_as = sanitize_command(entry["command"], entry["env"])
+        if job is None and re.search(rf"\b{TRADES_REPORT_COMMAND}\b", entry["command"]):
+            instance = trades_report_instance(entry["command"], entry["env"])
+            if instance in matched_reports:
+                jobs.append(item(command or "cron job", NA, "no freshness check for this job", schedule=entry["schedule"],
+                                 user=entry["user"], runs_as=runs_as, command=command, source=entry["source"]))
+                continue
+            matched_reports.add(instance)
+            jobs.append(trades_report_item(sources, entry, instance, command, runs_as, cron_active, now))
+            continue
         base = dict(schedule=entry["schedule"], user=entry["user"], runs_as=runs_as,
                     command=command, source=entry["source"])
         if job is None or job.table in matched:
@@ -987,6 +1074,9 @@ def cron_section(sources, units, now):
         if job.table not in matched:
             jobs.append(item(job.table, NA, "not scheduled in cron", table=job.table,
                              expected_interval_s=job.interval_s))
+    for instance in report_instances(sources):      # reports exist but no cron job writes the next one
+        if instance not in matched_reports:
+            jobs.append(item(f"trades-report {instance}", NA, "not scheduled in cron", instance=instance))
     status = worst([service["status"]] + [j["status"] for j in jobs])
     detail = f"cron.service {service['detail']}; {sum(1 for j in jobs if j.get('schedule'))} relevant job(s)"
     return {"name": "cron", "status": status, "detail": detail, "service": service,

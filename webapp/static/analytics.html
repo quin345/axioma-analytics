@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Trade analytics &middot; AXIOMA</title>
+<link rel="icon" href="/favicon.png" />
+<meta name="theme-color" content="#0b0e12" />
+<!--
+  Self-contained like status.html: inline CSS/JS, no bundle, no external libraries. Behind the login wall.
+  Reads /api/analytics (instances + index) and /api/analytics/<instance>/<YYYY-MM-DD> (one day), both
+  read-only. Linkable: #i=<instance>&d=<YYYY-MM-DD> (or the same as a query string). Numbers carry an explicit
+  sign and text labels, colour only reinforces them. All text is inserted with textContent.
+-->
+<style>
+:root{
+  --bg:#0b0e12; --panel:#11161d; --card:#151b24; --line:#29323d;
+  --fg:#e7edf3; --muted:#94a3b3; --dim:#647587; --accent:#79d9ee; --err:#f0716a;
+  --pos:#22d3a7; --neg:#f0716a; --warn:#f2c14e;
+}
+*{box-sizing:border-box}
+html,body{min-height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.5 "Inter",-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:12px 18px;padding:14px 18px;
+  border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0;letter-spacing:.12em}
+header .meta{color:var(--muted);font-size:12.5px;flex:1;min-width:200px}
+header nav a{color:var(--accent);font-size:12.5px;text-decoration:none;margin-right:12px}
+a{color:var(--accent)}
+a:focus-visible,button:focus-visible,tr[tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main{max-width:1100px;margin:0 auto;padding:18px 14px 40px}
+h2{font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:22px 0 8px}
+h3{font-size:12px;color:var(--muted);margin:14px 0 6px;font-weight:600}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.card{display:block;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  color:inherit;text-decoration:none}
+.card.sel{border-color:var(--accent)}
+.card .t{display:flex;justify-content:space-between;gap:8px;font-weight:700}
+.card .sub{color:var(--muted);font-size:12px;margin-bottom:8px}
+dl{display:grid;grid-template-columns:minmax(130px,max-content) 1fr;gap:2px 14px;margin:0;font-size:13px}
+dt{color:var(--dim)} dd{margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-word}
+.pos{color:var(--pos)} .neg{color:var(--neg)}
+.note{color:var(--dim);font-size:12px}
+.empty{padding:16px;border:1px dashed var(--line);border-radius:10px;color:var(--muted)}
+.banner{display:none;margin:0 0 14px;padding:10px 14px;border:1px solid var(--err);border-radius:8px;
+  color:var(--err);background:rgba(240,113,106,.08)}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:8px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:5px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--muted);font-weight:600;background:var(--panel);position:sticky;top:0}
+tr:last-child td{border-bottom:0}
+tr.day{cursor:pointer} tr.day:hover td,tr.day.sel td{background:rgba(121,217,238,.08)}
+td.txt{text-align:left}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:12px}
+.chart{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px}
+svg{display:block;width:100%;height:auto}
+svg text{fill:var(--muted);font:10px ui-monospace,Menlo,monospace}
+.pill{display:inline-block;border:1px solid currentColor;border-radius:6px;padding:0 6px;font-size:11px;
+  font-weight:700;letter-spacing:.05em}
+footer{padding:16px;border-top:1px solid var(--line);background:var(--panel);color:var(--dim);
+  font-size:12px;text-align:center}
+@media (max-width:560px){dl{grid-template-columns:1fr}dt{margin-top:4px}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header>
+  <h1>AXIOMA &middot; TRADE ANALYTICS</h1>
+  <div class="meta" aria-live="polite"><span id="checked">Loading&hellip;</span></div>
+  <nav><a href="/terminal/">Terminal</a><a href="/research/">Research</a><a href="/status">Status</a></nav>
+</header>
+<main>
+  <div class="banner" id="banner" role="alert"></div>
+  <div id="empty" class="empty" hidden>No trade reports yet. They are written once a day (00:20 UTC) by
+    <code>autotrade trades-report</code> into the reports directory; see README, &ldquo;Daily trades report&rdquo;.</div>
+  <section id="cards-sec" hidden>
+    <h2>Instances</h2>
+    <div class="cards" id="cards"></div>
+    <p class="note">DEMO-run trades only, grouped by the UTC day of their exit. Research expectation = taker net
+      bp per trade of the signal's holdout (negative: the bots test the signal, they are not expected to make money).</p>
+  </section>
+  <section id="hist-sec" hidden>
+    <h2 id="hist-h">History</h2>
+    <div class="chart"><div id="chart"></div></div>
+    <h3>Days (click a row)</h3>
+    <div class="scroll"><table id="days"><thead><tr>
+      <th>Date (UTC)</th><th>Trades</th><th>Win rate</th><th>Net P&amp;L</th><th>bp / trade</th><th>Cumulative</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+  <section id="day-sec" hidden>
+    <h2 id="day-h">Day</h2>
+    <div id="day"></div>
+  </section>
+</main>
+<footer>Read-only. Reports are generated daily from the autotraders' journals; nothing on this page can trade.</footer>
+<script>
+"use strict";
+var ST = {data: null, inst: null, day: null};
+var $ = function (id) { return document.getElementById(id); };
+
+function el(tag, text, cls) {
+  var e = document.createElement(tag);
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  if (cls) e.className = cls;
+  return e;
+}
+function num(x, nd, signed) {
+  if (x === null || x === undefined || typeof x !== "number" || !isFinite(x)) return "n/a";
+  var s = x.toFixed(nd === undefined ? 2 : nd);
+  return signed === false ? s : (x > 0 ? "+" + s : s);
+}
+function pct(x) { return x === null || x === undefined ? "n/a" : (x * 100).toFixed(0) + "%"; }
+function sgn(e, x) { if (typeof x === "number") e.classList.add(x > 0 ? "pos" : x < 0 ? "neg" : "z"); return e; }
+function numEl(x, nd) { return sgn(el("span", num(x, nd)), x); }
+function secs(s) {
+  if (s === null || s === undefined) return "n/a";
+  return s >= 3600 ? (s / 3600).toFixed(1) + " h" : s >= 120 ? (s / 60).toFixed(1) + " min" : s.toFixed(0) + " s";
+}
+function kv(rows) {
+  var dl = el("dl");
+  rows.forEach(function (r) {
+    dl.appendChild(el("dt", r[0]));
+    var dd = el("dd");
+    dd.appendChild(r[1] instanceof Node ? r[1] : document.createTextNode(String(r[1])));
+    dl.appendChild(dd);
+  });
+  return dl;
+}
+function table(headers, rows) {
+  var wrap = el("div", null, "scroll"), t = el("table"), h = el("tr");
+  headers.forEach(function (x) { h.appendChild(el("th", x)); });
+  t.appendChild(el("thead")).appendChild(h);
+  var tb = el("tbody");
+  rows.forEach(function (r) {
+    var tr = el("tr");
+    r.forEach(function (c) {
+      var td = el("td");
+      td.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+  t.appendChild(tb);
+  wrap.appendChild(t);
+  return wrap;
+}
+function showError(msg) { var b = $("banner"); b.textContent = msg; b.style.display = msg ? "block" : "none"; }
+
+// ---- location: #i=ax5m&d=2026-11-19 or ?i=..&d=.. ----
+function parseLoc() {
+  var p = {};
+  [location.search.replace(/^\?/, ""), location.hash.replace(/^#/, "")].forEach(function (part) {
+    part.split("&").forEach(function (kvp) {
+      var a = kvp.split("="), k = a[0], v = decodeURIComponent(a.slice(1).join("=") || "");
+      if ((k === "i" || k === "d") && v) p[k] = v;
+    });
+  });
+  return p;
+}
+function setLoc(inst, day) {
+  var h = "#i=" + encodeURIComponent(inst) + (day ? "&d=" + encodeURIComponent(day) : "");
+  if (location.hash !== h) history.pushState(null, "", location.pathname + h);
+}
+
+// ---- cards ----
+function instNames() { return (ST.data.instances || []).map(function (x) { return x.name; }); }
+function instByName(n) { return (ST.data.instances || []).filter(function (x) { return x.name === n; })[0]; }
+function lastDay(idx) {
+  var done = (idx.days || []).filter(function (d) { return !d.partial; });
+  return done.length ? done[done.length - 1] : null;
+}
+function renderCards() {
+  var box = $("cards");
+  box.textContent = "";
+  (ST.data.instances || []).forEach(function (it) {
+    var a = el("a", null, "card" + (it.name === ST.inst ? " sel" : ""));
+    a.href = "#i=" + encodeURIComponent(it.name);
+    a.addEventListener("click", function (ev) { ev.preventDefault(); select(it.name, null); });
+    var idx = it.index;
+    var t = el("div", null, "t");
+    t.appendChild(el("span", it.name));
+    t.appendChild(el("span", idx ? idx.timeframe : "n/a", "pill"));
+    a.appendChild(t);
+    if (!idx) { a.appendChild(el("div", it.error || "no index", "sub")); box.appendChild(a); return; }
+    a.appendChild(el("div", idx.strategy + " · labels " + (idx.labels || []).join(", "), "sub"));
+    var ld = lastDay(idx), rows = [];
+    if (ld) {
+      rows.push(["Latest day", ld.date + " (" + ld.trades + " trades)"]);
+      rows.push(["Win rate", pct(ld.win_rate)]);
+      rows.push(["Net P&L", numEl(ld.net)]);
+      var bp = el("span");
+      bp.appendChild(numEl(ld.avg_bp));
+      bp.appendChild(document.createTextNode(" vs research " + num(idx.research_taker_net_bp)));
+      rows.push(["bp / trade", bp]);
+    } else {
+      rows.push(["Latest day", "no completed day yet"]);
+    }
+    var cum = idx.days && idx.days.length ? idx.days[idx.days.length - 1] : null;
+    rows.push(["Cumulative net", cum ? numEl(cum.cum_net) : "n/a"]);
+    rows.push(["Cumulative trades", cum ? String(cum.cum_trades) : "n/a"]);
+    var k = idx.kill_switch;
+    if (k && k.available) {
+      rows.push(["Kill: cumulative", num(k.cumulative) + " (limit -" + k.max_loss + ", " + num(k.distance_to_max_loss) + " away)"]);
+      rows.push(["Kill: today", num(k.today) + " (limit -" + k.daily_max_loss + ", " + num(k.distance_to_daily_limit) + " away)"]);
+    } else {
+      rows.push(["Kill switch", "n/a"]);
+    }
+    a.appendChild(kv(rows));
+    box.appendChild(a);
+  });
+}
+
+// ---- history: chart + table ----
+function renderChart(days) {
+  var box = $("chart");
+  box.textContent = "";
+  var NS = "http://www.w3.org/2000/svg", W = 760, H = 220, L = 52, R = 12, T = 14, B = 26;
+  var pts = days.map(function (d, i) { return {i: i, v: d.cum_net === null ? 0 : d.cum_net, d: d}; });
+  if (!pts.length) { box.appendChild(el("div", "No days yet.", "note")); return; }
+  var lo = Math.min.apply(null, pts.map(function (p) { return p.v; }).concat([0]));
+  var hi = Math.max.apply(null, pts.map(function (p) { return p.v; }).concat([0]));
+  if (hi === lo) { hi += 1; lo -= 1; }
+  var pad = (hi - lo) * 0.08; hi += pad; lo -= pad;
+  var X = function (i) { return L + (pts.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (pts.length - 1)); };
+  var Y = function (v) { return T + (hi - v) * (H - T - B) / (hi - lo); };
+  var svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Cumulative net P&L by day: " + pts.map(function (p) { return p.d.date + " " + num(p.v); }).join(", "));
+  function add(tag, attrs, text) {
+    var e = document.createElementNS(NS, tag);
+    Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e);
+    return e;
+  }
+  [lo + pad, 0, hi - pad].forEach(function (v) {
+    add("line", {x1: L, x2: W - R, y1: Y(v), y2: Y(v), stroke: v === 0 ? "#647587" : "#29323d", "stroke-dasharray": v === 0 ? "4 3" : "0"});
+    add("text", {x: L - 6, y: Y(v) + 3, "text-anchor": "end"}, num(v, 1, true));
+  });
+  add("text", {x: L, y: H - 8}, pts[0].d.date);
+  add("text", {x: W - R, y: H - 8, "text-anchor": "end"}, pts[pts.length - 1].d.date);
+  if (pts.length > 1) add("polyline", {points: pts.map(function (p) { return X(p.i) + "," + Y(p.v); }).join(" "), fill: "none", stroke: "#79d9ee", "stroke-width": 2});
+  pts.forEach(function (p) {
+    var c = add("circle", {cx: X(p.i), cy: Y(p.v), r: 3.5, fill: p.d.partial ? "#0b0e12" : "#79d9ee", stroke: "#79d9ee", "stroke-width": 1.5});
+    var t = document.createElementNS(NS, "title");
+    t.textContent = p.d.date + (p.d.partial ? " (partial)" : "") + ": cumulative " + num(p.v) + ", day " + num(p.d.net) + ", " + p.d.trades + " trades";
+    c.appendChild(t);
+  });
+  box.appendChild(svg);
+  box.appendChild(el("div", "Cumulative net P&L (account currency) at the end of each UTC day; hollow point = partial day.", "note"));
+}
+function renderHistory() {
+  var it = instByName(ST.inst);
+  var idx = it && it.index;
+  $("hist-sec").hidden = !it;
+  if (!it) return;
+  $("hist-h").textContent = "History · " + it.name + (idx ? " (" + idx.timeframe + ", " + idx.strategy + ")" : "");
+  var days = idx ? idx.days || [] : [];
+  renderChart(days);
+  var tb = $("days").tBodies[0];
+  tb.textContent = "";
+  days.slice().reverse().forEach(function (d) {
+    var tr = el("tr", null, "day" + (d.date === ST.day ? " sel" : ""));
+    tr.tabIndex = 0;
+    var go = function () { select(ST.inst, d.date); };
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(); } });
+    var c0 = el("td", d.date + (d.partial ? " (partial)" : ""));
+    var cells = [c0, el("td", d.trades), el("td", pct(d.win_rate)), el("td"), el("td"), el("td")];
+    cells[3].appendChild(numEl(d.net)); cells[4].appendChild(numEl(d.avg_bp)); cells[5].appendChild(numEl(d.cum_net));
+    cells.forEach(function (c) { tr.appendChild(c); });
+    tb.appendChild(tr);
+  });
+  if (!days.length) { var r = el("tr"), c = el("td", "no days yet"); c.colSpan = 6; r.appendChild(c); tb.appendChild(r); }
+}
+
+// ---- one day ----
+function breakdown(title, obj) {
+  var keys = Object.keys(obj || {});
+  if (!keys.length) return null;
+  var box = el("div");
+  box.appendChild(el("h3", title));
+  box.appendChild(table(["", "Trades", "Win rate", "Net", "Avg bp", "Volume"], keys.map(function (k) {
+    var v = obj[k];
+    return [k, v.trades, pct(v.win_rate), numEl(v.net), numEl(v.avg_bp), v.volume];
+  })));
+  return box;
+}
+function renderDay(r) {
+  var box = $("day"), m = r.meta, s = r.summary;
+  box.textContent = "";
+  $("day-h").textContent = "Day · " + m.instance + " · " + m.date + " UTC" + (m.partial ? " (PARTIAL: until " + m.as_of + ")" : "");
+  var runs = m.runs;
+  box.appendChild(el("p", "Runs: " + runs.count + " (" + (runs.modes || []).join("/") + "), restarts " + runs.restarts +
+    ". Excluded dry_run trades: " + s.excluded_dry_run_trades + ". Generated " + m.generated_at + ".", "note"));
+  var g = el("div", null, "grid2");
+  var best = s.best_trade, worst = s.worst_trade;
+  g.appendChild(kv([
+    ["Trades", s.trades + " (" + s.wins + " wins / " + s.losses + " losses / " + s.flat + " flat)"],
+    ["Win rate", pct(s.win_rate)],
+    ["Net P&L", numEl(s.net)],
+    ["Gross / commission / swap", num(s.gross) + " / " + num(s.commission) + " / " + num(s.swap)],
+    ["bp / trade (price)", num(s.avg_bp_price) + " (median " + num(s.median_bp_price) + ")"],
+    ["bp / trade (mid)", num(s.avg_bp_mid) + " (median " + num(s.median_bp_mid) + ")"],
+    ["t-stat of mean bp", s.t_stat_bp === null ? "n/a (fewer than 3 trades)" : num(s.t_stat_bp)]
+  ]));
+  g.appendChild(kv([
+    ["Avg win / avg loss", num(s.avg_win) + " / " + num(s.avg_loss)],
+    ["Profit factor", num(s.profit_factor, 2, false)],
+    ["Max intraday drawdown", num(s.max_drawdown, 2, false)],
+    ["Hold avg / max", secs(s.avg_hold_s) + " / " + secs(s.max_hold_s)],
+    ["Volume traded", s.volume + " (broker units)"],
+    ["Stop share", pct(s.stop_share)],
+    ["Best / worst trade", (best ? best.symbol + " " + num(best.net) : "n/a") + " / " + (worst ? worst.symbol + " " + num(worst.net) : "n/a")]
+  ]));
+  box.appendChild(g);
+  var b = r.breakdown || {}, g2 = el("div", null, "grid2");
+  [["By symbol", b.by_symbol], ["By side", b.by_side], ["By exit reason", b.by_exit_reason], ["By exit hour (UTC)", b.by_hour_utc],
+   ["By entry |z_poc|", b.by_abs_z], ["By size (full / half)", b.by_size]].forEach(function (x) {
+    var e = breakdown(x[0], x[1]); if (e) g2.appendChild(e);
+  });
+  box.appendChild(g2);
+  var q = r.execution_quality, f = r.funnel, c = r.cumulative, k = r.kill_switch;
+  box.appendChild(el("h3", "Execution quality"));
+  box.appendChild(kv([
+    ["Slippage vs simulated taker", "mean " + num(q.slippage_bp.mean) + " bp, median " + num(q.slippage_bp.median) + " bp (n " + q.slippage_bp.n + ")"],
+    ["Adverse / markout", num(q.avg_adverse_bp) + " bp / " + num(q.avg_markout_bp) + " bp"],
+    ["Entry spread", num(q.avg_spread_entry_bp, 2, false) + " bp"],
+    ["Orders / rejects+errors", q.orders + " / " + q.rejects_or_errors + (Object.keys(q.error_codes || {}).length ? " " + JSON.stringify(q.error_codes) : "")]
+  ]));
+  box.appendChild(el("h3", "Signal funnel"));
+  box.appendChild(kv([
+    ["Signal rows", f.signal_rows], ["|z| > " + f.entry_z, f.above_entry_z], ["Entered", f.entered], ["Rollover", f.rollover],
+    ["Gated", f.gated + (Object.keys(f.gated_reasons || {}).length ? " " + JSON.stringify(f.gated_reasons) : "")], ["None", f.none]
+  ]));
+  box.appendChild(el("h3", "Cumulative since the first demo trade"));
+  var cb = el("span");
+  cb.appendChild(numEl(c.avg_bp));
+  cb.appendChild(document.createTextNode(" bp / trade vs research " + num(c.research_taker_net_bp) + " (taker net)"));
+  box.appendChild(kv([["Since", c.since || "n/a"], ["Trades / win rate", c.trades + " / " + pct(c.win_rate)], ["Net P&L", numEl(c.net)], ["bp / trade", cb]]));
+  box.appendChild(el("h3", "Kill switch"));
+  if (k && k.available) {
+    box.appendChild(kv([
+      ["As of", k.as_of], ["Cumulative", num(k.cumulative) + " (limit -" + k.max_loss + ", " + num(k.distance_to_max_loss) + " away)"],
+      ["Realised / unrealised", num(k.realised) + " / " + num(k.unrealised) + (k.unrealised_note ? " (" + k.unrealised_note + ")" : "")],
+      ["Today", num(k.today) + " (limit -" + k.daily_max_loss + ", " + num(k.distance_to_daily_limit) + " away)"],
+      ["KILL / PAUSE files", (k.kill_file ? "present" : "absent") + " / " + (k.pause_file ? "present" : "absent")]
+    ]));
+  } else {
+    box.appendChild(el("p", "n/a" + (k && k.reason ? " (" + k.reason + ")" : ""), "note"));
+  }
+  var ev = Object.keys(r.risk_events || {});
+  if (ev.length) {
+    box.appendChild(el("h3", "Risk events"));
+    box.appendChild(table(["Kind", "Count", "Last details"], ev.map(function (kind) {
+      var e = r.risk_events[kind];
+      var td = el("span", e.last.map(function (x) { return x.ts.slice(11, 19) + " " + x.detail; }).join(" | "));
+      return [kind, e.count, td];
+    })));
+  }
+  box.appendChild(el("h3", "Trades (" + r.trades.length + " of " + r.trades_total + (r.trades_truncated ? ", truncated at 500" : "") + ")"));
+  box.appendChild(table(["Exit (UTC)", "Entry (UTC)", "Symbol", "Side", "Volume", "Entry px", "Exit px", "Reason", "bp", "Net", "|z|", "Hold", "Size"],
+    r.trades.map(function (t) {
+      return [t.exit, t.entry, t.symbol, t.side, t.volume, t.entry_price, t.exit_price, t.reason, numEl(t.bp), numEl(t.net),
+              num(t.z_poc, 2, false), secs(t.hold_s), t.size];
+    })));
+}
+
+// ---- data flow ----
+function fetchJson(url) {
+  return fetch(url, {credentials: "same-origin", cache: "no-store", headers: {Accept: "application/json"}}).then(function (r) {
+    if (r.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname + location.hash); throw new Error("login required"); }
+    if (!r.ok) throw new Error(url.split("/").slice(-2).join("/") + ": HTTP " + r.status);
+    return r.json();
+  });
+}
+function select(inst, day) {
+  ST.inst = inst; ST.day = day;
+  setLoc(inst, day);
+  renderCards(); renderHistory();
+  $("day-sec").hidden = !day;
+  if (!day) { return; }
+  var want = inst + "/" + day;
+  $("day").textContent = "Loading…";
+  fetchJson("/api/analytics/" + encodeURIComponent(inst) + "/" + encodeURIComponent(day)).then(function (r) {
+    if (ST.inst + "/" + ST.day !== want) return;
+    showError("");
+    renderDay(r);
+    $("day-sec").scrollIntoView({block: "start"});
+  }).catch(function (e) { $("day").textContent = ""; showError("Could not load " + want + ": " + e.message); });
+}
+function fromLocation() {
+  var p = parseLoc(), names = instNames();
+  var inst = p.i && names.indexOf(p.i) >= 0 ? p.i : names[0];
+  if (!inst) return;
+  var it = instByName(inst), days = it && it.index ? it.index.days || [] : [];
+  var day = p.d && /^\d{4}-\d{2}-\d{2}$/.test(p.d) ? p.d : null;
+  if (p.i && p.i !== inst) day = null;
+  select(inst, day);
+}
+function load() {
+  fetchJson("/api/analytics").then(function (data) {
+    ST.data = data; showError("");
+    var n = (data.instances || []).length;
+    $("empty").hidden = n > 0; $("cards-sec").hidden = n === 0;
+    $("checked").textContent = n ? "Loaded " + new Date().toISOString().slice(0, 19).replace("T", " ") + " UTC" : "Nothing to show";
+    if (n) fromLocation();
+  }).catch(function (e) { $("checked").textContent = "Failed"; showError("Could not load the reports: " + e.message); });
+}
+window.addEventListener("popstate", function () { if (ST.data) fromLocation(); });
+load();
+</script>
+</body>
+</html>

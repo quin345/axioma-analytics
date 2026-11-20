@@ -53,6 +53,9 @@ requests redirect to `/login?next=<path>`; `/api/*` answers 401.
 | `/unavailable` | Holding page preview |
 | `/status` | System status page: collectors, autotraders, KQL, cron jobs, app units (read-only, auto-refresh 15 s) |
 | `/api/status` | The status as JSON (see [System status](#system-status)) |
+| `/analytics/` | Trade analytics page: a card per autotrader instance, day history with a cumulative P&L chart, one day's full report (read-only, linkable with `#i=<instance>&d=<YYYY-MM-DD>`) |
+| `/api/analytics` | Instances found under the reports dir, each with its `index.json` (empty list when there is none) |
+| `/api/analytics/<instance>/<YYYY-MM-DD>` | One day report (JSON schema in `ctrader_autotrade/README.md`, "Daily trades report"); 400 for a malformed name or date, 404 when absent |
 | `/api/*` | JSON API used by the terminal (401 without a session) |
 | `/api/login`, `/api/logout`, `/api/session` | Sign-in endpoints (public) |
 
@@ -106,6 +109,7 @@ Rules (constants at the top of `webapp/status.py`):
 | cron job `metrics_5m` (every 5 min) | table written <= 10 min ago | 10-20 min | > 20 min, table empty/missing, or `cron.service` not active |
 | cron job `metrics_1m` (every minute) | <= 3 min | 3-10 min | > 10 min, or as above |
 | | | | job not in cron: `n/a` |
+| cron job `trades-report <instance>` (daily 00:20 UTC, `/etc/cron.d/axioma-trades-report`) | newest `reports/<instance>/YYYY-MM-DD.json` is today's or yesterday's (UTC) | 2 days old; no daily file yet | 3 or more days old, or `cron.service` not active; reports exist but the job is not in cron: `n/a` |
 | autotrader | unit ok | `PAUSE` file; no decision for 3 slots + 60 s while active; last data gate not `ok` within 2 slots | `KILL` file; unit down |
 
 Cost per collection: three `systemctl` calls (`list-units`, `list-unit-files`,
@@ -127,6 +131,7 @@ reduced to script and options, e.g. `export_flat.py --timeframe 1m --recent 5`).
 | `SECRET_KEY` | with login | Signs the session cookie; must be long, random and the same for every worker |
 | `SESSION_COOKIE_SECURE` | no | Default `1` (HTTPS-only cookie); set `0` only for plain-HTTP local testing |
 | `RESEARCH_DIST` | no | Path to the published research site (defaults to `<repo>/research/site`) |
+| `ANALYTICS_DIR` | no | Directory of the autotraders' daily trade reports, `<instance>/YYYY-MM-DD.json` (defaults to `<repo>/ctrader_autotrade/reports`; served read-only at `/analytics/`) |
 | `MAINTENANCE_MODE` | no | `1` swaps `/terminal/` for the holding page |
 | `DB_PATH`, `VAP_*`, `CACHE_REFRESH_MINUTES` | no | Record store and VAP job tuning, see `docs/volume-at-price.md` |
 | `SQL_SERVER`, `SQL_DATABASE`, `SQL_SCHEMA`, `SQL_TABLE` | no | Fabric SQL mirror |

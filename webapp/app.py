@@ -13,6 +13,7 @@ import analytics
 import db
 import queries
 import status as system_status
+import trade_reports
 from config import load_config
 from kusto_client import KustoReader
 
@@ -726,7 +727,7 @@ def _status_secrets():
 def _collect_status():
     sources = system_status.default_sources(
         kusto=reader.run, kql_table=cfg.table, kql_database=cfg.database, app_db=cfg.db_path,
-        symbol_names=_status_symbol_names, broker=canonical_broker)
+        symbol_names=_status_symbol_names, broker=canonical_broker, reports_dir=cfg.analytics_dir)
     try:
         payload = system_status.collect(sources)
     except Exception as exc:  # collect() should not raise; never 500 the status page
@@ -754,6 +755,44 @@ def status_api():
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+# --- Daily trade analytics -----------------------------------------------------
+#
+# GET /analytics/ (page), GET /api/analytics (instances + their index.json) and
+# GET /api/analytics/<instance>/<YYYY-MM-DD> (one day report): the executed-trades
+# reports `autotrade trades-report` writes under cfg.analytics_dir (ANALYTICS_DIR).
+# Behind the login wall like every other route (not in PUBLIC_PATHS). Read-only;
+# trade_reports.py validates both path parts, so no request text reaches a path
+# unchecked.
+
+def _no_store(response):
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/analytics/")
+def analytics_page():
+    """The trade analytics page (self-contained; reads /api/analytics)."""
+    return _no_store(send_from_directory(STATIC_DIR, "analytics.html"))
+
+
+@app.get("/api/analytics")
+def analytics_api():
+    """Every instance present under the reports dir with its index.json (empty list when there is none)."""
+    return _no_store(jsonify(trade_reports.overview(cfg.analytics_dir)))
+
+
+@app.get("/api/analytics/<instance>/<day>")
+def analytics_day_api(instance, day):
+    """One day report of one instance."""
+    if not trade_reports.INSTANCE_RE.fullmatch(instance) or not trade_reports.valid_day(day):
+        return _no_store(jsonify(error="bad instance or date")), 400
+    try:
+        payload = trade_reports.day_report(cfg.analytics_dir, instance, day)
+    except trade_reports.NotFound:
+        return _no_store(jsonify(error="not found")), 404
+    return _no_store(jsonify(payload))
 
 
 if __name__ == "__main__":

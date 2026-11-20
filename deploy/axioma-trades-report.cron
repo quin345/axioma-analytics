@@ -1,0 +1,15 @@
+# Daily executed-trades report, one job per autotrader instance (ctrader_autotrade, `autotrade trades-report`;
+# README "Daily trades report"). 00:20 UTC, after the 00:00 UTC daily reset and the flat exports: writes
+# yesterday's UTC day as ctrader_autotrade/reports/<instance>/YYYY-MM-DD.json plus index.json and latest.json,
+# which the web app reads at /analytics/. Reads the instance's SQLite journal read-only; the only writes are
+# the report files (world-readable, written atomically). Runs as root because the state dirs are root-owned.
+# flock -n skips a run if the previous one is still going; re-running a day rewrites it (idempotent).
+# Install (the file must be root:root, mode 644, no dot in the name):
+#   install -m 644 -o root -g root /root/axioma-analytics/deploy/axioma-trades-report.cron /etc/cron.d/axioma-trades-report
+# Logs: /var/log/axioma/trades-report-{ax5m,ax1m}.log (rotated by /etc/logrotate.d/axioma-trades-report).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+APP=/root/axioma-analytics
+
+20 0 * * * root cd $APP/ctrader_autotrade && flock -n /run/lock/axioma-trades-ax5m.lock .venv/bin/autotrade --config config.toml trades-report --last-day >> /var/log/axioma/trades-report-ax5m.log 2>&1
+20 0 * * * root cd $APP/ctrader_autotrade && flock -n /run/lock/axioma-trades-ax1m.lock .venv/bin/autotrade --config config.1m.toml trades-report --last-day >> /var/log/axioma/trades-report-ax1m.log 2>&1

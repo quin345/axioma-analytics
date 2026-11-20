@@ -1,0 +1,9 @@
+# Install: install -m 644 -o root -g root /root/axioma-analytics/deploy/axioma-trades-report.logrotate /etc/logrotate.d/axioma-trades-report
+/var/log/axioma/trades-report-*.log {
+    monthly
+    rotate 6
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
