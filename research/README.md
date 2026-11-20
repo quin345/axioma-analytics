@@ -117,8 +117,15 @@ the quote-update rate and timing. To add a hypothesis, append to `HYPOTHESES` **
 pilot login as the terminal. It's linked from the landing page header and footer and from the
 terminal's **Research** tab. Signed-out visitors get the sign-in dialog and land back on the report.
 
+The report leads with the hypothesis screen (`output/screen/`: top picks, full ranking, method, downloads
+copied to `data/screen/`). `results.json` from `run_studies.py` is optional: if it exists the older POC
+study sections follow the screen; if not, the page is the screen plus the panel guide. The build exits
+non-zero and leaves the existing site untouched if neither input exists.
+
 ```bash
+venv/bin/python research/run_screen.py
+venv/bin/python research/studies/build_report.py   # live immediately, no restart needed
+# optional, adds the older study sections and slide deck:
 venv/bin/python research/studies/run_studies.py
 venv/bin/python research/studies/build_presentation.py
-venv/bin/python research/studies/build_report.py   # live immediately, no restart needed
 ```

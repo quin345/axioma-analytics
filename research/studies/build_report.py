@@ -1,6 +1,7 @@
 """Publish the research report to research/site/, served by the webapp at /research/.
 
-    venv/bin/python research/studies/run_studies.py      # refresh results + charts
+    venv/bin/python research/run_screen.py               # hypothesis screen (leads the report)
+    venv/bin/python research/studies/run_studies.py      # optional: older study results + charts
     venv/bin/python research/studies/build_presentation.py
     venv/bin/python research/studies/build_report.py      # -> research/site/
 
@@ -19,6 +20,7 @@ from study_lib import config  # noqa: E402
 
 OUT = config.OUTPUT_DIR / "studies"
 SITE = config.RESEARCH_DIR / "site"
+SCREEN = config.OUTPUT_DIR / "screen"
 
 
 def num(v, d=1, sign=True, pct=False):
@@ -64,29 +66,67 @@ def callout(title, text):
     return f"<aside class='callout'><b>{title}</b><p>{text}</p></aside>"
 
 
-def publish(sections_html, toc, r):
-    if SITE.exists():
-        shutil.rmtree(SITE)
-    (SITE / "charts").mkdir(parents=True)
-    (SITE / "data").mkdir()
-    for png in OUT.glob("*.png"):
-        shutil.copy2(png, SITE / "charts" / png.name)
-    for f in ["results.json", *[p.name for p in OUT.glob("*_sweep_in_sample.csv")]]:
-        shutil.copy2(OUT / f, SITE / "data" / f)
-    if (OUT / "presentation.html").exists():
-        shutil.copy2(OUT / "presentation.html", SITE / "slides.html")
+def publish(sections_html, toc, r, screen=None, meta=None, out=None, site=None, screen_dir=None):
+    """Rebuild the site. r (study results) and screen (report_screen.load_screen) are each optional."""
+    out, site, screen_dir = out or OUT, site or SITE, screen_dir or SCREEN
+    if site.exists():
+        shutil.rmtree(site)
+    (site / "charts").mkdir(parents=True)
+    (site / "data").mkdir()
+    if r is not None:
+        for png in out.glob("*.png"):
+            shutil.copy2(png, site / "charts" / png.name)
+        for f in ["results.json", *[p.name for p in out.glob("*_sweep_in_sample.csv")]]:
+            shutil.copy2(out / f, site / "data" / f)
+        if (out / "presentation.html").exists():
+            shutil.copy2(out / "presentation.html", site / "slides.html")
+    if screen is not None:
+        (site / "data" / "screen").mkdir()
+        from report_screen import FILES
+        for f in FILES:
+            if (screen_dir / f).exists():
+                shutil.copy2(screen_dir / f, site / "data" / "screen" / f)
     from report_shell import CSS_PATH, page
-    shutil.copy2(CSS_PATH, SITE / "report.css")
+    shutil.copy2(CSS_PATH, site / "report.css")
     built = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    (SITE / "index.html").write_text(page(sections_html, toc, r, built), encoding="utf-8")
-    return SITE / "index.html"
+    (site / "index.html").write_text(page(sections_html, toc, r, built, meta), encoding="utf-8")
+    return site / "index.html"
+
+
+def build(out=None, site=None, screen_dir=None):
+    """Build the site from whatever inputs exist. Raises FileNotFoundError (site untouched) if none do."""
+    from report_screen import coverage_dates, load_screen, screen_sections
+    out, site, screen_dir = out or OUT, site or SITE, screen_dir or SCREEN
+    res_path = out / "results.json"
+    r = json.loads(res_path.read_text()) if res_path.exists() else None
+    screen = load_screen(screen_dir)
+    if r is None and screen is None:
+        raise FileNotFoundError(f"nothing to publish: no {res_path} and no {screen_dir / 'top_hypotheses.json'}. "
+                                "Run research/run_screen.py (or research/studies/run_studies.py) first.")
+    meta = None
+    if r is not None:
+        from report_sections_end import sections
+        toc, body = sections(r)
+        if screen is not None:
+            s_toc, s_body = screen_sections(screen)
+            toc, body = s_toc + toc, s_body + body
+    else:
+        from report_panel_guide import panel_guide
+        toc, body = screen_sections(screen, lead=True)
+        toc = toc + [("panel-guide", "Panel guide", False)]
+        body += panel_guide()
+        a, b = coverage_dates(screen)
+        meta = {"title": "Research · Hypothesis screen | AXIOMA",
+                "description": "Pre-registered hypothesis screen on AXIOMA 5-minute data, with holdout confirmation.",
+                "footer": f"DATA {a} → {b} UTC"}
+    return publish(body, toc, r, screen, meta, out, site, screen_dir)
 
 
 def main():
-    from report_sections_end import sections
-    r = json.loads((OUT / "results.json").read_text())
-    toc, body = sections(r)
-    path = publish(body, toc, r)
+    try:
+        path = build()
+    except FileNotFoundError as e:
+        sys.exit(f"build_report: {e}")
     print(f"published {path} ({sum(1 for _ in SITE.rglob('*') if _.is_file())} files)")
 
 
