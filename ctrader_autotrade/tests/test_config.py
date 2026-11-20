@@ -66,7 +66,8 @@ def test_toml_defaults(make_env):
     assert (s.host, s.port) == ("demo.ctraderapi.com", 5035)
     assert (s.entry_z, s.vol_shrink_z, s.confirm_range, s.exec) == (1.0, 2.0, "off", "taker")
     assert (s.reject_breaker_count, s.reject_breaker_window_min) == (3, 10)
-    assert s.label == "axq-poc4h-v1" and s.warmup_hours == 9 and s.daily_loss_bps == 150
+    assert s.order_label == "ax5m" and s.own_labels == {"ax5m", "axq-poc4h-v1"} and s.instance_timeframe == "5m"
+    assert s.warmup_hours == 9 and s.daily_loss_bps == 150 and not s.instance_claim_unlabelled
     d = Settings()
     for f in ("entry_z", "stop_k", "max_positions", "stale_s", "close_on_shutdown", "grace_s"):
         assert getattr(s, f) == getattr(d, f)

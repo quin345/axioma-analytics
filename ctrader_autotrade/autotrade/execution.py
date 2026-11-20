@@ -8,6 +8,13 @@ State machine (DESIGN.md section 3), one per symbol, at most one position per sy
 
 The same OrderManager runs in dry-run: SimBroker (simbroker.py) emits synthetic ExecReports into
 `OrderManager.on_report`, so the transitions are identical.
+
+Instances (DESIGN.md section 3): every order carries label = the instance name ("ax5m", "ax1m"),
+clientOrderId "<instance>-<symbol>-<slot start s>-<leg>" and, on entries, the comment
+"<instance> <strategy> z=<z_poc> sig=<signal id>". Reconcile, adoption, flatten and execution-event
+matching consider only positions/orders whose label the instance owns (Settings.owns_label): its own
+name, plus for the default instance its pre-instance label "axq-poc4h-v1" (and unlabelled ones only with
+instance.claim_unlabelled). Another instance's positions are never touched.
 """
 from __future__ import annotations
 
@@ -19,6 +26,7 @@ from typing import Any, Callable, Optional, Protocol
 
 from twisted.internet import defer
 
+from . import timeframe as _tf
 from .clock import Clock
 from .config import Settings
 from .types import (ExecMode, ExecReport, Intent, IntentKind, PositionView, Quote, RunMode, Side,
@@ -27,10 +35,12 @@ from .types import (ExecMode, ExecReport, Intent, IntentKind, PositionView, Quot
 log = logging.getLogger(__name__)
 
 PRICE_SCALE = 100_000          # Open API relative values / integer prices are in 1/100000
-SLOT_S = 300                   # 5-minute bars
+SLOT_S = 300                   # 5-minute default; OrderManager uses its instance timeframe (tf.slot_s)
 REPLY_TIMEOUT_S = 5.0          # no reply to an order -> RECONCILING
-EXIT_BACKSTOP_S = 10.0         # safety exit this long after exit_at if the strategy did not act
-HOLD_EXTEND_MS = 5 * 60_000    # rollover
+EXIT_BACKSTOP_S = 10.0         # safety exit this long after exit_at if the strategy did not act; with a
+                               # 1-minute slot: decision <= slot_end + data.deadline_s (< grace_s + 10 s),
+                               # backstop at slot_end + grace_s + 10 s, next slot at slot_end + 60 s
+HOLD_EXTEND_MS = 5 * 60_000    # rollover (5-minute default; tf.slot_ms)
 TRADE_REASONS = ("time", "flip", "stop", "kill", "session", "disconnect", "risk", "shutdown", "manual")
 
 
@@ -379,9 +389,27 @@ class OrderManager:
             raise ValueError("DEMO mode requires the demo broker")
         self.broker, self.journal, self.clock, self.settings = broker, journal, clock, settings
         self.mode, self.exec_mode = mode, exec_mode
+        self.tf = _tf.of(settings)
         self._syms: dict[int, _Sym] = {}
         self._quotes: dict[int, Quote] = {}
         self._pending_flat: Optional[str] = None
+        self.foreign: tuple = ([], [])   # last startup reconcile: positions/orders this instance does not own
+
+    def _owns(self, label: Optional[str]) -> bool:
+        owns = getattr(self.settings, "owns_label", None)
+        return owns(label) if owns else label == getattr(self.settings, "label", None)
+
+    @property
+    def _label(self) -> str:
+        return getattr(self.settings, "order_label", None) or self.settings.label
+
+    def _coid(self, name, slot_s: int, leg: str) -> str:
+        return f"{getattr(self.settings, 'coid_prefix', '')}{name}-{slot_s}-{leg}"
+
+    def entry_comment(self, intent: Intent) -> str:
+        """`ax1m poc_reversion_1h z=+1.23 sig=41-1795167000` (ProtoOANewOrderReq.comment, <= 512)."""
+        z = "" if intent.z is None else f" z={intent.z:+.2f}"
+        return f"{self._label} {self.tf.poc_key}{z} sig={intent.signal_id}"[:512]
 
     # ----- public ---------------------------------------------------------------------------------
     def on_quote(self, quote: Quote) -> None:
@@ -414,7 +442,7 @@ class OrderManager:
             return
         if k is IntentKind.HOLD:
             if st.state is State.OPEN:
-                st.exit_at_ms += HOLD_EXTEND_MS
+                st.exit_at_ms += self.tf.slot_ms
                 self._arm_exit_timer(st, st.exit_at_ms + EXIT_BACKSTOP_S * 1000 - now_ms)
                 self.journal.record_transition(st.symbol_id, "OPEN", "OPEN", st.coid,
                                                f"hold: exit_at={st.exit_at_ms}", now_ms)
@@ -447,10 +475,14 @@ class OrderManager:
             st.pending_flip = None
             self._request_exit(st, reason, now)
 
-    def startup_reconcile(self, specs: Optional[dict] = None) -> defer.Deferred:
-        """Adopt own positions (close at once when past exit_at), cancel own resting orders."""
+    def startup_reconcile(self, specs: Optional[dict] = None, guard: Optional[Callable] = None) -> defer.Deferred:
+        """Adopt own positions (close at once when past exit_at), cancel own resting orders. Positions and
+        orders with a label this instance does not own are left alone (kept in `self.foreign`).
+        `guard(positions, orders)` runs first and may raise (e.g. RefusedError) to stop before anything is sent."""
         specs = specs or {}
         d = defer.maybeDeferred(self.broker.reconcile)
+        if guard is not None:
+            d.addCallback(lambda res: (guard(*res), res)[1])
         d.addCallback(self._startup_apply, specs)
         return d
 
@@ -498,7 +530,8 @@ class OrderManager:
         for st in self._syms.values():
             if r.position_id is not None and st.position_id == r.position_id:
                 return st
-        if r.label == self.settings.label and r.symbol_id in self._syms:
+        # an explicit own label only (never "no label": a manual or other bot's event must not match)
+        if r.label and r.label in getattr(self.settings, "own_labels", (self._label,)) and r.symbol_id in self._syms:
             st = self._syms[r.symbol_id]
             return st if st.state is not State.IDLE else None
         return None
@@ -533,8 +566,9 @@ class OrderManager:
         vol = normalise_volume(spec, intent.size_mult, s.base_size_x_min)
         if vol <= 0:
             return self._note(st, now_ms, "enter_ignored: size below minimum")
-        slot_s = now_ms // 1000 // SLOT_S * SLOT_S
-        coid = f"{spec.name}-{slot_s}-E"
+        slot_len = self.tf.slot_s
+        slot_s = now_ms // 1000 // slot_len * slot_len
+        coid = self._coid(spec.name, slot_s, "E")
         if self.journal.has_client_order_id(coid):
             return self._note(st, now_ms, f"enter_ignored: duplicate clientOrderId {coid}")
         q = self._quotes.get(st.symbol_id)
@@ -550,20 +584,21 @@ class OrderManager:
         st.coid, st.order_id, st.position_id = coid, None, None
         st.signal_id, st.signal_mid, st.fill_mid = intent.signal_id, _mid(q), None
         st.exec_mode, st.expiry_ms = mode, expiry
-        st.exit_at_ms = (slot_s + SLOT_S + s.grace_s) * 1000
+        st.exit_at_ms = (slot_s + slot_len + s.grace_s) * 1000
         st.want_exit = st.exit_reason = st.exit_coid = st.exit_order_id = None
         st.closed, st.exit_value, st.exit_gross, st.exit_comm, st.exit_swap = 0, 0.0, None, 0, 0
         st.exit_attempts, st.cancel_rejected, st.entry_ms = 0, False, now_ms
         self.journal.record_order(coid, ts_ms=now_ms, symbol_id=st.symbol_id, side=intent.side, volume=vol,
                                   kind="ENTRY", order_type="LIMIT" if limit else "MARKET", limit_price=limit,
                                   expiry_ms=expiry, stop_rel=stop, signal_id=intent.signal_id,
-                                  label=s.label, status="SENT")
+                                  label=self._label, status="SENT")
         log.info("order %s %s %s %s vol=%s limit=%s (%s)", st.spec.name if st.spec else st.symbol_id,
                  intent.side.name, "LIMIT" if limit else "MARKET", mode.value, vol, limit, coid)
         self._set(st, State.PENDING_NEW, f"send {mode.value} {intent.side.name} {vol}", now_ms)
         self._arm(st, "reply", REPLY_TIMEOUT_S, self._reply_timeout, State.PENDING_NEW)
+        comment = self.entry_comment(intent)
         self._send(st, State.PENDING_NEW, lambda: self.broker.place_entry(
-            spec, intent.side, vol, mode, limit, expiry, stop, coid, s.label, intent.signal_id))
+            spec, intent.side, vol, mode, limit, expiry, stop, coid, self._label, comment))
 
     def _note(self, st: _Sym, now_ms: int, text: str) -> None:
         self.journal.record_transition(st.symbol_id, st.state.value, st.state.value, st.coid, text, now_ms)
@@ -712,10 +747,11 @@ class OrderManager:
         self._request_exit(st, st.exit_reason or "time", now)
 
     def _next_exit_coid(self, st: _Sym, now_ms: int) -> str:
-        slot_s = now_ms // 1000 // SLOT_S * SLOT_S
+        slot_len = self.tf.slot_s
+        slot_s = now_ms // 1000 // slot_len * slot_len
         name = st.spec.name if st.spec else st.symbol_id
         for n in range(1000):                       # bounded: never spin on a misbehaving journal
-            c = f"{name}-{slot_s}-X{'' if n == 0 else n}"
+            c = self._coid(name, slot_s, f"X{'' if n == 0 else n}")
             if not self.journal.has_client_order_id(c):
                 return c
         raise RefusedError("no free exit clientOrderId")
@@ -741,15 +777,15 @@ class OrderManager:
         self.journal.record_order(st.exit_coid, ts_ms=now_ms, symbol_id=st.symbol_id,
                                   side=Side.SELL if st.side is Side.BUY else Side.BUY, volume=vol, kind="EXIT",
                                   order_type="MARKET" if netted else "CLOSE", signal_id=st.signal_id,
-                                  label=self.settings.label, position_id=st.position_id, status="SENT")
+                                  label=self._label, position_id=st.position_id, status="SENT")
         log.info("exit order sym=%s vol=%s reason=%s (%s)", st.symbol_id, vol, reason, st.exit_coid)
         self._set(st, State.EXIT_PENDING, f"close {vol} ({reason}, {'netted' if netted else 'hedged'})", now_ms)
         self._arm(st, "reply", REPLY_TIMEOUT_S, self._reply_timeout, State.EXIT_PENDING)
         if netted:
             opp = Side.SELL if st.side is Side.BUY else Side.BUY
             self._send(st, State.EXIT_PENDING, lambda: self.broker.place_entry(
-                spec, opp, vol, ExecMode.TAKER, None, None, None, st.exit_coid, self.settings.label,
-                f"exit:{st.signal_id}"))
+                spec, opp, vol, ExecMode.TAKER, None, None, None, st.exit_coid, self._label,
+                f"{self._label} exit sig={st.signal_id}"))
         else:
             self._send(st, State.EXIT_PENDING, lambda: self.broker.close(st.position_id, vol))
 
@@ -864,9 +900,8 @@ class OrderManager:
         if st.state is not State.RECONCILING:
             return
         now = self.clock.now_ms()
-        label = self.settings.label
         prev, st.prev_state = st.prev_state, None
-        mine = [p for p in positions if p.label == label and p.symbol_id == st.symbol_id]
+        mine = [p for p in positions if self._owns(p.label) and p.symbol_id == st.symbol_id]
         if prev is State.EXIT_PENDING:
             p = next((p for p in mine if st.position_id in (None, p.position_id)), None)
             if p is not None:
@@ -943,14 +978,15 @@ class OrderManager:
     def _startup_apply(self, res, specs: dict) -> None:
         positions, orders = res
         now = self.clock.now_ms()
-        label = self.settings.label
+        self.foreign = ([p for p in positions if not self._owns(p.label)],
+                        [o for o in orders if not self._owns(o.label)])
         for o in orders:
-            if o.label == label:
+            if self._owns(o.label):
                 self.journal.record_risk_event("startup_cancel_order", f"{o.client_order_id} {o.order_id}",
                                                o.symbol_id, now)
                 self._send_raw(lambda o=o: self.broker.cancel(o.order_id), o.symbol_id)
         for p in positions:
-            if p.label != label:
+            if not self._owns(p.label):
                 continue
             st = self._sym(p.symbol_id, specs.get(p.symbol_id))
             if st.state is not State.IDLE:
@@ -964,7 +1000,8 @@ class OrderManager:
             st.position_id, st.entry_ms = p.position_id, opened
             st.coid = f"adopted-{p.position_id}"
             st.signal_id, st.signal_mid, st.fill_mid = "adopted", None, None
-            st.exit_at_ms = (opened // 1000 // SLOT_S * SLOT_S + SLOT_S + self.settings.grace_s) * 1000
+            slot_len = self.tf.slot_s
+            st.exit_at_ms = (opened // 1000 // slot_len * slot_len + slot_len + self.settings.grace_s) * 1000
             st.exit_attempts = 0
             self._set(st, State.OPEN, f"adopted position {p.position_id}", now)
             if now >= st.exit_at_ms:

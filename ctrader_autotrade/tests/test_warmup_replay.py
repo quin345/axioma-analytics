@@ -13,6 +13,7 @@ from autotrade._research import export_flat as ef
 from autotrade.bars import BarBuilder, Bucketiser, replay_bars
 from autotrade.features import FeatureEngine
 from autotrade.runner import Bot
+from autotrade.timeframe import TF_1M, TF_5M
 from autotrade.types import Bucket
 
 SLOT = 300_000
@@ -113,7 +114,15 @@ def test_truncated_bars_enter_the_features_with_nan_vap():
 def test_warmup_fetch_covers_history_slots_plus_the_vap_window():
     def hours(setting, slots):
         return Bot.warmup_hours(SimpleNamespace(settings=SimpleNamespace(warmup_hours=setting),
-                                                history_slots=slots))
+                                                history_slots=slots, tf=TF_5M))
     assert hours(9, 150) == 16.5                 # 150 bars * 5 min + 240 min
     assert hours(9, 30) == 9                     # the configured floor wins for short histories
     assert hours(9, 48) >= 8.5                   # 48 z bars + 240 min = 8 h
+
+
+def test_warmup_fetch_at_one_minute_is_history_plus_the_60_min_window():
+    def hours(setting, slots):
+        return Bot.warmup_hours(SimpleNamespace(settings=SimpleNamespace(warmup_hours=setting),
+                                                history_slots=slots, tf=TF_1M))
+    assert hours(0, TF_1M.history_bars) == 3.0   # 120 one-minute bars + 60 min VAP window
+    assert hours(0, 60) == 2.0                   # one z-window + its VAP window

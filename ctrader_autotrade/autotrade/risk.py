@@ -22,7 +22,7 @@ from .resetday import day_label, day_start_ms, next_reset_ms
 from .types import Intent, IntentKind, PositionView, RiskContext, SymbolSpec
 
 WEEK_S = 7 * 86400
-MIN_BARS_SINCE_OPEN = 12  # rolling_z min_periods
+MIN_BARS_SINCE_OPEN = 12  # rolling_z min_periods at 5m; RiskManager uses its timeframe's (15 at 1m)
 SCAN_DAYS = 8
 UTC = timezone.utc
 
@@ -173,7 +173,7 @@ class SessionCalendar:
         return None
 
     def bars_since_open(self, now_ms: int, bar_ms: int = 300_000) -> int:
-        """Completed 5 min bars since the session opened (huge when open for 8+ days/24-7)."""
+        """Completed bars of bar_ms (5 min default) since the session opened (huge when open for 8+ days/24-7)."""
         if not self.is_open(now_ms):
             return 0
         o = self.last_open_ms(now_ms)
@@ -186,7 +186,9 @@ class RiskManager:
     """Entry gate and flatten decisions. Holds breaker latches; ctx carries all measurements."""
 
     def __init__(self, settings):
+        from . import timeframe
         self.s = settings
+        self.min_bars_since_open = timeframe.of(settings).min_periods
         self.force_flatten = False
         self.force_reason = ""
         self._day: Optional[int] = None   # start (utc ms) of the current trading day, see resetday
@@ -288,7 +290,7 @@ class RiskManager:
             return block("session_closed")
         if ctx.minutes_to_close is not None and ctx.minutes_to_close < s.no_entry_before_close_min:
             return block("near_close")
-        if ctx.bars_since_open < MIN_BARS_SINCE_OPEN:
+        if ctx.bars_since_open < self.min_bars_since_open:
             return block("warmup_after_open")
         if ctx.last_data_ms is None or ctx.now_ms - ctx.last_data_ms > s.stale_s * 1000:
             return block("stale_data")

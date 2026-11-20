@@ -35,14 +35,17 @@ def _bar(r) -> Bar:
                vap_240m_volume_events=f(r.vap_volume_events), approx_share=f(r.approx_share) or 0.0)
 
 
-def parity_report(conn) -> dict:
-    """Per symbol: compared rows, max abs difference per column, NaN-pattern mismatches, side agreement."""
+def parity_report(conn, tf=None) -> dict:
+    """Per symbol: compared rows, max abs difference per column, NaN-pattern mismatches, side agreement.
+    tf: the instance timeframe (autotrade/timeframe.py; default 5m)."""
+    from .timeframe import TF_5M
+    tf = tf or TF_5M
     bars = pd.read_sql_query("SELECT * FROM bars ORDER BY symbol_id, slot_end_ms", conn)
     sigs = pd.read_sql_query("SELECT symbol_id, slot_end_ms, z_poc, z_range, events_z FROM signals", conn)
     if bars.empty or sigs.empty:
         return {"symbols": {}, "rows": 0}
     items = [(_bar(r), r.approx_share < 1.0) for r in bars.itertuples()]
-    f = FeatureEngine.research_features(FeatureEngine.frame(items))
+    f = FeatureEngine.research_features(FeatureEngine.frame(items, tf), tf)
     se = pd.to_datetime(f["slot_end"], utc=True)
     f["slot_end_ms"] = (se - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(milliseconds=1)
     ref = f.set_index(["symbol_id", "slot_end_ms"])

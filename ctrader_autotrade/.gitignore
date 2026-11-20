@@ -11,3 +11,6 @@ __pycache__/
 state/
 *.egg-info/
 .pytest_cache/
+
+# generated daily trade reports (real trading data)
+reports/

@@ -1,4 +1,4 @@
-"""`autotrade` command line: probe | run | flatten | parity | report | kill-reset | kql-check (README.md has the rollout).
+"""`autotrade` command line: probe | run | flatten | parity | report | trades-report | kill-reset | kql-check (README.md has the rollout).
 
 Only `probe`, `run` and `flatten` connect to cTrader (demo host only). `report` and `parity` read
 the journal db read-only; `kql-check` only reads KQL (and the journal, read-only). Nothing here prints
@@ -126,10 +126,20 @@ def cmd_probe(args) -> int:
     @inlineCallbacks
     def on_ready(specs, info):
         try:
+            print(f"instance:       {settings.instance_name} ({settings.instance_timeframe} bars, order label "
+                  f"{settings.order_label!r}, owns {sorted(settings.own_labels)}"
+                  f"{' + unlabelled' if settings.instance_claim_unlabelled else ''})")
             print(f"account id:     {session.account_id}")
             print("isLive:         False (verified: the account is listed and not live)")
             print(f"broker:         {info.get('broker_name')}")
-            print(f"account type:   {info.get('account_type')}")
+            at = info.get("account_type")
+            print(f"account type:   {at}  " + (
+                "-> HEDGING: every order opens its own position; instances on the same symbol stay independent"
+                if at == "HEDGED" else "-> NETTING: positions of a symbol net together; a second instance on the "
+                "same symbols is refused (give it its own demo account via --env)"))
+            lev = info.get("leverage_in_cents")
+            print(f"leverage:       {'n/a' if lev is None else f'1:{lev / 100:g}'} (max "
+                  f"{info.get('max_leverage') or 'n/a'})")
             print(f"money digits:   {info.get('money_digits')}")
             md = info.get("money_digits") or 2
             print(f"balance:        {info['balance'] / 10 ** md:.{md}f} (deposit asset id "
@@ -140,6 +150,7 @@ def cmd_probe(args) -> int:
             for sid, spec in sorted(specs.items()):
                 for line in spec_lines(spec, session.broker_names.get(sid, "?")):
                     print(line)
+            yield _probe_ownership(session, settings, specs)
             ids = sorted(specs)
             if ids:
                 wait_d = waiting["all"] = Deferred()
@@ -155,6 +166,7 @@ def cmd_probe(args) -> int:
                         sp = q["ask"] - q["bid"]
                         print(f"spot {spec.name}: bid={q['bid'] / 1e5} ask={q['ask'] / 1e5} "
                               f"spread={sp / 1e5:.5f} ({sp / mid * 1e4:.2f} bp)")
+                        _probe_margin(spec, mid, settings, info)
                     else:
                         print(f"spot {spec.name}: none within {SPOT_WAIT_S} s (market closed?)")
                 yield session.request(oa.ProtoOAUnsubscribeSpotsReq(symbolId=ids))
@@ -173,6 +185,60 @@ def cmd_probe(args) -> int:
     return result["code"]
 
 
+def _probe_margin(spec, mid_int: float, settings, info) -> None:
+    """Notional of one order of this instance and of two instances at once vs balance (and leverage)."""
+    from .execution import normalise_volume
+    vol = normalise_volume(spec, 1.0, settings.base_size_x_min)
+    units = vol / 100                                   # Open API volume is in 1/100 of a unit
+    notional = units * mid_int / 1e5                    # quote currency
+    md = info.get("money_digits") or 2
+    bal = info["balance"] / 10 ** md
+    lev = (info.get("leverage_in_cents") or 0) / 100
+    margin = f", margin ~{2 * notional / lev:,.2f} at 1:{lev:g}" if lev else ""
+    print(f"    exposure {spec.name}: order {vol} ({units:g} units, notional ~{notional:,.2f} quote ccy); two "
+          f"instances ~{2 * notional:,.2f} = {2 * notional / bal:.4%} of balance{margin}; maxVolume "
+          f"{spec.max_volume}, maxExposure {spec.max_exposure or 'n/a'}")
+
+
+def _probe_ownership(session, settings, specs):
+    """Read-only: open positions/orders by owner (ProtoOAReconcileReq) and the labels of the account's orders
+    in the last 24 h (ProtoOAOrderListReq; closing orders show whether a close inherits the position label)."""
+    from twisted.internet.defer import inlineCallbacks
+    from ctrader_open_api.messages import OpenApiMessages_pb2 as oa
+
+    def owner(label):
+        if settings.owns_label(label):
+            return f"THIS instance ({label or 'no label'})"
+        return f"other: {label}" if label else "other: no label (manual?)"
+
+    @inlineCallbacks
+    def run():
+        try:
+            res = yield session.request(oa.ProtoOAReconcileReq(), timeout=10)
+            print(f"open positions: {len(res.position)}, pending orders: {len(res.order)}")
+            for p in res.position:
+                td = p.tradeData
+                name = specs[td.symbolId].name if td.symbolId in specs else td.symbolId
+                print(f"    position {p.positionId} {name} vol={td.volume} label={td.label!r} "
+                      f"comment={td.comment!r} -> {owner(td.label)}")
+            for o in res.order:
+                print(f"    order {o.orderId} sym={o.tradeData.symbolId} label={o.tradeData.label!r} "
+                      f"clientOrderId={o.clientOrderId!r} -> {owner(o.tradeData.label)}")
+            now = int(time.time() * 1000)
+            hist = yield session.request(oa.ProtoOAOrderListReq(fromTimestamp=now - 86_400_000, toTimestamp=now),
+                                         timeout=15)
+            counts: dict = {}
+            for o in hist.order:
+                k = (o.tradeData.label or "<no label>", "closing" if o.closingOrder else "opening")
+                counts[k] = counts.get(k, 0) + 1
+            print("orders in the last 24 h by label (closing = ClosePositionReq / stop / stop-out):")
+            for (lab, kind), n in sorted(counts.items()):
+                print(f"    {lab:<20} {kind:<8} {n}")
+        except Exception as exc:
+            print(f"ownership check failed: {type(exc).__name__}: {exc}")
+    return run()
+
+
 # ---- run ----
 
 def cmd_run(args) -> int:
@@ -182,15 +248,19 @@ def cmd_run(args) -> int:
     from .transport import OpenApiTransport
     from .types import ExecMode, RunMode
 
+    from . import instance
     settings = _load(args)
+    instance.claim(settings)               # state dir belongs to this instance; one process per instance
     mode = RunMode.DEMO if args.mode == "demo" else RunMode.DRY_RUN
     exec_mode = ExecMode(args.exec or settings.exec)
     clock = Clock(reactor)
     bot = Bot(settings, mode, exec_mode, clock, OpenApiTransport(settings.host, settings.port, clock),
               hours=args.hours)
     setup_logging(bot.journal, args.verbose)
-    logging.getLogger(__name__).info("starting: mode=%s exec=%s symbols=%s hours=%s", mode.value,
-                                     exec_mode.value, settings.symbols, args.hours)
+    logging.getLogger(__name__).info(
+        "starting: instance=%s timeframe=%s label=%s owns=%s state=%s mode=%s exec=%s symbols=%s hours=%s",
+        settings.instance_name, settings.instance_timeframe, settings.order_label, sorted(settings.own_labels),
+        settings.state_path(), mode.value, exec_mode.value, settings.symbols, args.hours)
     bot.done.addCallback(lambda code: reactor.running and reactor.stop())
     reactor.addSystemEventTrigger("before", "shutdown", lambda: bot.shutdown("signal"))
     bot.start()
@@ -210,8 +280,12 @@ def cmd_flatten(args) -> int:
     from .transport import OpenApiTransport
     from .types import ExecMode, RunMode
 
+    from . import instance
     settings = _load(args)
+    instance.check(settings)
     setup_logging(None, args.verbose)
+    print(f"instance {settings.instance_name}: flattening only positions/orders labelled "
+          f"{sorted(settings.own_labels)}{' or unlabelled' if settings.instance_claim_unlabelled else ''}")
     journal = Journal.from_settings(settings)
     clock = Clock(reactor)
     session = Session(settings, OpenApiTransport(settings.host, settings.port, clock), clock)
@@ -280,6 +354,36 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_trades_report(args) -> int:
+    """Daily executed-trades report(s) of this instance (autotrade/daily.py): files under --out-dir, or text
+    on stdout. Reads the journal read-only; writes only the report files."""
+    from . import daily
+    settings = _load(args)
+    if not _db_path(settings).exists():
+        print(f"no journal at {_db_path(settings)} yet (run the bot first)")
+        return 1
+    conn = daily.open_ro(_db_path(settings))
+    out_dir = Path(args.out_dir) if args.out_dir else daily.DEFAULT_OUT_ROOT / settings.instance_name
+    now = int(time.time() * 1000)
+    try:
+        days = daily.resolve_days(conn, args.date, args.last_day, args.backfill, args.today, now)
+    except ValueError as exc:
+        print(f"trades-report: {exc}", file=sys.stderr)
+        return 1
+    if not days:
+        print(f"trades-report {settings.instance_name}: nothing to report (no run or trade covers the requested day)")
+        return 0
+    reports = daily.run(conn, settings, out_dir, days, now, write=not args.stdout)
+    conn.close()
+    if args.stdout:
+        print("\n\n".join(daily.render(r) for r in reports))
+    else:
+        print(f"trades-report {settings.instance_name}: wrote {len(reports)} day(s) "
+              f"{reports[0]['meta']['date']}..{reports[-1]['meta']['date']}, "
+              f"{sum(r['summary']['trades'] for r in reports)} trade(s), to {out_dir}")
+    return 0
+
+
 def cmd_kill_reset(args) -> int:
     """Re-arm the P&L kill switch: a new baseline at now. KILL / PAUSE are left for the operator."""
     from . import killswitch
@@ -304,7 +408,8 @@ def cmd_parity(args) -> int:
     conn = _open_ro(settings)
     if conn is None:
         return 1
-    print(parity.render(parity.parity_report(conn)))
+    from . import timeframe
+    print(parity.render(parity.parity_report(conn, timeframe.of(settings))))
     return 0
 
 
@@ -334,9 +439,29 @@ def cmd_kql_check(args) -> int:
     except Exception as exc:
         print(f"KQL not usable: {type(exc).__name__}: {exc}")
         return 1
+    from . import timeframe
+    tf = timeframe.of(settings)
     acct = str(settings.secrets.account_id)
+    print(f"instance {settings.instance_name}: {tf.key} bars, VAP window {tf.vap_minutes} min, gates: freshness "
+          f"{settings.data_freshness_s:g}s, gap > {settings.data_gap_max_s:g}s, first query slot_end + "
+          f"{settings.data_grace_s:g}s, retry every {settings.data_retry_s:g}s x{settings.data_retries}, deadline "
+          f"slot_end + {settings.data_deadline_s:g}s")
     now = int(time.time() * 1000)
     to_ms = now // 10_000 * 10_000
+    # the slot-close query the bot runs every slot: [previous fetch end - one slot, t) ~ two slots
+    t_slot = now // tf.slot_ms * tf.slot_ms
+    inc = kq.KqlRequest(cfg.table, acct, tuple(ids), t_slot - 2 * tf.slot_ms, t_slot)
+    timings = []
+    for _ in range(3):
+        t0 = time.time()
+        try:
+            reader.rows(inc)
+        except Exception as exc:
+            print(f"KQL slot-close query failed: {type(exc).__name__}: {str(exc)[:300]}")
+            return 1
+        timings.append(time.time() - t0)
+    print(f"slot-close query ({2 * tf.slot_minutes} min of buckets): " +
+          ", ".join(f"{x:.2f}s" for x in timings))
     req = kq.KqlRequest(cfg.table, acct, tuple(ids), to_ms - int(args.minutes * 60_000), to_ms)
     t0 = time.time()
     try:
@@ -367,12 +492,25 @@ def cmd_kql_check(args) -> int:
             a = [(b.start_ms, b.best_bid, b.best_ask, b.events) for b in res.buckets[sid]]
             b = [(x.start_ms, x.best_bid, x.best_ask, x.events) for x in ref.buckets[sid]]
             diff = sum(1 for x, y in zip(a, b) if x != y) + abs(len(a) - len(b))
-            wm_ok = res.watermark[sid] is None or ref.watermark[sid] is None or ref.watermark[sid] <= res.watermark[sid]
+            # the raw rows are read after the bucket query, so they may hold newer rows: the query's watermark
+            # must cover every row before `to` and not exceed what the later raw read saw
+            wm, ref_wm = res.watermark[sid], ref.watermark[sid]
+            before = max((r["ts_ms"] for r in raw if r["symbol_id"] == sid and r["ts_ms"] < to_ms), default=None)
+            wm_ok = wm is None or ref_wm is None or ((before is None or before <= wm) and wm <= ref_wm)
             print(f"  verify symbolId {sid}: {len(a)} KQL buckets vs {len(b)} recomputed from {sum(1 for r in raw if r['symbol_id'] == sid)} "
                   f"raw rows: {diff} differ; watermark {'ok' if wm_ok else 'MISMATCH'}")
             if diff or not wm_ok:
                 code = 1
     return code
+
+
+def _iso_date(text: str) -> str:
+    from datetime import date
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a YYYY-MM-DD date: {text!r}") from None
+    return text
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -391,6 +529,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("parity", help="P4 drift: research features over the bars table vs journalled features")
     rp = sub.add_parser("report", help="forward-test report from the journal")
     rp.add_argument("--since-hours", type=float, help="only the last N hours")
+    tr = sub.add_parser("trades-report", help="daily executed-trades report of this instance (JSON files per UTC day)")
+    when = tr.add_mutually_exclusive_group(required=True)
+    when.add_argument("--date", metavar="YYYY-MM-DD", type=_iso_date, help="one UTC day (a trade belongs to its exit day)")
+    when.add_argument("--last-day", action="store_true", help="yesterday UTC (what cron runs)")
+    when.add_argument("--backfill", action="store_true", help="every UTC day with a run or trades, up to yesterday")
+    when.add_argument("--today", action="store_true", help="the current UTC day so far (marked partial)")
+    tr.add_argument("--out-dir", help="default: reports/<instance name>/ next to config.toml's directory")
+    tr.add_argument("--stdout", action="store_true", help="print the text rendering instead of writing files")
     kc = sub.add_parser("kql-check", help="read-only: the bot's KQL bucket query for its streams, counts and lag")
     kc.add_argument("--minutes", type=float, default=30)
     kc.add_argument("--symbol-ids", help="comma-separated cTrader symbolIds (default: from the journal's bars)")
@@ -403,7 +549,7 @@ def main(argv=None) -> int:
     from . import config
     try:
         code = {"probe": cmd_probe, "run": cmd_run, "flatten": cmd_flatten, "report": cmd_report,
-                "parity": cmd_parity, "kill-reset": cmd_kill_reset, "kql-check": cmd_kql_check}[args.cmd](args)
+                "parity": cmd_parity, "trades-report": cmd_trades_report, "kill-reset": cmd_kill_reset, "kql-check": cmd_kql_check}[args.cmd](args)
     except config.ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         code = 1

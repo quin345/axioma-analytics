@@ -105,3 +105,33 @@ def test_entry_z_from_run_config_and_empty_journal(tmp_path):
     assert r["bars"] == 0 and r["signals"]["rows"] == 0 and r["ic"]["blocks"] == 0
     assert "none" in report.render(r)
     j.close()
+
+
+def test_one_minute_instance_report_uses_its_slot_blocks_and_references(tmp_path):
+    s1 = Settings(instance_name="ax1m", instance_timeframe="1m", state_dir=str(tmp_path / "s"),
+                  log_dir=str(tmp_path / "l"))
+    j = Journal(tmp_path / "m.db", tmp_path / "m.jsonl")
+    j.start_run(RunMode.DEMO, s1)
+    rng = random.Random(3)
+    n = 180                                     # 3 h of 1-minute bars = three 1 h blocks
+    mids = [100 - 2 * rng.uniform(-1, 1) for _ in range(n)]
+    j.db.executemany("INSERT INTO bars VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     [(1, T0 + k * 60_000, 1, 100, m, m, m, m, .1, .1, 0., 10., 100., 99., 101., 1000., 0.)
+                      for k, m in enumerate(mids)])
+    j.db.commit()
+    for settings in (s1, None):                 # from the settings, or from the latest run's config
+        r = report.compute_report(j.db, settings=settings)
+        assert (r["instance"], r["timeframe"], r["strategy"], r["block_hours"]) == ("ax1m", "1m", "poc_reversion_1h", 1)
+        assert r["ic"]["blocks"] == 3           # 1-minute bars are consecutive (next-bar returns exist)
+        text = report.render(r)
+        assert "instance ax1m (1m bars, poc_reversion_1h)" in text and "per 1 h block" in text
+        assert "expected P&L is negative (research taker net -0.84 bp/trade" in text
+    j.close()
+    r5 = report.render(report.compute_report(_empty5(tmp_path)))
+    assert "instance ax5m (5m bars, poc_reversion_4h)" in r5 and "research taker net -0.31 bp/trade" in r5
+
+
+def _empty5(tmp_path):
+    j = Journal(tmp_path / "e.db", tmp_path / "e.jsonl")
+    j.start_run(RunMode.DEMO, Settings())
+    return j.db

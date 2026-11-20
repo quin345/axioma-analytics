@@ -11,7 +11,7 @@ Lifecycle (DESIGN.md sections 3-5):
    only) and, when the order manager is idle, reconcile again.
 3. Live: spots feed the order manager, the sim broker and the stamper; with "ctrader" depth events
    feed the bucketiser too (with "kql" depth is not subscribed).
-4. Slot timer at every 5 minute boundary + grace (grace_s; data.grace_s with "kql", after which the
+4. Slot timer at every slot boundary (5 or 1 minute: the instance timeframe, autotrade/timeframe.py) + grace (grace_s; data.grace_s with "kql", after which the
    slot's buckets are fetched from KQL with retries and the data gate is evaluated, see
    `_kql_slot`): close the bar, append features, decide, check risk, hand the intent to the order
    manager and journal one signal row (with the taker and maker-sim shadows, in both modes). A 5 s
@@ -36,9 +36,10 @@ from twisted.internet.defer import inlineCallbacks
 
 from ctrader_open_api.messages import OpenApiMessages_pb2 as oa
 
-from .bars import RETAIN_MS, VAP_MINUTES, BarBuilder, Bucketiser, replay_bars
+from . import timeframe as _tf
+from .bars import BarBuilder, Bucketiser, replay_bars, retain_ms
 from .book import Stamper
-from .execution import DemoBroker, OrderManager
+from .execution import DemoBroker, OrderManager, RefusedError, normalise_volume
 from .features import FeatureEngine
 from .journal import Journal
 from . import killswitch
@@ -55,16 +56,17 @@ from .warmup import warmup
 log = logging.getLogger(__name__)
 NAN = float("nan")
 
-SLOT_MS = 300_000
 PRICE_SCALE = 100_000
-HISTORY_SLOTS = 150            # bars rebuilt at start-up (FeatureEngine window)
+# Slot-derived values come from the instance timeframe (self.tf): slot_ms, history_bars (150 at 5m,
+# 120 at 1m: FeatureEngine window), repair_slots (one z-window: 48 / 60), persist = 3 slots.
+SLOT_MS = _tf.TF_5M.slot_ms             # 5-minute defaults, kept for importers
+HISTORY_SLOTS = _tf.TF_5M.history_bars
 RISK_TICK_S = 5
 SHUTDOWN_WAIT_S = 25           # systemd TimeoutStopSec is 45
-PERSIST_BACK_MS = 3 * SLOT_MS  # buckets re-saved at each slot close
 KEEP_BUCKETS_MS = 2 * 86_400_000
 EXIT_OK, EXIT_REFUSED, EXIT_SAFE = 0, 2, 3
 PARITY_MARKER = "PARITY_OK"    # state/PARITY_OK: the approximate-bar gate (DESIGN 4) was reviewed
-REPAIR_SLOTS = 48              # kql: bars closed on stale/failed data are rebuilt this far back
+_PERSIST = object()
 
 
 @dataclass
@@ -87,12 +89,21 @@ def _finite(x) -> bool:
     return x is not None and not math.isnan(x) and not math.isinf(x)
 
 
+class AccountGuardError(RefusedError):
+    """This instance must not trade on this account (NETTED account shared with another bot)."""
+
+
 class Bot:
     def __init__(self, settings, mode: RunMode, exec_mode: ExecMode, clock, transport,
                  journal: Optional[Journal] = None, hours: Optional[float] = None,
-                 history_slots: int = HISTORY_SLOTS, engine: Optional[FeatureEngine] = None,
+                 history_slots: Optional[int] = None, engine: Optional[FeatureEngine] = None,
                  kql: Optional[KqlSource] = None):
         self.settings = dataclasses.replace(settings, exec=exec_mode.value)
+        self.tf = tf = _tf.of(self.settings)
+        self.slot_ms = tf.slot_ms
+        self.repair_slots = tf.repair_slots
+        if history_slots is None:
+            history_slots = tf.history_bars
         self.mode, self.exec_mode = mode, exec_mode
         self.clock = clock
         self.hours = hours
@@ -101,13 +112,16 @@ class Bot:
         self.journal.use_daily_reset(self.settings)
         self.session = Session(self.settings, transport, clock)
         self.risk = RiskManager(self.settings)
-        self.engine = engine or FeatureEngine()
+        self.engine = engine or FeatureEngine(tf=tf)
+        if self.engine.tf is not tf:
+            raise ValueError(f"FeatureEngine timeframe {self.engine.tf.key} != instance {tf.key}")
         self.stamper = Stamper()
         self.kql_mode = self.settings.data_source == "kql"
         self.kql = kql
-        # kql: keep enough buckets to rebuild REPAIR_SLOTS bars once stale data has caught up
-        self.bucketiser = Bucketiser(RETAIN_MS + REPAIR_SLOTS * SLOT_MS) if self.kql_mode else Bucketiser()
-        self.builder = BarBuilder(self.bucketiser)
+        # kql: keep enough buckets to rebuild repair_slots bars once stale data has caught up
+        self.bucketiser = Bucketiser(retain_ms(tf) + self.repair_slots * self.slot_ms if self.kql_mode
+                                     else retain_ms(tf))
+        self.builder = BarBuilder(self.bucketiser, tf=tf)
         self._kql_warmed = False       # the history fetch succeeded
         self._kql_to: Optional[int] = None    # end of the last successful fetch
         self._warm_wm: dict[int, Optional[int]] = {}
@@ -299,7 +313,12 @@ class Bot:
         self._set_balance(trader_info)
         if self.mode is RunMode.DEMO and self.om.open_count() == 0:
             try:
-                yield self.om.startup_reconcile(self.specs)
+                yield self.om.startup_reconcile(self.specs, guard=self._account_guard)
+            except AccountGuardError as exc:
+                log.error("refused: %s", exc)
+                self.journal.record_risk_event("refused", str(exc))
+                self.shutdown("refused", code=EXIT_REFUSED, flatten=False, orders=False)
+                return
             except Exception as exc:
                 log.error("startup reconcile failed: %s", exc)
                 self.journal.record_risk_event("reconcile_failed", str(exc))
@@ -319,6 +338,51 @@ class Bot:
                 self._calls["kill"] = self.clock.call_later(0, self._kill_tick)
             self.clock.call_later(0, self._first_subscribe)
         self.trading_ready = True
+
+    def _account_guard(self, positions, orders) -> None:
+        """Runs on every startup/reconnect reconcile before anything is adopted or sent (DESIGN.md section 3).
+
+        HEDGED: every order opens its own position, so instances on the same symbol stay independent; only
+        an exposure sanity check is logged. NETTED: positions of one symbol net together, so another bot's
+        orders would change this one's exposure: refuse when a position/order this instance does not own
+        sits on one of its symbols, and refuse any non-default instance unless instance.netted_sole asserts
+        it is alone on the account (e.g. its own demo account via --env)."""
+        st = self.settings
+        if self.broker.account_type != "NETTED":
+            self._exposure_check(positions)
+            return
+        ours = set(self.specs)
+        foreign = sorted({(p.label or "<no label>") for p in positions if p.symbol_id in ours and not st.owns_label(p.label)}
+                         | {(o.label or "<no label>") for o in orders if o.symbol_id in ours and not st.owns_label(o.label)})
+        if foreign:
+            raise AccountGuardError(f"NETTED account: positions/orders labelled {foreign} sit on this instance's "
+                                    f"symbols and would net with its orders; run instance {st.instance_name!r} on "
+                                    f"its own demo account (--env)")
+        if not st.is_default_instance and not st.instance_netted_sole:
+            raise AccountGuardError(f"NETTED account: instance {st.instance_name!r} would net against the default "
+                                    f"instance's positions on the same symbols; give it its own demo account "
+                                    f"(--env <file>) and set [instance] netted_sole = true")
+
+    def _exposure_check(self, positions) -> None:
+        """Cheap sanity check: all open volume per symbol (every label) plus one more order of this instance
+        and one of a second instance stays within the symbol's maxVolume/maxExposure. Logs, never blocks."""
+        st = self.settings
+        for sid, spec in sorted(self.specs.items()):
+            mine = normalise_volume(spec, 1.0, st.base_size_x_min)
+            held = [p for p in positions if p.symbol_id == sid]
+            total = sum(p.volume for p in held)
+            by_label: dict = {}
+            for p in held:
+                by_label[p.label or "<no label>"] = by_label.get(p.label or "<no label>", 0) + p.volume
+            limit = spec.max_exposure or 0
+            worst = total + 2 * mine
+            text = (f"{spec.name}: open volume {total} {by_label or ''}, order size {mine}, maxVolume "
+                    f"{spec.max_volume}, maxExposure {limit or 'n/a'}")
+            if mine > spec.max_volume or (limit and worst > limit):
+                log.warning("exposure check: %s: two instances could exceed the symbol limit", text)
+                self.journal.record_risk_event("exposure_warning", text, sid)
+            else:
+                log.info("exposure check ok: %s", text)
 
     def _first_subscribe(self) -> None:
         d = self.session.subscribe()
@@ -382,7 +446,7 @@ class Bot:
 
     @inlineCallbacks
     def _warmup_kql(self, now: int):
-        """One query for the whole history window (history_slots bars + their 240 min VAP windows)."""
+        """One query for the whole history window (history_slots bars + their VAP windows)."""
         start = now - int(self.warmup_hours() * 3600_000)
         res = yield self._kql_source().fetch(sorted(self.specs), start, now)
         self._install_kql(res, history=True)
@@ -407,8 +471,8 @@ class Bot:
 
     def warmup_hours(self) -> float:
         """Fetch depth: enough that each of the history_slots bars (so each z-window bar) has a full
-        240 min VAP window behind it."""
-        return max(self.settings.warmup_hours, (self.history_slots * SLOT_MS / 60_000 + VAP_MINUTES) / 60)
+        VAP window (240 min at 5m, 60 min at 1m) behind it."""
+        return max(self.settings.warmup_hours, self.tf.history_minutes(self.history_slots) / 60)
 
     def _rebuild_bars(self, now: int) -> None:
         """Bars (and their features) for the last history_slots closed slots; warm-up bars are not live.
@@ -417,16 +481,17 @@ class Bot:
         240 min VAP window is complete. Bars whose window reaches back before the fetched history
         carry vap_coverage < 1 and enter the features with a NaN VAP.
         """
-        last_end = now // SLOT_MS * SLOT_MS
+        slot = self.slot_ms
+        last_end = now // slot * slot
         for sid, spec in self.specs.items():
             buckets = self._warm_buckets.pop(sid, [])
             if not buckets:
                 continue
             buckets = sorted(buckets, key=lambda b: b.start_ms)
-            start_end = max(last_end - (self.history_slots - 1) * SLOT_MS,
-                            buckets[0].start_ms // SLOT_MS * SLOT_MS + SLOT_MS)
+            start_end = max(last_end - (self.history_slots - 1) * slot,
+                            buckets[0].start_ms // slot * slot + slot)
             have = self.journal.bar_slots(sid, start_end)
-            bars = replay_bars(sid, buckets, start_end, last_end, self._warm_start_ms)
+            bars = replay_bars(sid, buckets, start_end, last_end, self._warm_start_ms, tf=self.tf)
             if self.kql_mode:
                 # exact buckets: the bars count as live (events_z uses them). A history fetch made after
                 # failed slots replaces the placeholder bars those slots appended.
@@ -447,10 +512,12 @@ class Bot:
             full = sum(1 for b in bars if b.vap_coverage >= 1.0)
             log.info("warm-up done %s: %d bars (%d with full VAP window), %.1f h covered, approx share "
                      "at last bar %.2f", spec.name, len(bars), full,
-                     (last_end - start_end) / 3600_000 + 5 / 60 if bars else 0.0,
+                     (last_end - start_end) / 3600_000 + slot / 3600_000 if bars else 0.0,
                      bars[-1].approx_share if bars else 0.0)
 
-    def _persist_buckets(self, back_ms: Optional[int] = PERSIST_BACK_MS) -> None:
+    def _persist_buckets(self, back_ms=_PERSIST) -> None:
+        if back_ms is _PERSIST:
+            back_ms = 3 * self.slot_ms          # buckets re-saved at each slot close
         for sid in self.specs:
             last = self.bucketiser.last_start_ms(sid)
             if last is None:
@@ -493,7 +560,8 @@ class Bot:
     def _arm_slot(self) -> None:
         now = self.clock.now_ms()
         grace = int((self.settings.data_grace_s if self.kql_mode else self.settings.grace_s) * 1000)
-        b = max((now - grace) // SLOT_MS * SLOT_MS + SLOT_MS, self._last_slot_ms + SLOT_MS)
+        slot = self.slot_ms
+        b = max((now - grace) // slot * slot + slot, self._last_slot_ms + slot)
         self._calls["slot"] = self.clock.call_later(max(b + grace - now, 0) / 1000, self._on_slot, b)
 
     def _on_slot(self, slot_end_ms: int) -> None:
@@ -551,8 +619,10 @@ class Bot:
         if history:
             from_ms = t - int(self.warmup_hours() * 3600_000)
         else:
-            from_ms = max((self._kql_to or t) - SLOT_MS,                      # re-read the previous tail
-                          t - VAP_MINUTES * 60_000 - (REPAIR_SLOTS + 1) * SLOT_MS)
+            # incremental: [last fetch end - one slot, t), i.e. ~2 slots of buckets; never more than the
+            # VAP window + the repair horizon
+            from_ms = max((self._kql_to or t) - self.slot_ms,                 # re-read the previous tail
+                          t - self.tf.vap_ms - (self.repair_slots + 1) * self.slot_ms)
         res: Optional[KqlFetch] = None
         err = ""
         attempts = 0
@@ -589,14 +659,15 @@ class Bot:
 
     def _kql_gate(self, sid: int, t: int, res: Optional[KqlFetch]) -> Optional[str]:
         """None = tradable. "kql_error": no data; "kql_stale": KQL lags more than data.freshness_s;
-        "kql_gap": the 240 min window has an open-session stretch without buckets > data.gap_max_s."""
+        "kql_gap": the VAP window (240 min at 5m, 60 min at 1m) has an open-session stretch without buckets
+        > data.gap_max_s."""
         st = self.settings
         if res is None:
             gate = "kql_error"
         elif stream_state(res.watermark.get(sid), t, st.data_freshness_s * 1000, self._spot_ref_ms(sid)) == "stale":
             gate = "kql_stale"
         else:
-            vstart = t - VAP_MINUTES * 60_000
+            vstart = t - self.tf.vap_ms
             cal = self.calendars.get(sid)
             gaps = window_gaps((b.start_ms for b in self.bucketiser.buckets_between(sid, vstart, t)), vstart, t,
                                st.data_gap_max_s * 1000, cal.open_predicate(t) if cal else None)
@@ -617,15 +688,16 @@ class Bot:
         return gate
 
     def _kql_bar(self, sid: int, slot_end_ms: int, gate: Optional[str]):
-        """(bar, live). With complete data, bars closed earlier on stale/failed data (up to REPAIR_SLOTS
+        """(bar, live). With complete data, bars closed earlier on stale/failed data (up to repair_slots
         back) are rebuilt first, so the feature history matches what research will see."""
         t = slot_end_ms
+        slot, back = self.slot_ms, self.repair_slots * self.slot_ms
         live = gate in (None, "kql_gap")      # a gap is real (exact) data; stale/error is not
         if live:
             lo = self._good_until.get(sid)
-            first = t - REPAIR_SLOTS * SLOT_MS if lo is None else max(lo + SLOT_MS, t - REPAIR_SLOTS * SLOT_MS)
+            first = t - back if lo is None else max(lo + slot, t - back)
             if first < t:
-                bars = [self.builder.close_slot(sid, _utc(e)) for e in range(first, t, SLOT_MS)]
+                bars = [self.builder.close_slot(sid, _utc(e)) for e in range(first, t, slot)]
                 self.engine.drop_from(sid, _utc(first))
                 self.engine.load(bars, live=True)
                 for b in bars:
@@ -669,7 +741,7 @@ class Bot:
         else:
             bar = self.builder.close_slot(sid, slot_dt)
             live = all(b.source == "live" for b in self.bucketiser.buckets_between(
-                sid, slot_end_ms - SLOT_MS, slot_end_ms))
+                sid, slot_end_ms - self.slot_ms, slot_end_ms))
         self.journal.record_bar(bar)
         row = self.engine.append(bar, live=live)
         if bar.has_data and _finite(bar.realised_vol_pct):
@@ -786,7 +858,7 @@ class Bot:
         return RiskContext(
             now_ms=now, quote=q, spread_median_48=None if not _finite(med) else med,
             last_data_ms=self.last_data_ms.get(sid), session_open=cal.is_open(now),
-            minutes_to_close=mtc, bars_since_open=cal.bars_since_open(now),
+            minutes_to_close=mtc, bars_since_open=cal.bars_since_open(now, self.slot_ms),
             open_positions=self.om.open_count() if self.om else 0, trades_today=j.trades_today(now),
             orders_last_min=j.orders_last_min(now), pnl_today_bps=j.pnl_today_bps(now),
             pnl_today_pct=pct, consec_losses=j.consec_losses(),

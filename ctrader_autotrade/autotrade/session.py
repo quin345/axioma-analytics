@@ -329,6 +329,8 @@ class Session:
             "balance": trader.balance,
             "broker_name": trader.brokerName if trader.HasField("brokerName") else None,
             "trader_login": trader.traderLogin if trader.HasField("traderLogin") else None,
+            "leverage_in_cents": trader.leverageInCents if trader.HasField("leverageInCents") else None,
+            "max_leverage": trader.maxLeverage if trader.HasField("maxLeverage") else None,
         }
 
     def _resolve_symbols(self, light_symbols) -> dict[int, str]:
@@ -369,6 +371,7 @@ class Session:
             name=name, symbol_id=sym.symbolId, digits=sym.digits, pip_position=sym.pipPosition,
             lot_size=opt("lotSize"), min_volume=opt("minVolume"), step_volume=opt("stepVolume"),
             max_volume=opt("maxVolume"), sl_distance=opt("slDistance"), distance_set_in=dist,
+            max_exposure=opt("maxExposure"),
             schedule=[(i.startSecond, i.endSecond) for i in sym.schedule],
             schedule_tz=sym.scheduleTimeZone if sym.HasField("scheduleTimeZone") else "UTC",
             holidays=holidays)

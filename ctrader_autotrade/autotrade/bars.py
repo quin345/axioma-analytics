@@ -1,4 +1,6 @@
-"""10 s buckets and 5-minute bars, built with the webapp/export_flat functions themselves.
+"""10 s buckets and bars (5- or 1-minute, autotrade/timeframe.py), built with the webapp/export_flat
+functions themselves. The text below describes the 5-minute default; with tf=TF_1M the slot is 1 minute,
+the VAP window 60 min and the export_flat functions get tf=export_flat.TIMEFRAMES["1m"].
 
 Bucketiser reproduces queries.series_range (webapp/queries.py:154-166): per 10 s bin the last
 book state (arg_max over timestamp) and events = count(). BarBuilder reproduces
@@ -16,14 +18,21 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from ._research import export_flat as _ef
+from .timeframe import TF_5M, BotTimeframe
 from .types import Bar, Bucket, DepthRow
 
 BUCKET_MS = _ef.BIN_SECONDS * 1000
-SLOT_MS = _ef.SLOT_MINUTES * 60 * 1000
-VAP_MINUTES = 240
+SLOT_MS = TF_5M.slot_ms              # 5-minute defaults; every function takes tf=
+VAP_MINUTES = TF_5M.vap_minutes
 PRICE_SCALE = 100000
-# 240 min of VAP + the slot being closed + one slot of slack for the open bucket / late closing.
-RETAIN_MS = (VAP_MINUTES + 2 * _ef.SLOT_MINUTES) * 60 * 1000
+
+
+def retain_ms(tf: BotTimeframe = TF_5M) -> int:
+    """VAP window + the slot being closed + one slot of slack for the open bucket / late closing."""
+    return tf.vap_ms + 2 * tf.slot_ms
+
+
+RETAIN_MS = retain_ms(TF_5M)
 NAN = float("nan")
 # Buckets built from every depth event: the bot's own feed or the KQL agg_dom table. "tick" (spot
 # changes) and "store" (reloaded own buckets) are approximate and count toward Bar.approx_share.
@@ -107,21 +116,22 @@ def _f(x) -> float:
 
 
 def slot_bar(symbol_id: int, slot_end: datetime, buckets: list[Bucket],
-             data_start: Optional[datetime] = None) -> Bar:
-    """Bar for the slot ending at `slot_end` from buckets covering [slot_end-240m, slot_end).
+             data_start: Optional[datetime] = None, tf: BotTimeframe = TF_5M) -> Bar:
+    """Bar for the slot ending at `slot_end` from buckets covering [slot_end - VAP window, slot_end).
 
     `data_start` is the earliest moment the data was read from (export_flat's `data_start`): the
     window share after it is the bar's vap_coverage. None = the window is complete (live bars).
     """
     end_ms = slot_end.timestamp() * 1000
-    start = slot_end - timedelta(minutes=_ef.SLOT_MINUTES)
+    start = slot_end - timedelta(minutes=tf.slot_minutes)
     raw = _rows(buckets)
     slot = _ef._scaled(_ef._between(raw, start, slot_end), PRICE_SCALE)
     m = _ef.slot_metrics(slot, [])
-    vstart = slot_end - timedelta(minutes=VAP_MINUTES)
+    vstart = slot_end - timedelta(minutes=tf.vap_minutes)
     vap_rows = _ef._between(raw, vstart, slot_end)
-    v = _ef.vap_metrics(vap_rows, slot_end, PRICE_SCALE, vstart if data_start is None else data_start)
-    window = [b for b in buckets if end_ms - VAP_MINUTES * 60_000 <= b.start_ms < end_ms]
+    v = _ef.vap_metrics(vap_rows, slot_end, PRICE_SCALE, vstart if data_start is None else data_start, tf.export)
+    p = f"vap_{tf.vap_minutes}m_"
+    window = [b for b in buckets if end_ms - tf.vap_ms <= b.start_ms < end_ms]
     approx = (sum(1 for b in window if b.source not in EXACT_SOURCES) / len(window)) if window else 0.0
     return Bar(
         symbol_id=symbol_id, slot_end=slot_end, has_data=bool(m["has_data"]), events=int(m["events"]),
@@ -129,47 +139,47 @@ def slot_bar(symbol_id: int, slot_end: datetime, buckets: list[Bucket],
         mid_close=_f(m["mid_close"]), spread_mean=_f(m["spread_mean"]),
         spread_median=_f(m["spread_median"]), rel_spread_mean=_f(m["rel_spread_mean"]),
         realised_vol_pct=_f(m["realised_vol_pct"]),
-        vap_240m_poc=_f(v["vap_240m_poc"]), vap_240m_va_low=_f(v["vap_240m_va_low"]),
-        vap_240m_va_high=_f(v["vap_240m_va_high"]),
-        vap_240m_volume_events=_f(v["vap_240m_volume_events"]), approx_share=approx,
-        vap_coverage=float(v["vap_240m_coverage"]))
+        vap_240m_poc=_f(v[p + "poc"]), vap_240m_va_low=_f(v[p + "va_low"]),
+        vap_240m_va_high=_f(v[p + "va_high"]),
+        vap_240m_volume_events=_f(v[p + "volume_events"]), approx_share=approx,
+        vap_coverage=float(v[p + "coverage"]))
 
 
 class BarBuilder:
-    def __init__(self, bucketiser: Bucketiser, data_start: Optional[datetime] = None):
+    def __init__(self, bucketiser: Bucketiser, data_start: Optional[datetime] = None, tf: BotTimeframe = TF_5M):
         self.bucketiser = bucketiser
         self.data_start = data_start  # warm-up replays only: start of the fetched history
+        self.tf = tf
 
     def close_slot(self, symbol_id: int, slot_end: datetime) -> Bar:
         if slot_end.tzinfo is None:
             slot_end = slot_end.replace(tzinfo=timezone.utc)
         end_ms = int(slot_end.timestamp() * 1000)
-        buckets = self.bucketiser.buckets_between(
-            symbol_id, end_ms - VAP_MINUTES * 60_000, end_ms)
-        return slot_bar(symbol_id, slot_end, buckets, self.data_start)
+        buckets = self.bucketiser.buckets_between(symbol_id, end_ms - self.tf.vap_ms, end_ms)
+        return slot_bar(symbol_id, slot_end, buckets, self.data_start, self.tf)
 
 
 def replay_bars(symbol_id: int, buckets: Iterable[Bucket], first_end_ms: int, last_end_ms: int,
-                data_start_ms: Optional[int] = None) -> list[Bar]:
+                data_start_ms: Optional[int] = None, tf: BotTimeframe = TF_5M) -> list[Bar]:
     """Warm-up bars for slot ends first_end_ms..last_end_ms, built as live operation would.
 
-    Buckets are replayed in time order and each 5 min slot is closed once replay time reaches its
-    slot_end, so every bar sees its whole [t-240m, t) window; the Bucketiser prunes only buckets
-    older than the retention (240 min + two slots) behind the replay position. Buckets before
+    Buckets are replayed in time order and each slot is closed once replay time reaches its
+    slot_end, so every bar sees its whole [t - VAP window, t) window; the Bucketiser prunes only buckets
+    older than the retention (VAP window + two slots) behind the replay position. Buckets before
     `first_end_ms` still enter the replay: they are the history of the first windows.
     """
-    bz = Bucketiser()
-    builder = BarBuilder(bz, None if data_start_ms is None else _utc_ms(data_start_ms))
+    bz = Bucketiser(retain_ms(tf))
+    builder = BarBuilder(bz, None if data_start_ms is None else _utc_ms(data_start_ms), tf)
     bars: list[Bar] = []
     nxt = first_end_ms
     for b in sorted(buckets, key=lambda x: x.start_ms):
         while nxt <= last_end_ms and nxt <= b.start_ms:
             bars.append(builder.close_slot(symbol_id, _utc_ms(nxt)))
-            nxt += SLOT_MS
+            nxt += tf.slot_ms
         bz.add_ordered(b)
     while nxt <= last_end_ms:
         bars.append(builder.close_slot(symbol_id, _utc_ms(nxt)))
-        nxt += SLOT_MS
+        nxt += tf.slot_ms
     return bars
 
 

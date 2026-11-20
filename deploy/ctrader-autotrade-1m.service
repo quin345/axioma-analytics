@@ -1,0 +1,52 @@
+# cTrader DEMO autotrader, 1-minute instance "ax1m" (poc_reversion_1h forward test), running next to
+# the 5-minute bot (ctrader-autotrade.service, instance "ax5m") on the same demo account. Modelled on
+# ctrader_autotrade/deploy/ctrader-autotrade.service. NOT installed by the repo: copy it to
+# /etc/systemd/system/ctrader-autotrade-1m.service (README "Second bot: the 1-minute instance").
+#
+#   systemctl start|stop|restart|status ctrader-autotrade-1m
+#   journalctl -u ctrader-autotrade-1m -f
+#
+# Same restart policy as the 5-minute unit: restarts after a crash or lost connection (non-zero
+# exit), but NOT after a clean stop, its KILL file (exit 0), a refusal (exit 2: live account, or the
+# NETTED-account guard) or SAFE mode such as an expired token (exit 3) - those need a human.
+#
+# Isolation: its own config (config.1m.toml), state dir (state/ax1m: journal, KILL/PAUSE, kill
+# baseline, instance lock) and log dir (logs/ax1m). The sandbox lets it write ONLY those two.
+
+[Unit]
+Description=cTrader demo autotrader, 1-minute instance ax1m (poc_reversion_1h forward test)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/axioma-analytics/ctrader_autotrade
+# "+": runs outside the sandbox, so the two writable dirs exist before ReadWritePaths binds them
+ExecStartPre=+/usr/bin/mkdir -p /root/axioma-analytics/ctrader_autotrade/state/ax1m /root/axioma-analytics/ctrader_autotrade/logs/ax1m
+ExecStart=/root/axioma-analytics/ctrader_autotrade/.venv/bin/autotrade --config /root/axioma-analytics/ctrader_autotrade/config.1m.toml run --mode demo --exec taker
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+Restart=on-failure
+RestartSec=15
+RestartPreventExitStatus=2 3
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+# Resource caps: this host also serves the production webapp (two bots: 2 x 512M / 2 x 50% at most).
+Nice=10
+MemoryMax=512M
+CPUQuota=50%
+
+# Sandboxing (in place of a dedicated user).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=-/root/axioma-analytics/ctrader_autotrade/state/ax1m -/root/axioma-analytics/ctrader_autotrade/logs/ax1m
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

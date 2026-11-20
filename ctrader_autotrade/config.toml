@@ -2,9 +2,14 @@
 symbols = ["XAUUSD", "BTCUSD"]
 host = "demo.ctraderapi.com"
 port = 5035
-label = "axq-poc4h-v1"
 state_dir = "state"
 log_dir = "logs"
+
+[instance]                 # which bot this is (DESIGN.md section 3, "Instances")
+name = "ax5m"              # the default instance: cTrader label on every order, clientOrderId prefix; it keeps
+                           # state/ and logs/ and also owns positions labelled "axq-poc4h-v1" (its pre-instance label)
+timeframe = "5m"           # 5-minute bars, 240 min POC window (config.1m.toml: the 1-minute instance "ax1m")
+claim_unlabelled = false   # true: also adopt/flatten positions WITHOUT a label (manual ones too); default instance only
 
 [aliases]
 XAUUSD = ["XAUUSD.pro", "GOLD"]

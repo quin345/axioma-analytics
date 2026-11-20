@@ -246,8 +246,9 @@ def test_demo_sends_orders_through_the_session_once_gate_passed(h):
     orders = x.fake.sent_of(oa.ProtoOANewOrderReq)
     assert len(orders) == 2
     o = [m for m in orders if m.symbolId == 1][0]
-    assert o.label == "axq-poc4h-v1" and o.tradeSide == model.SELL and o.relativeStopLoss > 0
-    assert o.clientOrderId.startswith("XAUUSD-") and o.comment.startswith("1-")
+    assert o.label == "ax5m" and o.tradeSide == model.SELL and o.relativeStopLoss > 0
+    assert o.clientOrderId == f"ax5m-XAUUSD-{(B0 + 600_000) // 1000}-E"
+    assert o.comment.startswith("ax5m poc_reversion_4h z=-") and o.comment.endswith(f" sig=1-{(B0 + 600_000) // 1000}")
     x.bot.shutdown("test", flatten=False)
 
 

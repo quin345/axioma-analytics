@@ -55,6 +55,7 @@ class SymbolSpec:
     schedule_tz: str
     holidays: list
     quote_asset_id: Optional[int] = None  # from the symbols list; None = unknown (kill switch P&L)
+    max_exposure: int = 0                 # ProtoOASymbol.maxExposure (volume units); 0 = unknown/none
 
 
 @dataclass(frozen=True)
@@ -90,7 +91,10 @@ class Bucket:
 
 @dataclass(frozen=True)
 class Bar:
-    """5-minute bar, floats in display units (same columns as research metrics_5m)."""
+    """One bar of the instance timeframe (5 or 1 minute), floats in display units (metrics_5m/_1m columns).
+
+    The vap_240m_* fields hold the instance's POC window (240 min at 5m, 60 min at 1m; the names are
+    the original 5-minute ones, kept so the journal and tests stay unchanged)."""
     symbol_id: int
     slot_end: datetime  # UTC
     has_data: bool
@@ -115,7 +119,11 @@ class Bar:
 
 @dataclass(frozen=True)
 class FeatureRow:
-    """Features for one symbol and slot, as computed by the FeatureEngine."""
+    """Features for one symbol and slot, as computed by the FeatureEngine.
+
+    poc_dist_240 is poc_dist_<POC window> of the instance timeframe (poc_dist_60 at 1m); sig_poc is
+    hyp_poc_reversion_4h / _1h, sig_range hyp_range_reversal_1h / _12m; spread_median_48 is the median
+    over one z-window (48 bars at 5m, 60 at 1m)."""
     symbol_id: int
     slot_end: datetime  # UTC
     poc_dist_240: float
@@ -143,6 +151,7 @@ class Intent:
     stop_rel: Optional[int]
     reason: str
     signal_id: str
+    z: Optional[float] = None   # the signal's z_poc (goes into the order comment)
 
 
 @dataclass(frozen=True)

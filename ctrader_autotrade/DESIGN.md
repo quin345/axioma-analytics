@@ -13,6 +13,13 @@ against the research holdout. Orders, spreads and the stale-data guard use its o
 
 **Expected P&L is negative.** This is a forward test of the signal, not a money-maker.
 
+A second **instance** of the same code, `ax1m`, trades the 1-minute screen's analog on the same demo
+account (section 3, "Instances"; `config.1m.toml`): z = rolling z over 60 one-minute bars of
+`poc_reversion_1h` (= -poc_dist_60), |z| > 1, hold one 1-minute bar, half size when `events_z > 2`,
+`range_reversal_12m` journalled only. Research holdout (docs/findings-1m-screen.md): IC +0.138, taker
+gross -0.16 bp, **net -0.84 bp per trade**: expected to lose; deployed knowingly as a forward test.
+Everything below describes the 5-minute default; the 1-minute values are in section 3 and section 4.
+
 | Hypothesis | Role in the bot | Why |
 |---|---|---|
 | #2 `poc_reversion_4h` (holdout IC +0.16) | Direction: enter when the rolling z of `-poc_dist_240` exceeds 1 in absolute value; hold 1 bar | The only directional pick. Taker economics on holdout: +0.39 bp gross, -0.31 bp net (0.70 bp round-trip spread). |
@@ -112,8 +119,57 @@ The host is `demo.ctraderapi.com:5035` only.
 `IDLE -> PENDING_NEW -> WORKING -> (PARTIAL) -> OPEN -> EXIT_PENDING -> CLOSED -> IDLE`,
 plus `RECONCILING` (no reply within 5 s) and `CANCEL_PENDING`.
 
-Orders carry `clientOrderId = {sym}-{slot_end}-{leg}`, `label = axq-poc4h-v1` and `comment = signal_id`.
-The bot manages only orders with its own label. A restart never resends an order and never doubles exposure.
+Orders carry `clientOrderId = {instance}-{sym}-{slot start s}-{leg}`, `label = {instance}` and
+`comment = "{instance} {strategy} z={z_poc} sig={signal_id}"`. The bot manages only orders and positions with
+a label its instance owns. A restart never resends an order and never doubles exposure.
+
+### Instances (2026-11-20)
+
+`[instance]` in the config: `name` (default `ax5m`), `timeframe` (`5m` | `1m`), `legacy_labels`,
+`claim_unlabelled`, `netted_sole`. One process per instance, all on the same code.
+
+| | `ax5m` (default, `config.toml`) | `ax1m` (`config.1m.toml`) |
+|---|---|---|
+| slot / POC window / z-window | 5 min / 240 min / 48 bars (min_periods 12) | 1 min / 60 min / 60 bars (min_periods 15) |
+| signal (traded / journalled) | `poc_reversion_4h` / `range_reversal_1h` | `poc_reversion_1h` / `range_reversal_12m` |
+| history bars, warm-up fetch | 150, 16.5 h | 120, 3 h |
+| state, logs | `state/`, `logs/` (as before instances) | `state/ax1m/`, `logs/ax1m/` |
+| labels owned | `ax5m`, `axq-poc4h-v1` (its pre-instance label) | `ax1m` |
+
+- **Timeframe.** `autotrade/timeframe.py` mirrors `research/pipeline/timeframe.py` (`TF_5M`, `TF_1M`) and
+  `webapp/export_flat.TIMEFRAMES`; `tests/test_timeframe.py` pins the equality and the unchanged 5-minute values.
+  Everything slot-derived reads it: bars (`slot_bar`, `BarBuilder`, `replay_bars`, bucket retention), features
+  (research `clean_metrics` / `build_features` / `add_hypothesis_signals` with `tf=`, the POC column and
+  hypothesis keys, `_rolling_z` window, the spread median over one z-window), the stop's per-slot sigma
+  (x sqrt(30) at 5m, x sqrt(6) at 1m), exit times, the HOLD extension, clientOrderId slot, the slot timer,
+  the KQL windows, the repair horizon (one z-window), the bars-since-open gate (min_periods) and the report
+  (IC block 4 h / 1 h, research references). Per-bar counts that research keeps in bars stay in bars
+  (`range_pos_12`, the 12-bar vol median of the stop).
+- **Separate state.** Each instance's state dir holds its own journal, KILL / PAUSE / PARITY_OK, kill
+  baseline and status, token file, so all risk counters (daily loss, trades today, consecutive losses,
+  rejects, order rate, kill switch) are per instance. A non-default instance must not use `state/` or
+  `logs/` (config error). `state/.../INSTANCE.json` records the owner; another instance or timeframe on the
+  same dir is refused; `run` holds `instance.lock`.
+- **Labels and ownership.** Every `ProtoOANewOrderReq` (entries with their server-side `relativeStopLoss`;
+  netting-account exits) carries `label` = the instance name and the comment above; the position inherits
+  them (`ProtoOAPosition.tradeData.label/comment`; verified read-only on account 48664595: the 5m bot's open
+  position shows `label='axq-poc4h-v1' comment='41-1795176300'`, and its stop and closing orders carry the
+  label too). `ProtoOAClosePositionReq` / `ProtoOAAmendPositionSLTPReq` / `ProtoOACancelOrderReq` have no
+  label: they name an own position/order id. `ProtoOADeal` has no label: deals belong to their position.
+  Execution events reach every connection on the account, so each instance matches events by its own
+  clientOrderId (prefixed: the two bots share slot boundaries), order id, position id, or an explicit own
+  label, never by "no label". Reconcile, adoption, flatten (KILL, shutdown, kill switch, `autotrade
+  flatten`), "unrealised (own positions)" and the report consider only labels the instance owns.
+- **Unlabelled positions.** Every order the bot ever sent had a label (`axq-poc4h-v1` before instances), so an
+  unlabelled position is manual or another program's (the account had one in the 24 h before this change).
+  They are left alone by default. `claim_unlabelled = true` (allowed on the default instance only, never on
+  `ax1m`) makes `ax5m` adopt and time-exit them.
+- **Account type.** Instances on the same symbols stay independent only on a **hedging** account (each order
+  opens its own position). Account 48664595 is `HEDGED` (`autotrade probe`, 2026-11-20). On a `NETTED` account
+  the start-up reconcile refuses (exit 2): any instance when a position/order it does not own sits on its
+  symbols; a non-default instance always, unless `netted_sole = true` asserts it has the account to itself
+  (its own demo account via `--env`). On `HEDGED`, a cheap exposure check logs open volume per symbol and
+  warns (`exposure_warning`) if two more orders could pass `maxExposure` / `maxVolume`.
 
 ## 4. Feature parity and warm-up
 
@@ -149,7 +205,7 @@ Tests prove the query semantics equal `Bucketiser` on recorded and synthetic row
   The buckets are exact (`source "kql"`), so they do not count toward `approx_share`, and the warm-up
   bars count as live for `events_z`. A restart can trade at the next slot close. There is no tick fill and
   no 4-hour wait. If the query fails, every later slot retries the history fetch first.
-- **Slot close.** At `slot_end + data.grace_s` (3 s) the bot fetches `[last fetch − 5 min, t)` for all its
+- **Slot close.** At `slot_end + data.grace_s` (3 s) the bot fetches `[last fetch − one slot, t)` for all its
   streams. A stream is *complete* when the watermark is at or after `t`, or, while the bot's own spot
   feed is up, when the watermark has reached the latest spot timestamp the bot has seen (a quiet
   market). Until every stream is complete the bot retries every `retry_s` (2 s), at most `retries` (3)
@@ -166,6 +222,20 @@ Tests prove the query semantics equal `Bucketiser` on recorded and synthetic row
 
   Measured on the live feed: in an open session, depth events arrive in every 10 s bucket. The only
   in-session gaps found in 3 days were collector outages.
+- **1-minute instance (`config.1m.toml`).** Same mechanism, retuned for a 60 s slot:
+  `grace_s = 2`, `retry_s = 1`, `retries = 4`, `deadline_s = 6`, `timeout_s = 5`, `freshness_s = 5`,
+  `gap_max_s = 30`. Budget per slot (measured 2026-11-20): the slot-close query (two minutes of buckets) takes
+  ~0.14 s warm (0.6 s for the first, cold one), the 1-minute bar ~4 ms and the research features ~56 ms per
+  symbol, so the decision and order go out at about slot_end + 2.3 s, at worst at slot_end + 6 s. The time-exit
+  backstop is slot_end + grace_s (2) + 10 s = 12 s, after the latest decision and far before the next slot
+  (60 s); config validation keeps `deadline_s < grace_s + 10`, `grace_s + 10 < slot / 2`,
+  `freshness_s < slot / 2`, `data.grace_s >= grace_s` and `limit_ttl_s < 2 slots`. Freshness 5 s because a
+  15 s lag would be a quarter of the bar whose close is the signal. Gap 30 s = more than three consecutive
+  missing 10 s buckets in the 60 min window (session-aware as above): on account 48664595 from 05:30 to 12:10
+  UTC on 2026-11-20 not one bucket was missing on either stream, so 30 s is far from normal yet tolerates a
+  single collector hiccup; the 5-minute 60 s would be a whole missing bar. Load: one query per minute for
+  `ax1m` plus one per 5 minutes for `ax5m`, each a two-slot range (the 7-day watermark scan dominates).
+  The warm-up is one query of 3 h (120 bars + 60 min).
 - **What a gate does.** A gated bar gives no entry and no rollover (reason = the gate in `signals`).
   An open position is time-exited at the slot close, as for any bar without a trusted signal.
   `must_flatten` (session close, disconnect, KILL) runs on the 5 s risk tick from spots and the
@@ -277,6 +347,8 @@ Every signal journals `approx_share` (0 with `kql`).
 - Own process, connection, venv (`.venv`) and files. It must never touch the depth collector
   (`/root/data-mining-project/collector`). With `source = "kql"` it reads the collector's output in KQL,
   read-only, and needs those collector units running for its own account and symbols.
+- One systemd unit per instance: `ctrader-autotrade.service` (`ax5m`) and `ctrader-autotrade-1m.service`
+  (`ax1m`, `/root/axioma-analytics/deploy/`, writes only `state/ax1m` and `logs/ax1m`).
 - systemd unit `ctrader-autotrade.service` (installed at `/etc/systemd/system`). It runs as root with
   sandboxing (`ProtectSystem=strict`, write access only to `state/` and `logs/`), `Restart=on-failure`,
   `MemoryMax=512M` and `CPUQuota=50%`. The caps are there because this host serves the production
@@ -302,3 +374,7 @@ Every signal journals `approx_share` (0 with `kql`).
 - Real orders: taker (market) by default; maker simulated as a shadow on every signal.
 - No `refresh_token` yet: on token expiry the bot enters SAFE mode and exits (add one to `.env` to enable refresh).
 - Host: this server, with the resource caps in section 6; dry-run first.
+- 2026-11-20: second instance `ax1m` (1-minute bars) on the same hedging demo account; the 5-minute bot becomes
+  instance `ax5m` and labels new orders `ax5m` (it still owns `axq-poc4h-v1`). Unlabelled positions are not
+  claimed by default. The 1-minute risk limits scale with the bar count (`max_trades_day = 1000`,
+  `daily_loss_bps = 1000`); the account-currency kill limits are the 5-minute ones.

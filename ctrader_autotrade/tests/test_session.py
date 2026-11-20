@@ -59,7 +59,8 @@ def test_handshake_happy_path_builds_specs(env):
     assert sp.schedule == [(0, 3600), (7200, 86400)] and sp.schedule_tz == "Europe/London"
     assert sp.holidays[0]["date_days"] == 20000
     assert trader == {"account_type": "HEDGED", "money_digits": 2, "deposit_asset_id": 15,
-                      "balance": 1_000_000, "broker_name": None, "trader_login": None}
+                      "balance": 1_000_000, "broker_name": None, "trader_login": None,
+                      "leverage_in_cents": None, "max_leverage": None}
     assert fake.sent_of(oa.ProtoOASymbolByIdReq)[0].symbolId == [1, 2]
     assert fake.sent_of(oa.ProtoOAAccountAuthReq)[0].ctidTraderAccountId == ACCOUNT_ID
 

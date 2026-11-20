@@ -48,11 +48,12 @@ def _import_research():
         features = importlib.import_module("research.pipeline.features")
         hypotheses = importlib.import_module("research.pipeline.hypotheses")
         screen = importlib.import_module("research.pipeline.screen")
+        timeframe = importlib.import_module("research.pipeline.timeframe")
     finally:
         if added:
             sys.path.remove(str(REPO))
-    return clean, features, hypotheses, screen
+    return clean, features, hypotheses, screen, timeframe
 
 
 analytics, export_flat = _import_webapp()
-clean, features, hypotheses, screen = _import_research()
+clean, features, hypotheses, screen, timeframe = _import_research()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,12 @@ from typing import Any, Mapping, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_HOST = "demo.ctraderapi.com"
+# The original 5-minute bot. It keeps state/ and logs/ and owns the label its orders carried before
+# instances existed, so its journal history and any open position stay its own (DESIGN.md section 3).
+DEFAULT_INSTANCE = "ax5m"
+PRE_INSTANCE_LABEL = "axq-poc4h-v1"
+DEFAULT_STATE_DIR, DEFAULT_LOG_DIR = "state", "logs"
+_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,16}$")   # label <= 100, clientOrderId <= 50 chars
 
 
 class ConfigError(Exception):
@@ -135,13 +142,52 @@ class Settings:
     data_timeout_s: float = 10.0     # per-query timeout
     data_freshness_s: float = 15.0   # data up to slot_end - this is still tradable when KQL lags
     data_gap_max_s: float = 60.0     # longer stretch without a bucket in an open session = gap (no entries)
-    label: str = "axq-poc4h-v1"
+    # [instance] (keys get an instance_ prefix): which bot this is. The name is the cTrader `label` of every
+    # order the instance sends (so of its positions) and the prefix of its clientOrderIds.
+    instance_name: str = DEFAULT_INSTANCE
+    instance_timeframe: str = "5m"   # "5m" | "1m" (autotrade/timeframe.py)
+    # extra labels whose positions/orders also belong to this instance; None = the pre-instance label
+    # "axq-poc4h-v1" for the default instance, none for any other
+    instance_legacy_labels: Optional[list] = None
+    instance_claim_unlabelled: bool = False   # adopt/flatten positions WITHOUT a label (default instance only)
+    instance_netted_sole: bool = False   # on a NETTED account: the operator asserts no other bot trades it
     grace_s: int = 2
     warmup_hours: int = 9
     state_dir: str = "state"
     log_dir: str = "logs"
     allow_live_host: bool = False
     secrets: Optional[Secrets] = field(default=None, repr=False)
+
+    @property
+    def is_default_instance(self) -> bool:
+        return self.instance_name == DEFAULT_INSTANCE
+
+    @property
+    def order_label(self) -> str:
+        """The cTrader label on every order of this instance."""
+        return self.instance_name
+
+    @property
+    def legacy_labels(self) -> tuple:
+        if self.instance_legacy_labels is None:
+            return (PRE_INSTANCE_LABEL,) if self.is_default_instance else ()
+        return tuple(self.instance_legacy_labels)
+
+    @property
+    def own_labels(self) -> frozenset:
+        """Labels of positions/orders that are this instance's (never another instance's)."""
+        return frozenset((self.order_label, *self.legacy_labels))
+
+    def owns_label(self, label: Optional[str]) -> bool:
+        """Ownership on reconcile/flatten: an own label, or no label when claim_unlabelled is on."""
+        if not label:
+            return bool(self.instance_claim_unlabelled)
+        return label in self.own_labels
+
+    @property
+    def coid_prefix(self) -> str:
+        """clientOrderIds are "<instance>-<symbol>-<slot start s>-<leg>": unique across instances."""
+        return f"{self.instance_name}-"
 
     def state_path(self) -> Path:
         p = Path(self.state_dir)
@@ -157,11 +203,11 @@ class Settings:
 
 
 def _flatten(d: Mapping[str, Any]) -> dict[str, Any]:
-    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict; [kill] and [data] keys get a
-    kill_ / data_ prefix."""
+    """Flatten one level of toml tables ([risk] etc.); 'aliases' stays a dict; [kill], [data] and [instance]
+    keys get a kill_ / data_ / instance_ prefix."""
     out: dict[str, Any] = {}
     for k, v in d.items():
-        if isinstance(v, dict) and k in ("kill", "data"):
+        if isinstance(v, dict) and k in ("kill", "data", "instance"):
             out.update({f"{k}_{kk}": vv for kk, vv in v.items()})
         elif isinstance(v, dict) and k != "aliases":
             out.update(v)
@@ -177,8 +223,37 @@ def _num(name: str, v: Any, positive: bool = False) -> None:
         raise ConfigError(f"{name} must be {'> 0' if positive else '>= 0'} (a positive loss/profit size), got {v!r}")
 
 
+def _validate_instance(s: Settings) -> None:
+    from . import timeframe
+    if not isinstance(s.instance_name, str) or not _NAME_RE.match(s.instance_name):
+        raise ConfigError(f"instance.name must be 1-16 characters of A-Z a-z 0-9 _ . -, got {s.instance_name!r}")
+    try:
+        timeframe.get(s.instance_timeframe)
+    except ValueError as exc:
+        raise ConfigError(f"instance.timeframe: {exc}") from None
+    if s.instance_legacy_labels is not None and (
+            not isinstance(s.instance_legacy_labels, list)
+            or not all(isinstance(x, str) and x for x in s.instance_legacy_labels)):
+        raise ConfigError("instance.legacy_labels must be a list of non-empty strings")
+    for name in ("claim_unlabelled", "netted_sole"):
+        if not isinstance(getattr(s, f"instance_{name}"), bool):
+            raise ConfigError(f"instance.{name} must be true or false")
+    if not s.is_default_instance:
+        # never let a second instance take the original bot's positions, journal or control files
+        taken = {DEFAULT_INSTANCE, PRE_INSTANCE_LABEL} & set(s.legacy_labels)
+        if taken:
+            raise ConfigError(f"instance {s.instance_name!r}: legacy_labels {sorted(taken)} belong to the "
+                              f"default instance {DEFAULT_INSTANCE!r}")
+        if s.instance_claim_unlabelled:
+            raise ConfigError("instance.claim_unlabelled is allowed for the default instance only")
+        if s.state_path() == (ROOT / DEFAULT_STATE_DIR) or s.log_path() == (ROOT / DEFAULT_LOG_DIR):
+            raise ConfigError(f"instance {s.instance_name!r} needs its own state_dir and log_dir "
+                              f"(e.g. state/{s.instance_name} and logs/{s.instance_name})")
+
+
 def validate(s: Settings) -> None:
-    """Reject bad daily-reset, kill-switch and data-source settings at start-up."""
+    """Reject bad instance, daily-reset, kill-switch and data-source settings at start-up."""
+    _validate_instance(s)
     from .resetday import parse_reset
     try:
         parse_reset(s.daily_reset, s.daily_reset_tz)
@@ -209,11 +284,23 @@ def validate(s: Settings) -> None:
         raise ConfigError(f"data.retries must be an integer >= 0, got {s.data_retries!r}")
     if s.data_grace_s >= s.data_deadline_s:
         raise ConfigError("data.grace_s must be below data.deadline_s")
+    from . import timeframe
+    slot_s = timeframe.of(s).slot_s
+    if s.data_source == "kql" and s.data_grace_s < s.grace_s:
+        # the strategy's time exit is due at slot_end + grace_s: a decision before it would see "not_due"
+        raise ConfigError(f"data.grace_s ({s.data_grace_s!r}) must be >= strategy grace_s ({s.grace_s!r})")
+    if s.data_freshness_s >= slot_s / 2:
+        raise ConfigError(f"data.freshness_s must be below half a {slot_s} s slot, got {s.data_freshness_s!r}")
     from .execution import EXIT_BACKSTOP_S
     if s.data_deadline_s >= s.grace_s + EXIT_BACKSTOP_S:
         # past it the order manager has already time-exited a position the strategy might roll over
         raise ConfigError(f"data.deadline_s must be below strategy grace_s + {EXIT_BACKSTOP_S:g} "
                           f"(the order manager's exit backstop), got {s.data_deadline_s!r}")
+    if s.grace_s + EXIT_BACKSTOP_S >= slot_s / 2:
+        # the backstop must fire well before the next slot closes
+        raise ConfigError(f"grace_s + {EXIT_BACKSTOP_S:g} s backstop must be below half a {slot_s} s slot")
+    if s.limit_ttl_s >= 2 * slot_s:
+        raise ConfigError(f"limit_ttl_s must be below two {slot_s} s slots, got {s.limit_ttl_s!r}")
 
 
 def load(env_path=None, toml_path=None, overrides: Optional[Mapping[str, Any]] = None,
@@ -235,6 +322,9 @@ def load(env_path=None, toml_path=None, overrides: Optional[Mapping[str, Any]] =
         with open(toml_path, "rb") as fh:
             data = _flatten(tomllib.load(fh))
     data.update(_flatten(dict(overrides or {})))
+    if "label" in data:
+        raise ConfigError("'label' is replaced by [instance] name (the order label; the default instance "
+                          f"{DEFAULT_INSTANCE!r} still owns its pre-instance label {PRE_INSTANCE_LABEL!r})")
     if "reject_breaker" in data:  # e.g. [3, 10] = 3 rejects in 10 min
         data["reject_breaker_count"], data["reject_breaker_window_min"] = data.pop("reject_breaker")
     known = {f.name for f in dataclasses.fields(Settings)} - {"secrets"}

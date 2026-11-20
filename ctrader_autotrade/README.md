@@ -6,6 +6,11 @@ research signal (expected P&L is negative). Design and decisions: [DESIGN.md](DE
 Status: built and running on the demo account as the `ctrader-autotrade` systemd unit (see
 Deployment). Its bars come from the Fabric KQL table `dom_ctrader.agg_dom` by default (see Data source).
 
+The same code runs as several **instances** (see "Instances" below): `ax5m`, the original 5-minute bot
+(`config.toml`), and `ax1m`, the 1-minute screen's `poc_reversion_1h` (`config.1m.toml`, unit
+`deploy/ctrader-autotrade-1m.service` at the repo root). Each has its own state, journal, logs, kill switch
+and order label on the same demo account.
+
 ## Setup
 
     python3 -m venv .venv
@@ -33,15 +38,16 @@ Run from this directory (`state/` and `logs/` are relative to it, see `config.to
 
 | Command | What it does |
 |---|---|
-| `autotrade probe` | Connects to the demo host, handshakes and prints (never any secret) the account id, isLive, broker, account type, money digits, balance, each resolved symbol (digits, lot/min/step/max volume, slDistance and distanceSetIn, schedule summary, timezone) and one spot per symbol with its spread. Subscribes spots only, never depth. Places no orders. Disconnects. |
+| `autotrade probe` | Connects to the demo host, handshakes and prints (never any secret) the instance, the account id, isLive, broker, account type (HEDGED = hedging / NETTED = netting, with what it means for two instances), leverage, money digits, balance, each resolved symbol (digits, lot/min/step/max volume, slDistance and distanceSetIn, schedule summary, timezone), the open positions/orders with their label and owner (this instance / other), the account's orders of the last 24 h by label, and one spot per symbol with its spread and the notional/margin of one and of two instances' orders. Read-only requests only (Reconcile, OrderList); subscribes spots, never depth. Places no orders. Disconnects. |
 | `autotrade run --mode dry-run` | Full bot with the simulated broker: nothing is ever sent to the order API. Journals bars, signals, shadows and simulated trades. |
 | `autotrade run --mode demo [--exec taker\|maker]` | Same, with real orders on the demo account (taker by default, as in DESIGN.md). Refuses to start trading unless the session is a verified demo account. |
 | `autotrade run ... --hours N` | Stop after N hours (flattens, flushes, exits 0). For bounded test runs. |
-| `autotrade flatten` | Connects (demo), cancels own resting orders (label `axq-poc4h-v1`), closes own positions. Foreign orders and positions are never touched. |
+| `autotrade flatten` | Connects (demo), cancels the instance's own resting orders and closes its own positions (label = instance name; for `ax5m` also its pre-instance label `axq-poc4h-v1`). Other instances' and foreign orders and positions are never touched. |
 | `autotrade parity` | P4 drift check: runs the research feature code over the bot's own `bars` table and compares with the features journalled in `signals`. |
 | `autotrade report [--since-hours N]` | Forward-test report from the journal (see below), including the kill-switch numbers. |
+| `autotrade trades-report (--date YYYY-MM-DD \| --last-day \| --backfill \| --today) [--out-dir DIR] [--stdout]` | Daily executed-trades report of this instance, one JSON file per UTC day (see "Daily trades report"). Reads the journal read-only. `--stdout` prints a text rendering and writes nothing. |
 | `autotrade kill-reset` | Re-arms the P&L kill switch: writes a new baseline at now. Does not remove `state/KILL` or `state/PAUSE` (it prints the command). |
-| `autotrade kql-check [--minutes 30] [--symbol-ids 41,10026] [--verify]` | Read-only. Runs the bot's KQL bucket query for its own streams and prints buckets, events, watermark lag and gaps. `--verify` recomputes the buckets from the raw rows and compares them. Does not connect to cTrader. Symbol ids default to those in the journal's recent bars. |
+| `autotrade kql-check [--minutes 30] [--symbol-ids 41,10026] [--verify]` | Read-only. Prints the instance's data gates, times the slot-close query (two slots of buckets) three times, runs the bot's KQL bucket query for its own streams and prints buckets, events, watermark lag and gaps. `--verify` recomputes the buckets from the raw rows and compares them. Does not connect to cTrader. Symbol ids default to those in the journal's recent bars. |
 
 Exit codes: 0 normal (including KILL), 1 error or timeout, 2 refused (live account, wrong host,
 account not in the token's list), 3 SAFE mode (token expired without a refresh token).
@@ -64,7 +70,53 @@ account not in the token's list), 3 SAFE mode (token expired without a refresh t
    (Spearman(poc_dist_240) >= 0.98, side agreement >= 97%). Without it the bot waits for four hours
    of fully live history after every restart.
 
-## Control files (in `state/`)
+## Instances
+
+    [instance]
+    name = "ax5m"            # cTrader label on every order, clientOrderId prefix; 1-16 chars [A-Za-z0-9_.-]
+    timeframe = "5m"         # "5m" or "1m" (autotrade/timeframe.py)
+    claim_unlabelled = false # default instance only: also adopt/flatten positions WITHOUT a label
+
+| | `ax5m` (default) | `ax1m` |
+|---|---|---|
+| config | `config.toml` (also the default when `[instance]` is absent) | `config.1m.toml` |
+| bars | 5 minutes, POC window 240 min, z over 48 bars | 1 minute, POC window 60 min, z over 60 bars |
+| signal | `poc_reversion_4h` (journals `range_reversal_1h`) | `poc_reversion_1h` (journals `range_reversal_12m`) |
+| state / logs | `state/`, `logs/` (unchanged) | `state/ax1m/`, `logs/ax1m/` |
+| owns labels | `ax5m`, `axq-poc4h-v1` (its orders before instances) | `ax1m` |
+| unit | `ctrader-autotrade` | `ctrader-autotrade-1m` |
+
+What tells the two apart in cTrader:
+
+- **label** (`ProtoOANewOrderReq.label`, shown on the position as `tradeData.label`, and on its protective stop
+  and closing orders) = instance name;
+- **comment** = `<instance> <strategy> z=<z_poc> sig=<symbolId>-<slot end s>`, e.g.
+  `ax1m poc_reversion_1h z=-1.37 sig=41-1795176360` (exit orders on a netting account: `ax1m exit sig=...`);
+- **clientOrderId** = `<instance>-<SYMBOL>-<slot start s>-E|X`, e.g. `ax1m-XAUUSD-1795176300-E`.
+
+Deals (`ProtoOADeal`) have no label; they belong to the position (`positionId`) and so to its label.
+Closes (`ProtoOAClosePositionReq`) carry no label either: they name the instance's own position id.
+
+Each instance reconciles, adopts, flattens (KILL, shutdown, kill switch, `autotrade flatten`) and counts
+("unrealised (own positions)") only positions/orders with a label it owns. Positions without a label (manual
+trades: the account had one in the last 24 h) are left alone by both unless `claim_unlabelled = true` on the
+default instance. The account must be **hedging** (`autotrade probe`: `account type: HEDGED`); on a netting
+account the 1-minute instance refuses to start (exit 2) unless it has its own account (see below).
+
+Run the second bot:
+
+    .venv/bin/autotrade --config config.1m.toml probe
+    .venv/bin/autotrade --config config.1m.toml kql-check --symbol-ids 41,10026 --minutes 60 --verify
+    .venv/bin/autotrade --config config.1m.toml run --mode dry-run --hours 2     # optional
+    systemctl start ctrader-autotrade-1m                                        # demo orders (Deployment)
+
+Every command takes `--config config.1m.toml` to act on the 1-minute instance (`report`, `parity`, `flatten`,
+`kill-reset`, `kql-check`); without it, it acts on `ax5m`. The state dir holds `INSTANCE.json`; a run of another
+instance (or timeframe) on it is refused, and `run` holds `state/.../instance.lock` (one process per instance).
+On its own demo account: `--env /path/to/.env.ax1m` (its `ctidTraderAccountId` / `access_token`) and
+`[instance] netted_sole = true` if that account is netting.
+
+## Control files (in `state/`, `state/ax1m/` for the 1-minute instance)
 
 - `state/KILL`: cancels own orders, flattens, exits the process (code 0). Checked every 5 s and at start-up
   (a file present at start flattens and exits at once). Written by the kill switch too. Remove
@@ -170,7 +222,11 @@ the service to apply a change.
 
 ## What the report means
 
-`autotrade report` prints plain-text sections; the research numbers are the holdout references from DESIGN.md.
+`autotrade report` prints plain-text sections for ONE instance (`--config config.1m.toml report` for `ax1m`): its
+own journal, so its own signals, orders and trades. The header names the instance, its timeframe, strategy and
+labels, and repeats that the expected P&L is negative (research taker net: -0.31 bp/trade at 5m, -0.84 at 1m).
+The research numbers are the holdout references from DESIGN.md (5m) and docs/findings-1m-screen.md (1m: IC
++0.138, taker gross -0.16 / net -0.84 bp, IC per 1 h block, no maker reference). The text below describes 5m.
 
 - **Forward IC**: rank IC per 4 h block of `sig_poc` (= -poc_dist_240) against the next 5 minute log mid
   return, pooled over symbols, with the same statistic as `research/pipeline/screen.py`
@@ -193,7 +249,75 @@ the service to apply a change.
   `daily_max_loss`, the next daily reset and whether KILL / PAUSE exist. Unrealised comes from the running bot's
   `state/kill_status.json` (n/a when it is not running).
 
+## Daily trades report
+
+`autotrade [--config config.1m.toml] trades-report ...` turns ONE instance's journal into one report per UTC day
+(`autotrade/daily.py`), for the web page `/analytics/` (login-gated, `webapp/trade_reports.py`). It reads the
+journal read-only and writes only into `--out-dir` (default `reports/<instance name>/` here; the web app reads
+`ANALYTICS_DIR`, default the same `reports/`):
+
+    reports/ax5m/2026-11-19.json   one day (schema_version 1, below)
+    reports/ax5m/index.json        instance meta + research expectation + kill switch + one headline row per day
+    reports/ax5m/latest.json       copy of the newest COMPLETED day
+
+Files are written to a temp file and renamed (atomic, idempotent: re-running a day replaces it), mode 0644,
+directories 0755, so the web user can read them. The `reports/` content is data, not code.
+
+Day selection: `--date D` (any UTC day), `--last-day` (yesterday, what cron runs), `--today` (the day so far,
+`meta.partial = true`; replaced by the full file at the next `--last-day`), `--backfill` (every UTC day up to
+yesterday on which a run was active or a trade closed). A day is reported when a run overlapped it or it had
+trades; `--date` / `--last-day` also write a zero-trade report for a day on which the bot did not run, as long as it is
+not before the instance's first run (so cron leaves no holes); nothing is written before the first run.
+
+Rules: only trades of runs with mode DEMO count (dry_run trades are only counted in
+`summary.excluded_dry_run_trades`); a trade belongs to the UTC day of its `exit_ms` (a trade opened before midnight
+shows on the next day); win = net P&L > 0 (else bp); bp = `pnl_bps_price`, falling back to `pnl_bps_mid`;
+the money columns (`pnl_net`, `gross`, `commission`, `swap`) are already scaled by `10**money_digits` when the bot
+journals a trade, so they are shown as stored and `money_digits` is only listed; volumes are broker units (1/100 of
+a unit); size = "half" when a trade's volume is below the largest volume ever traded on that symbol.
+
+Day file (`schema_version` 1; `null` = not available; floats rounded to 6 digits):
+
+| key | content |
+|---|---|
+| `meta` | `instance`, `timeframe`, `strategy`, `labels`, `date`, `day_start`, `day_end`, `generated_at`, `partial`, `as_of`, `runs` {`count`, `modes`, `restarts`, `started_in_day`}, `journal` (file name only), `note` |
+| `summary` | `trades`, `excluded_dry_run_trades`, `wins`, `losses`, `flat`, `win_rate`, `net`, `gross`, `commission`, `swap`, `net_missing`, `avg_bp_price`, `median_bp_price`, `avg_bp_mid`, `median_bp_mid`, `t_stat_bp` (null below 3 trades), `avg_win`, `avg_loss`, `profit_factor` (null without losses), `best_trade`, `worst_trade`, `max_drawdown` (of cumulative net within the day), `avg_hold_s`, `max_hold_s`, `volume`, `stop_share`, `money_digits` |
+| `breakdown` | `by_symbol`, `by_side`, `by_exit_reason` (as stored), `by_hour_utc` (exit hour), `by_abs_z` (entry \|z_poc\|: `<1`, `1-1.5`, `1.5-2`, `>2`, `unlinked` = no signal row), `by_size` (`full`/`half`); each group: `trades`, `wins`, `win_rate`, `net`, `avg_bp`, `volume` |
+| `execution_quality` | `slippage_bp` {`n`, `mean`, `median`: realised bp minus the signal's simulated `taker_pnl_bps`}, `avg_adverse_bp`, `avg_markout_bp`, `avg_spread_entry_bp` (signals.spread / entry price), `orders`, `order_status`, `rejects_or_errors`, `error_codes` |
+| `funnel` | `entry_z`, `signal_rows`, `above_entry_z`, `entered`, `rollover`, `gated` + `gated_reasons` (`approx`, `kql_*`, risk reasons, `busy:*`), `none` |
+| `cumulative` | since the first demo trade up to the end of this day: `since`, `trades`, `wins`, `win_rate`, `net`, `avg_bp`, `research_taker_net_bp` (`report.REFS`: -0.31 at 5m, -0.84 at 1m; DESIGN.md section 1 / docs/findings-1m-screen.md), `vs_research_bp` |
+| `research_expectation` | `taker_net_bp_per_trade`, `taker_gross_bp_per_trade`, `source` |
+| `kill_switch` | as of generation, the numbers of the `report` "Kill switch" section: `cumulative`, `max_loss`, `distance_to_max_loss`, `today`, `daily_max_loss`, `distance_to_daily_limit`, `realised`, `unrealised` (+ note when the bot is not running), files; only attached to reports of the last two days, else `{"available": false}` |
+| `trades` | up to 500 rows: `entry`, `exit`, `symbol`, `side`, `volume`, `entry_price`, `exit_price`, `reason`, `bp`, `net`, `z_poc`, `hold_s`, `size`; `trades_total`, `trades_truncated` |
+| `risk_events` | per kind: `count` and the last 5 `{ts, detail}` (detail trimmed to 200 characters, secrets and absolute paths blanked) |
+
+`index.json`: `schema_version`, `instance`, `timeframe`, `strategy`, `labels`, `generated_at`, `research_taker_net_bp`,
+`first_day`, `latest`, `kill_switch`, and `days`: one row per day file (`date`, `partial`, `trades`, `wins`, `losses`,
+`win_rate`, `net`, `avg_bp`, `cum_net`, `cum_trades`, `cum_win_rate`, `cum_avg_bp`, `runs`, `restarts`).
+
+Cron (`/root/axioma-analytics/deploy/axioma-trades-report.cron`, copy to `/etc/cron.d/axioma-trades-report`; logs
+rotated by `deploy/axioma-trades-report.logrotate`): one job per instance at 00:20 UTC, as root (the state dirs are
+root-owned), `flock -n` per instance, `.venv/bin/autotrade --config <cfg> trades-report --last-day`.
+
+One-off backfill after installing (or after a fix to the generator; safe to repeat, every day file is replaced):
+
+    cd /root/axioma-analytics/ctrader_autotrade
+    .venv/bin/autotrade --config config.toml trades-report --backfill
+    .venv/bin/autotrade --config config.1m.toml trades-report --backfill
+    # optional: today so far (partial)
+    .venv/bin/autotrade --config config.toml trades-report --today
+    .venv/bin/autotrade --config config.1m.toml trades-report --today
+
 ## Deployment
+
+Two units, one per instance. Installing or (re)starting them is a manual step:
+
+- `ctrader-autotrade` (`deploy/ctrader-autotrade.service`, here): `ax5m`, unchanged.
+- `ctrader-autotrade-1m` (`/root/axioma-analytics/deploy/ctrader-autotrade-1m.service`): `ax1m`, runs
+  `autotrade --config config.1m.toml run --mode demo --exec taker`, writes only `state/ax1m` and `logs/ax1m`
+  (created by its `ExecStartPre`), same caps and restart policy. Install:
+  `cp /root/axioma-analytics/deploy/ctrader-autotrade-1m.service /etc/systemd/system/ && systemctl daemon-reload &&
+  systemctl enable --now ctrader-autotrade-1m`.
 
 `deploy/ctrader-autotrade.service` is the unit installed at `/etc/systemd/system/ctrader-autotrade.service`
 (copy it there by hand after a change, then `systemctl daemon-reload`). It runs

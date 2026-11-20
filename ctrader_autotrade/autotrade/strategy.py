@@ -1,7 +1,8 @@
 """Pure strategy decision (DESIGN.md section 2). No I/O and no clock reads: time is passed in.
 
 Price integers are Open API units (1/100000 of a price unit). Bar-level volatility is the
-research `realised_vol_pct` (annualised percent of 10 s mid returns).
+research `realised_vol_pct` (annualised percent of 10 s mid returns). Slot length and the per-slot
+volatility scaling come from the instance timeframe (autotrade/timeframe.py; settings.instance_timeframe).
 """
 from __future__ import annotations
 
@@ -9,14 +10,16 @@ import math
 import statistics
 from typing import Optional, Sequence
 
+from . import timeframe as _tf
+from .timeframe import TF_5M, BotTimeframe
 from .types import (ExecMode, FeatureRow, Intent, IntentKind, PositionView, Quote, Side,
                     SymbolSpec)
 
 PRICE_SCALE = 100_000
-SLOT_MS = 5 * 60 * 1000
+SLOT_MS = TF_5M.slot_ms         # 5-minute defaults; the functions take the instance timeframe
 SECONDS_PER_YEAR = 31_536_000
-BARS_10S_PER_SLOT = 30
-VOL_BARS = 12
+BARS_10S_PER_SLOT = TF_5M.bars_10s_per_slot
+VOL_BARS = 12                   # bars (fixed in bars on every timeframe, like research's 12-bar windows)
 MIN_VOL_BARS = 6                # fewer valid vol samples than this -> fallback stop
 FALLBACK_STOP_BP = 60.0         # used when vol history or its inputs are missing
 MAX_STOP_BP = 200.0             # cap so a vol spike cannot push the stop absurdly far
@@ -27,9 +30,9 @@ def signal_id(symbol_id: int, slot_end_ms: int) -> str:
     return f"{symbol_id}-{slot_end_ms // 1000}"
 
 
-def next_exit_at_ms(slot_end_ms: int, grace_s: int) -> int:
+def next_exit_at_ms(slot_end_ms: int, grace_s: int, tf: BotTimeframe = TF_5M) -> int:
     """Scheduled time exit for a position held through the bar that closes at slot_end_ms."""
-    return slot_end_ms + SLOT_MS + grace_s * 1000
+    return slot_end_ms + tf.slot_ms + grace_s * 1000
 
 
 def _sign(x: float) -> int:
@@ -63,17 +66,17 @@ def size_mult(feature: Optional[FeatureRow], settings) -> float:
     return 0.5 if feature.events_z > settings.vol_shrink_z else 1.0
 
 
-def sigma_bar(recent_vol: Optional[Sequence[float]]) -> Optional[float]:
-    """Per-5-min return sigma from the median of the last 12 realised_vol_pct values.
+def sigma_bar(recent_vol: Optional[Sequence[float]], tf: BotTimeframe = TF_5M) -> Optional[float]:
+    """Per-slot return sigma from the median of the last 12 realised_vol_pct values.
 
-    De-annualise the 10 s vol (divide by sqrt(periods per year)) and scale to 5 min
-    (x sqrt(30)). None if fewer than MIN_VOL_BARS finite positive samples.
+    De-annualise the 10 s vol (divide by sqrt(periods per year)) and scale to one slot
+    (x sqrt(30) at 5 min, x sqrt(6) at 1 min). None if fewer than MIN_VOL_BARS finite positive samples.
     """
     vals = [v for v in (recent_vol or [])[-VOL_BARS:] if _finite(v) and v > 0]
     if len(vals) < MIN_VOL_BARS:
         return None
     med = statistics.median(vals) / 100.0
-    return med / math.sqrt(SECONDS_PER_YEAR / 10) * math.sqrt(BARS_10S_PER_SLOT)
+    return med / math.sqrt(SECONDS_PER_YEAR / 10) * math.sqrt(tf.bars_10s_per_slot)
 
 
 def _broker_min_distance(spec: SymbolSpec, mid: float) -> float:
@@ -96,7 +99,7 @@ def stop_distance(quote: Quote, spec: SymbolSpec, settings,
     The vol term is capped at 200 bp of mid. The result is never below 1.
     """
     mid = (quote.bid + quote.ask) / 2.0
-    sb = sigma_bar(recent_vol)
+    sb = sigma_bar(recent_vol, _tf.of(settings))
     if sb is None:
         vol_term = FALLBACK_STOP_BP / 1e4 * mid
     else:
@@ -134,9 +137,11 @@ def decide(feature: Optional[FeatureRow], quote: Optional[Quote], position: Opti
     side, why = signal_side(feature, settings)
     mult = size_mult(feature, settings)
 
+    z = feature.z_poc if feature is not None and _finite(feature.z_poc) else None
+
     def mk(kind, s=None, reason="", **kw):
         return Intent(kind, sid, s, kw.get("size_mult", 1.0), kw.get("limit_price"),
-                      kw.get("expiry_ms"), kw.get("stop_rel"), reason, sig)
+                      kw.get("expiry_ms"), kw.get("stop_rel"), reason, sig, z)
 
     def entry(kind: IntentKind) -> Intent:
         if quote is None:

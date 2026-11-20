@@ -8,7 +8,8 @@ from autotrade.journal import Journal
 from autotrade.types import (ExecMode, ExecReport, Intent, IntentKind, Quote, RunMode, Side, SymbolSpec)
 
 SLOT = 1_800_000_000          # multiple of 300
-LABEL = "axq-poc4h-v1"
+LABEL = "ax5m"                # order label of the default instance
+LEGACY_LABEL = "axq-poc4h-v1"  # its pre-instance label (still owned)
 SPEC = SymbolSpec("XAUUSD", 41, 2, 1, 10000, 100, 100, 100000, 10, "POINTS", [], "UTC", [])
 SPEC2 = SymbolSpec("BTCUSD", 42, 2, 1, 100, 1, 1, 10000, 10, "POINTS", [], "UTC", [])
 

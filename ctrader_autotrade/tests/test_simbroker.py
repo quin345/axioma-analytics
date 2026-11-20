@@ -63,7 +63,7 @@ def test_maker_fills_on_ask_le_limit_with_trade_through_flag(tmp_path):
     assert om.state_of(41) is State.WORKING
     feed(om, sim, quote(bid=199980000, ask=200000000, ts=3))          # ask == L: touch only
     assert om.state_of(41) is State.OPEN
-    note = sim.fill_notes[f"XAUUSD-{SLOT}-E"]
+    note = sim.fill_notes[f"ax5m-XAUUSD-{SLOT}-E"]
     assert note["trade_through"] is False
     assert om.position_view(41).entry_price == 2000.0                 # filled at L
 
@@ -73,7 +73,7 @@ def test_maker_trade_through_flag_true(tmp_path):
     feed(om, sim, quote(ts=1))
     om.handle(intent(limit=200000000, expiry=(SLOT + 122) * 1000), SPEC, quote(), clock.now_ms())
     feed(om, sim, quote(bid=199970000, ask=199990000, ts=2))
-    assert sim.fill_notes[f"XAUUSD-{SLOT}-E"]["trade_through"] is True
+    assert sim.fill_notes[f"ax5m-XAUUSD-{SLOT}-E"]["trade_through"] is True
 
 
 def test_maker_sell_fills_on_bid_ge_limit(tmp_path):
@@ -139,4 +139,4 @@ def test_reconcile_lists_state(tmp_path):
     feed(om, sim, quote(ts=1))
     om.handle(intent(limit=190000000, expiry=(SLOT + 122) * 1000), SPEC, quote(), clock.now_ms())
     pos, ords = sim.reconcile().result
-    assert not pos and ords[0].client_order_id == f"XAUUSD-{SLOT}-E" and ords[0].label == LABEL
+    assert not pos and ords[0].client_order_id == f"ax5m-XAUUSD-{SLOT}-E" and ords[0].label == LABEL

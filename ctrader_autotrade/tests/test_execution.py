@@ -9,7 +9,7 @@ from autotrade.types import ExecMode, IntentKind, RunMode, Side, SymbolSpec
 
 from helpers_exec import (LABEL, SLOT, SPEC, SPEC2, StubBroker, intent, make, quote, rep)
 
-COID = f"XAUUSD-{SLOT}-E"
+COID = f"ax5m-XAUUSD-{SLOT}-E"
 
 
 def now(clock):
@@ -37,7 +37,7 @@ def test_market_entry_open_time_exit(tmp_path):
     assert om.state_of(41) is State.PENDING_NEW
     call = b.of("place")[0][1]
     assert call["volume"] == 200 and call["coid"] == COID and call["label"] == LABEL and call["stop"] == 50000
-    assert call["mode"] is ExecMode.TAKER and call["comment"] == "sig1"
+    assert call["mode"] is ExecMode.TAKER and call["comment"] == "ax5m poc_reversion_4h sig=sig1"
     fill_entry(om, clock)
     assert om.state_of(41) is State.OPEN
     pv = om.position_view(41)
@@ -202,7 +202,7 @@ def test_netted_close_is_opposite_order(tmp_path):
     assert not b.of("close")
     last = b.of("place")[-1][1]
     assert last["side"] is Side.SELL and last["volume"] == 200 and last["mode"] is ExecMode.TAKER
-    assert last["coid"] == f"XAUUSD-{SLOT}-X" and last["stop"] is None
+    assert last["coid"] == f"ax5m-XAUUSD-{SLOT}-X" and last["stop"] is None
     om.on_report(rep("ORDER_FILLED", client_order_id=last["coid"], position_id=7, side=Side.SELL,
                      filled_volume=200, price=2000.0, gross_profit=-20, commission=-2, swap=0, money_digits=2))
     assert om.state_of(41) is State.IDLE
@@ -218,7 +218,7 @@ def test_flip_sequencing(tmp_path):
                      gross_profit=-20, commission=-2, swap=0, money_digits=2))
     places = b.of("place")
     assert len(places) == 2 and places[1][1]["side"] is Side.SELL
-    assert places[1][1]["coid"] == f"XAUUSD-{SLOT + 300}-E"
+    assert places[1][1]["coid"] == f"ax5m-XAUUSD-{SLOT + 300}-E"
     assert om.state_of(41) is State.PENDING_NEW and trades(j)[0][0] == "flip"
 
 
