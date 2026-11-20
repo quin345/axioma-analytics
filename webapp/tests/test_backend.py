@@ -703,6 +703,559 @@ def test_holding_page_is_self_contained():
     assert "AXIOMA" in html
 
 
+# --- System status (/status, /api/status; webapp/status.py) -------------------------
+#
+# Everything is faked through status.Sources: no systemd, no Kusto, no files.
+
+import json as _json  # noqa: E402
+import sqlite3  # noqa: E402
+import time  # noqa: E402
+
+import status as status_mod  # noqa: E402
+
+ST_NOW = 1795003200.0          # Wed 2026-11-18 12:00:00 UTC (gold trading)
+ST_SECRET = "s3cr3t-SENTINEL-9f8e7d6c5b4a"
+ST_APP_DB = "/srv/fake/axioma.db"
+ST_BOT = "/srv/fake/ctrader_autotrade"
+ST_CRON = """# Flat bar export
+SHELL=/bin/bash
+APP=/root/axioma-analytics
+*/5 * * * * root cd $APP/webapp && set -a && . $APP/.env && set +a && flock -n /run/lock/axioma-flat-5m.lock runuser -u axioma -- $APP/venv/bin/python export_flat.py --recent 3 >> /var/log/axioma/flat-5m.log 2>&1
+* * * * * root cd $APP/webapp && set -a && . $APP/.env && set +a && flock -n /run/lock/axioma-flat-1m.lock runuser -u axioma -- $APP/venv/bin/python export_flat.py --timeframe 1m --recent 5 >> /var/log/axioma/flat-1m.log 2>&1
+"""
+
+
+def _st_block(unit, active="active", sub="running", since=ST_NOW - 7200, restarts=0, load="loaded",
+              enabled="enabled", result="success", code=0, wd="", execstart=""):
+    return {"Id": unit, "LoadState": load, "ActiveState": active, "SubState": sub,
+            "UnitFileState": enabled, "ActiveEnterTimestamp": f"@{int(since)}" if since else "",
+            "MainPID": "123" if active == "active" else "0", "NRestarts": str(restarts),
+            "Result": result, "ExecMainStatus": str(code), "ExecMainCode": "0",
+            "WorkingDirectory": wd, "ExecStart": execstart}
+
+
+def _st_show_text(blocks):
+    return "\n\n".join("\n".join(f"{k}={v}" for k, v in b.items()) for b in blocks) + "\n"
+
+
+class _StWorld:
+    """A healthy fake host; tests mutate the fields they care about."""
+
+    def __init__(self):
+        exec_start = (f"{{ path={ST_BOT}/.venv/bin/autotrade ; argv[]={ST_BOT}/.venv/bin/autotrade run "
+                      f"--mode demo --exec taker --token {ST_SECRET} ; ignore_errors=no ; pid=9 }}")
+        self.units = {
+            "ctrader-collector@icmarketssc-48664595-XAUUSD.service": _st_block(
+                "ctrader-collector@icmarketssc-48664595-XAUUSD.service", execstart=f"argv[]=python {ST_SECRET} ; "),
+            "ctrader-collector@icmarketssc-48664595-BTCUSD.service": _st_block(
+                "ctrader-collector@icmarketssc-48664595-BTCUSD.service"),
+            "ctrader-autotrade.service": _st_block("ctrader-autotrade.service", wd=ST_BOT, execstart=exec_start),
+            "axioma.service": _st_block("axioma.service"),
+            "nginx.service": _st_block("nginx.service"),
+            "cron.service": _st_block("cron.service"),
+        }
+        self.list_units = [u for u in self.units if u.startswith("ctrader-")]
+        self.list_unit_files = ["ctrader-autotrade.service enabled enabled",
+                                "ctrader-collector@.service indirect enabled"]
+        self.wants = [u for u in self.units if u.startswith("ctrader-collector@")]
+        self.env_dir = PermissionError("denied")
+        self.files = {"/etc/crontab": "SHELL=/bin/sh\n17 * * * * root cd / && run-parts --report /etc/cron.hourly\n",
+                      "/etc/cron.d/axioma-flat": ST_CRON,
+                      "/var/log/axioma/flat-5m.log": "OK  48664595:41 slots=3\nwrote metrics_5m rows=9 (/root/x.db)\n",
+                      "/var/log/axioma/flat-1m.log": "ERR 48664595:41: boom\nwrote metrics_1m rows=15 (/root/x.db)\n",
+                      f"{ST_BOT}/config.toml": 'state_dir = "state"\nlog_dir = "logs"\n'}
+        self.mtimes = {"/var/log/axioma/flat-5m.log": ST_NOW - 100, "/var/log/axioma/flat-1m.log": ST_NOW - 20,
+                       f"{ST_BOT}/logs/autotrade.jsonl": ST_NOW - 3}
+        self.exists = set()
+        self.table_age = {"metrics_5m": 100.0, "metrics_1m": 20.0}
+        self.kusto_rows = [
+            {"broker": "icmarketssc", "ctidTraderAccountId": "48664595", "symbolId": "41", "rows_15m": 2300,
+             "last_event": "2026-11-18T11:59:59.5+00:00", "last_ingested": "2026-11-18T12:00:00.1+00:00"},
+            {"broker": "icmarkets", "ctidTraderAccountId": "48664595", "symbolId": "10026", "rows_15m": 2200,
+             "last_event": "2026-11-18T11:59:58+00:00", "last_ingested": "2026-11-18T11:59:58.5+00:00"},
+        ]
+        self.kusto_error = None
+        self.kusto_seconds = 0.4
+        self.bot = {"runs": [(4, "DEMO", 0, (ST_NOW - 7000) * 1000, None)],
+                    "last": [((ST_NOW - 200) * 1000, (ST_NOW - 200) * 1000, "hold")],
+                    "slots": [((ST_NOW - 200 - 300 * i) * 1000,) for i in range(6)],
+                    "gate": [], "positions": [("OPEN",), ("IDLE",)]}
+        self.bot_error = None
+        self.calls, self.read_paths, self.clock = [], [], ST_NOW
+        self.names = {("icmarketssc", "48664595", "41"): "XAUUSD",
+                      ("icmarketssc", "48664595", "10026"): "BTCUSD"}
+
+    def run(self, argv):
+        assert isinstance(argv, list) and argv[0] == status_mod.SYSTEMCTL, argv
+        self.calls.append(list(argv))
+        if argv[1] == "list-units":
+            return "".join(f"{u} loaded {self.units[u]['ActiveState']} x desc\n" for u in self.list_units)
+        if argv[1] == "list-unit-files":
+            return "\n".join(self.list_unit_files) + "\n"
+        if argv[1] == "show":
+            names = argv[argv.index("--") + 1:]
+            return _st_show_text([self.units.get(n) or _st_block(n, active="inactive", sub="dead",
+                                                                   load="not-found", enabled="", since=None)
+                                  for n in names])
+        raise AssertionError(argv)
+
+    def read_text(self, path, max_bytes=None):
+        self.read_paths.append(path)
+        assert "ctrader-collector/" not in path, "env files must never be opened"
+        if path not in self.files:
+            raise FileNotFoundError(path)
+        return self.files[path]
+
+    def listdir(self, path):
+        if path == "/etc/ctrader-collector":
+            if isinstance(self.env_dir, Exception):
+                raise self.env_dir
+            return list(self.env_dir)
+        if path == "/etc/cron.d":
+            return ["axioma-flat", ".placeholder"]
+        if path.endswith(".wants"):
+            return list(self.wants)
+        if path == "/var/spool/cron/crontabs":
+            raise PermissionError(path)
+        raise FileNotFoundError(path)
+
+    def mtime(self, path):
+        if path not in self.mtimes:
+            raise FileNotFoundError(path)
+        return self.mtimes[path]
+
+    def kusto(self, query):
+        assert "ago(24h)" in query and "ago(15m)" in query
+        self.clock += self.kusto_seconds
+        if self.kusto_error:
+            raise self.kusto_error
+        return [dict(r) for r in self.kusto_rows]
+
+    def sqlite(self, path, sql, params=()):
+        if path == ST_APP_DB:
+            if "sqlite_master" in sql:
+                return [(17,)]
+            table = sql.split("FROM ")[1].strip()
+            age = self.table_age.get(table)
+            if age == "missing":
+                raise sqlite3.OperationalError("no such table")
+            return [(None if age is None else status_mod.iso(self.clock - age),)]
+        assert path == f"{ST_BOT}/state/autotrade.db", path
+        if self.bot_error:
+            raise self.bot_error
+        for key, marker in (("runs", "FROM runs"), ("slots", "DISTINCT slot_end_ms"), ("last", "FROM signals"),
+                            ("gate", "FROM risk_events"), ("positions", "FROM transitions")):
+            if marker in sql:
+                return self.bot[key]
+        raise AssertionError(sql)
+
+    def sources(self):
+        return status_mod.Sources(
+            run=self.run, read_text=self.read_text, listdir=self.listdir, mtime=self.mtime,
+            exists=lambda p: p in self.exists, now=lambda: self.clock, kusto=self.kusto,
+            sqlite=self.sqlite, symbol_names=lambda: dict(self.names), kql_table="agg_dom",
+            kql_database="dom_ctrader", app_db=ST_APP_DB,
+            broker=app_module.canonical_broker)
+
+
+
+def _st_collect(world):
+    return status_mod.collect(world.sources())
+
+
+def _st_by_name(entries):
+    return {e["name"]: e for e in entries}
+
+
+def test_status_healthy_world_is_ok_and_shaped():
+    payload = _st_collect(_StWorld())
+    assert payload["overall"] == "ok", _json.dumps(payload, indent=1)
+    assert payload["checked_at"].startswith("2026-11-18T12:00:00")
+    s = payload["sections"]
+    assert set(s) == {"units", "collectors", "autotraders", "kql", "cron", "app"}
+    for entry in s["units"] + s["collectors"] + s["autotraders"] + s["app"] + s["cron"]["jobs"] + [s["kql"], s["cron"]]:
+        assert {"name", "status", "detail"} <= set(entry) and entry["status"] in ("ok", "warn", "down", "unknown", "n/a")
+    col = _st_by_name(s["collectors"])["icmarketssc-48664595-BTCUSD"]
+    assert col["symbolId"] == "10026" and col["rows_15m"] == 2200 and col["last_event_age_s"] == 2.0
+    assert col["ingestion_lag_s"] == 0.5 and col["uptime_s"] == 7200
+    assert s["kql"]["latency_s"] == 0.4 and len(s["kql"]["streams"]) == 2
+    bot = s["autotraders"][0]
+    assert bot["mode"] == "demo" and bot["open_positions"] == 1 and bot["kill_file"] is False
+    assert bot["slot_s"] == 300 and bot["last_decision_age_s"] == 200.0
+    jobs = _st_by_name(s["cron"]["jobs"])
+    assert jobs["metrics_5m"]["command"] == "export_flat.py --recent 3"
+    assert jobs["metrics_1m"]["command"] == "export_flat.py --timeframe 1m --recent 5"
+    assert jobs["metrics_1m"]["runs_as"] == "axioma" and jobs["metrics_1m"]["user"] == "root"
+    assert jobs["metrics_1m"]["last_run_errors"] == 1 and jobs["metrics_5m"]["last_wrote_rows"] == 9
+    assert "/etc/ctrader-collector: not readable" in payload["notes"]
+
+
+def test_status_one_show_call_with_whitelisted_names_only():
+    world = _StWorld()
+    world.list_units += ["ctrader-x;rm -rf.service", "sshd.service", "ctrader-collector@.service"]
+    world.wants += ["ctrader-$(id).service", "ctrader-autotrade-1m.service"]
+    payload = _st_collect(world)
+    shows = [c for c in world.calls if c[1] == "show"]
+    assert len(shows) == 1, world.calls
+    names = shows[0][shows[0].index("--") + 1:]
+    assert all(status_mod.valid_unit(n) for n in names)
+    assert "sshd.service" not in names and "ctrader-collector@.service" not in names
+    assert "ctrader-autotrade-1m.service" in names
+    assert len(world.calls) == 3          # list-units, list-unit-files, show
+    assert payload["overall"] in ("ok", "warn", "down")
+    for bad in ("x;rm", "../x.service", "sshd.service", "ctrader-a b.service", "ctrader-collector@.service",
+                "ctrader-autotrade", "nginx.service\n"):
+        assert not status_mod.valid_unit(bad), bad
+    for good in ("ctrader-autotrade-1m.service", "ctrader-collector@acgmarkets-49208255-XAUUSD.service",
+                 "axioma.service", "cron.service", "nginx.service"):
+        assert status_mod.valid_unit(good), good
+
+
+def test_status_run_command_refuses_anything_but_systemctl():
+    for argv in ("systemctl show", ["/bin/sh", "-c", "id"], [], ["systemctl", "show"]):
+        try:
+            status_mod.run_command(argv)
+        except status_mod.CommandError:
+            pass
+        else:
+            raise AssertionError(argv)
+
+
+def test_status_parse_show_blocks_and_classify_units():
+    text = _st_show_text([
+        _st_block("a.service"),
+        _st_block("b.service", active="inactive", sub="dead", since=None, enabled="enabled"),
+        _st_block("c.service", active="failed", sub="failed", result="exit-code", code=1),
+        _st_block("d.service", active="inactive", sub="dead", load="not-found", enabled="", since=None),
+        _st_block("e.service", restarts=3, since=ST_NOW - 300),
+        _st_block("f.service", since=ST_NOW - 30),
+        _st_block("g.service", active="activating", sub="auto-restart", restarts=5),
+        _st_block("h.service", restarts=3, since=ST_NOW - 3600),
+    ])
+    units = status_mod.parse_show(text)
+    assert sorted(units) == [f"{c}.service" for c in "abcdefgh"]
+    got = {n: status_mod.classify_unit(p, ST_NOW) for n, p in units.items()}
+    assert got["a.service"][0] == "ok" and "2h 0m" in got["a.service"][1]
+    assert got["b.service"][0] == "down" and "inactive" in got["b.service"][1]
+    assert got["c.service"][0] == "down" and "failed" in got["c.service"][1]
+    assert got["d.service"] == ("down", "not installed")
+    assert got["e.service"][0] == "warn" and "flapping" in got["e.service"][1]
+    assert got["f.service"][0] == "warn" and "started" in got["f.service"][1]
+    assert got["g.service"][0] == "warn"
+    assert got["h.service"][0] == "ok"            # old restarts, stable for an hour
+    # boundaries: settle 60 s, flap window 600 s
+    assert status_mod.classify_unit(_st_block("x", since=ST_NOW - 59), ST_NOW)[0] == "warn"
+    assert status_mod.classify_unit(_st_block("x", since=ST_NOW - 60), ST_NOW)[0] == "ok"
+    assert status_mod.classify_unit(_st_block("x", since=ST_NOW - 599, restarts=1), ST_NOW)[0] == "warn"
+    assert status_mod.classify_unit(_st_block("x", since=ST_NOW - 600, restarts=1), ST_NOW)[0] == "ok"
+    item = status_mod.unit_item("a.service", units["a.service"], ST_NOW)
+    assert item["since"] == "2026-11-18T10:00:00+00:00" and item["NRestarts"] == 0 and item["MainPID"] == 123
+    assert "ExecStart" not in item and "WorkingDirectory" not in item
+
+
+def test_status_discovers_autotrade_units_by_pattern():
+    world = _StWorld()
+    payload = _st_collect(world)
+    assert [a["name"] for a in payload["sections"]["autotraders"]] == ["ctrader-autotrade.service"]
+    # A second bot appears as soon as it is installed: disabled and stopped is n/a ...
+    world = _StWorld()
+    world.list_unit_files.append("ctrader-autotrade-1m.service disabled enabled")
+    world.units["ctrader-autotrade-1m.service"] = _st_block(
+        "ctrader-autotrade-1m.service", active="inactive", sub="dead", enabled="disabled", since=None)
+    bots = _st_by_name(_st_collect(world)["sections"]["autotraders"])
+    assert set(bots) == {"ctrader-autotrade.service", "ctrader-autotrade-1m.service"}
+    assert bots["ctrader-autotrade-1m.service"]["status"] == "n/a"
+    assert bots["ctrader-autotrade-1m.service"]["state"] == "not readable"
+    # ... enabled but not running is down.
+    world.units["ctrader-autotrade-1m.service"]["UnitFileState"] = "enabled"
+    payload = _st_collect(world)
+    assert _st_by_name(payload["sections"]["autotraders"])["ctrader-autotrade-1m.service"]["status"] == "down"
+    assert payload["overall"] == "down"
+    # Its own config (--config) points at its own state/log dirs and timeframe.
+    world.units["ctrader-autotrade-1m.service"] = _st_block(
+        "ctrader-autotrade-1m.service", wd=ST_BOT,
+        execstart=f"{{ argv[]={ST_BOT}/.venv/bin/autotrade --config config.1m.toml run --mode demo ; x }}")
+    world.files[f"{ST_BOT}/config.1m.toml"] = ('state_dir = "state_1m"\nlog_dir = "logs_1m"\n'
+                                               '[instance]\nname = "ax1m"\ntimeframe = "1m"\n')
+    world.exists = {f"{ST_BOT}/state_1m/PAUSE"}
+    seen = []
+    plain = world.sqlite
+    world.sqlite = lambda path, sql, params=(): seen.append(path) or plain(f"{ST_BOT}/state/autotrade.db", sql)
+    bot = _st_by_name(_st_collect(world)["sections"]["autotraders"])["ctrader-autotrade-1m.service"]
+    assert f"{ST_BOT}/state_1m/autotrade.db" in seen
+    assert bot["instance"] == "ax1m" and bot["timeframe"] == "1m" and bot["slot_s"] == 60
+    assert bot["config"] == "config.1m.toml" and bot["pause_file"] is True and bot["status"] == "warn"
+
+
+def test_status_collectors_enabled_not_running_and_env_only():
+    world = _StWorld()
+    # enabled (in the wants dir) but not loaded/running
+    gone = "ctrader-collector@acgmarkets-49208255-XAUUSD.service"
+    world.wants.append(gone)
+    world.units[gone] = _st_block(gone, active="inactive", sub="dead", since=None)
+    # an env file with no enabled unit
+    world.env_dir = ["icmarketssc-48664595-XAUUSD.env", "icmarketssc-48664595-BTCUSD.env",
+                     "acgmarkets-49208255-XAUUSD.env", "brokerx-123-EURUSD.env"]
+    world.units["ctrader-collector@brokerx-123-EURUSD.service"] = _st_block(
+        "ctrader-collector@brokerx-123-EURUSD.service", active="inactive", sub="dead", enabled="disabled",
+        since=None)
+    payload = _st_collect(world)
+    cols = _st_by_name(payload["sections"]["collectors"])
+    assert cols["acgmarkets-49208255-XAUUSD"]["status"] == "down"
+    assert cols["brokerx-123-EURUSD"]["status"] == "warn"
+    assert "not enabled" in cols["brokerx-123-EURUSD"]["detail"]
+    assert cols["icmarketssc-48664595-XAUUSD"]["configured"] is True
+    assert not any("ctrader-collector" in n for n in payload["notes"])
+    assert payload["overall"] == "down"
+    # an active collector whose stream is absent from KQL is down
+    world = _StWorld()
+    world.kusto_rows = world.kusto_rows[1:]
+    col = _st_by_name(_st_collect(world)["sections"]["collectors"])["icmarketssc-48664595-XAUUSD"]
+    assert col["status"] == "down" and "no rows" in col["detail"]
+
+
+def test_status_stream_freshness_boundaries():
+    c = status_mod.classify_stream
+    assert c(59.9, True)[0] == "ok"
+    assert c(60, True)[0] == "warn" and "idle" in c(60, True)[1]
+    assert c(1800, True)[0] == "warn"
+    assert c(1800.1, True)[0] == "down"
+    assert c(1800.1, True, quiet=True)[0] == "warn"
+    assert c(None, True)[0] == "down" and c(None, None)[0] == "down"
+    assert c(None, True, quiet=True)[0] == "warn"
+    q = status_mod.expected_quiet
+    assert q("XAUUSD", 1795211760)            # Fri 21:56 UTC daily break / weekend start
+    assert q("XAUUSD", 1795262400)            # Saturday
+    assert q("XAUUSD", 1795388700)            # Sun 23:05, still inside the grace
+    assert not q("XAUUSD", 1795389300)        # Sun 23:15, open again
+    assert q("XAUUSD.pro", 1795041000)        # Wed 22:30 daily break
+    assert not q("XAUUSD", 1795035240)        # Wed 20:54
+    assert not q("XAUUSD", ST_NOW) and not q("BTCUSD", 1795262400) and not q(None, ST_NOW)
+    # a gold stream quiet for an hour in the daily break is warn, not down
+    world = _StWorld()
+    world.clock = 1795041000.0
+    world.kusto_rows[0]["last_event"] = status_mod.iso(1795041000 - 3600)
+    world.kusto_rows[1]["last_event"] = status_mod.iso(1795041000 - 5)
+    for u in world.units.values():
+        u["ActiveEnterTimestamp"] = "@1795000000"
+    world.table_age = {"metrics_5m": 10.0, "metrics_1m": 10.0}
+    world.bot["last"] = [((1795041000 - 100) * 1000, 0, "none")]
+    world.mtimes = {k: 1795041000 - 5 for k in world.mtimes}
+    payload = _st_collect(world)
+    gold = _st_by_name(payload["sections"]["collectors"])["icmarketssc-48664595-XAUUSD"]
+    assert gold["status"] == "warn" and "market closed" in gold["detail"], gold
+    assert payload["overall"] == "warn"
+
+
+def test_status_kql_latency_and_error():
+    world = _StWorld()
+    world.kusto_seconds = 4.99
+    assert _st_collect(world)["sections"]["kql"]["status"] == "ok"
+    world.kusto_seconds = 5.0
+    kql = _st_collect(world)["sections"]["kql"]
+    assert kql["status"] == "warn" and "slow" in kql["detail"]
+    world.kusto_error = PermissionError(f"token {ST_SECRET} at https://x.kusto/secret")
+    payload = _st_collect(world)
+    kql = payload["sections"]["kql"]
+    assert kql["status"] == "down" and kql["error"] == "PermissionError" and kql["streams"] == []
+    assert ST_SECRET not in _json.dumps(payload) and "https://x" not in _json.dumps(payload)
+    cols = payload["sections"]["collectors"]
+    assert all(c["data_status"] == "unknown" for c in cols)
+    assert payload["overall"] == "down"
+
+
+def test_status_kql_timeout_is_down():
+    original = status_mod.KQL_TIMEOUT_S
+    status_mod.KQL_TIMEOUT_S = 0.05
+    try:
+        world = _StWorld()
+        sources = world.sources()
+        sources.kusto = lambda q: time.sleep(1)
+        kql = status_mod.collect(sources)["sections"]["kql"]
+        assert kql["status"] == "down" and kql["error"] == "TimeoutError"
+    finally:
+        status_mod.KQL_TIMEOUT_S = original
+
+
+
+def test_status_cron_parsing_and_sanitising():
+    entries = status_mod.parse_cron(ST_CRON, "/etc/cron.d/axioma-flat")
+    assert [e["schedule"] for e in entries] == ["*/5 * * * *", "* * * * *"]
+    assert all(e["user"] == "root" for e in entries)
+    hostile = [
+        "cd /root/app && set -a && . /root/app/.env && set +a && PASSWORD=hunter2hunter2 timeout 30 "
+        "nice -n 5 /root/app/venv/bin/python3 -u /root/app/webapp/export_flat.py --password hunter2hunter2 "
+        f"--token={ST_SECRET} --db /root/app/data/axioma.db > /tmp/x.log 2>&1",
+        "source /home/me/.env; sudo -u axioma env API_KEY=abc123abc123 bash /root/run.sh --opt 1 | tee -a /root/l",
+        "flock -w 5 /run/lock/x runuser -u axioma -- /usr/bin/python3 export_flat.py --dotenv /root/app/.env",
+    ]
+    for raw in entries + [{"command": h} for h in hostile]:
+        command, runs_as = status_mod.sanitize_command(raw["command"])
+        for bad in (".env", "set -a", "/root", "hunter2", "PASSWORD", ST_SECRET, "abc123abc123", "flock",
+                    "runuser", ">>", "2>&1", "/home/"):
+            assert bad not in command, (bad, command)
+        assert command
+    assert status_mod.sanitize_command(entries[0]["command"]) == ("export_flat.py --recent 3", "axioma")
+    assert status_mod.sanitize_command(hostile[0])[0].startswith("export_flat.py --password <redacted>")
+    assert status_mod.sanitize_command(hostile[1])[1] == "axioma"
+    assert status_mod.job_for(entries[1]["command"]).table == "metrics_1m"
+    assert status_mod.job_for(entries[0]["command"]).table == "metrics_5m"
+    assert status_mod.parse_cron("0 * * * * root /usr/bin/certbot renew\n", "x") == []
+    user = status_mod.parse_cron("@reboot /usr/bin/ctrader-thing --x\n", "spool", system=False)
+    assert user[0]["schedule"] == "@reboot" and user[0]["user"] is None
+
+
+def test_status_cron_freshness_boundaries():
+    five, one = status_mod.CRON_JOBS
+    f = status_mod.classify_freshness
+    assert [f(a, five)[0] for a in (600, 601, 1200, 1201)] == ["ok", "warn", "warn", "down"]
+    assert [f(a, one)[0] for a in (180, 181, 600, 601)] == ["ok", "warn", "warn", "down"]
+    assert f(None, five)[0] == "down"
+    # listed in cron.d but the table is stale -> down
+    world = _StWorld()
+    world.table_age["metrics_1m"] = 900.0
+    jobs = _st_by_name(_st_collect(world)["sections"]["cron"]["jobs"])
+    assert jobs["metrics_1m"]["status"] == "down" and jobs["metrics_5m"]["status"] == "ok"
+    # job missing from cron -> n/a (does not count against overall)
+    world = _StWorld()
+    world.files["/etc/cron.d/axioma-flat"] = "\n".join(ST_CRON.splitlines()[:-1])
+    payload = _st_collect(world)
+    jobs = _st_by_name(payload["sections"]["cron"]["jobs"])
+    assert jobs["metrics_1m"]["status"] == "n/a" and "not scheduled" in jobs["metrics_1m"]["detail"]
+    assert payload["overall"] == "ok"
+    # cron.service not running -> jobs down
+    world = _StWorld()
+    world.units["cron.service"] = _st_block("cron.service", active="inactive", sub="dead", since=None)
+    cron = _st_collect(world)["sections"]["cron"]
+    assert cron["status"] == "down" and all(j["status"] == "down" for j in cron["jobs"])
+
+
+def test_status_autotrader_switches_and_journal():
+    world = _StWorld()
+    world.exists = {f"{ST_BOT}/state/KILL"}
+    bot = _st_collect(world)["sections"]["autotraders"][0]
+    assert bot["status"] == "down" and "KILL" in bot["detail"] and bot["kill_file"] is True
+    world = _StWorld()
+    world.exists = {f"{ST_BOT}/state/PAUSE"}
+    world.bot["gate"] = [((ST_NOW - 60) * 1000, "data_gate", 41, f"ok -> kql_stale watermark {ST_SECRET}")]
+    bot = _st_collect(world)["sections"]["autotraders"][0]
+    assert bot["status"] == "warn" and "PAUSE" in bot["detail"] and "kql_stale" in bot["detail"]
+    assert bot["last_data_event"]["summary"] == "ok -> kql_stale"
+    world = _StWorld()
+    world.bot["last"] = [((ST_NOW - 3 * 300 - 61) * 1000, 0, "none")]
+    world.bot["gate"] = [((ST_NOW - 50) * 1000, "kql_error", None, f"slot 12:00: 3 attempts: {ST_SECRET}")]
+    bot = _st_collect(world)["sections"]["autotraders"][0]
+    assert bot["status"] == "warn" and "no decision" in bot["detail"]
+    assert bot["last_data_event"]["summary"] == "slot 12:00: 3 attempts"
+    world = _StWorld()
+    world.bot_error = sqlite3.OperationalError("unable to open database file")
+    bot = _st_collect(world)["sections"]["autotraders"][0]
+    assert bot["open_positions"] == "not readable" and bot["journal"] == "not readable"
+    assert bot["status"] == "ok"
+
+
+def test_status_failing_section_is_unknown_and_endpoint_still_200():
+    world = _StWorld()
+    with mock.patch.object(status_mod, "collectors_section", side_effect=RuntimeError(ST_SECRET)):
+        payload = _st_collect(world)
+    assert payload["sections"]["collectors"] == [
+        {"name": "collectors", "status": "unknown", "detail": "check failed: RuntimeError"}]
+    assert payload["overall"] == "warn" and ST_SECRET not in _json.dumps(payload)
+    # systemctl itself failing: unit sections unknown, KQL still checked
+    world = _StWorld()
+    world.run = mock.Mock(side_effect=status_mod.CommandError("systemctl exited 1"))
+    payload = status_mod.collect(world.sources())
+    s = payload["sections"]
+    assert s["units"][0]["status"] == "unknown" and s["cron"]["status"] == "unknown"
+    assert s["kql"]["status"] == "ok" and payload["overall"] == "warn"
+    # the endpoint never 500s, even when the collection blows up
+    with _gated() as client, \
+            mock.patch.object(app_module, "_status_cache", status_mod.StatusCache()), \
+            mock.patch.object(status_mod, "collect", side_effect=RuntimeError(ST_SECRET)):
+        assert _login(client).status_code == 200
+        r = client.get("/api/status")
+        assert r.status_code == 200 and r.json["overall"] == "warn"
+        assert ST_SECRET.encode() not in r.data
+
+
+def test_status_cache_runs_the_collection_once():
+    clock = [100.0]
+    cache = status_mod.StatusCache(ttl=10, clock=lambda: clock[0])
+    calls = []
+    build = lambda: calls.append(1) or {"n": len(calls)}  # noqa: E731
+    assert cache.get(build) == {"n": 1}
+    clock[0] = 109.9
+    assert cache.get(build) == {"n": 1} and len(calls) == 1
+    clock[0] = 110.0
+    assert cache.get(build) == {"n": 2} and len(calls) == 2
+    world = _StWorld()
+    with _gated() as client, \
+            mock.patch.object(app_module, "_status_cache", status_mod.StatusCache()), \
+            mock.patch.object(app_module, "_collect_status",
+                              side_effect=lambda: status_mod.collect(world.sources())) as collect:
+        assert _login(client).status_code == 200
+        assert client.get("/api/status").status_code == 200
+        assert client.get("/api/status").status_code == 200
+        assert collect.call_count == 1
+
+
+def test_status_payload_never_contains_secrets():
+    world = _StWorld()
+    world.env_dir = ["icmarketssc-48664595-XAUUSD.env"]
+    world.files["/etc/cron.d/axioma-flat"] = ST_CRON + (
+        f"*/2 * * * * root TOKEN={ST_SECRET} /root/axioma-analytics/venv/bin/python /root/x/ctrader_tool.py "
+        f"--password {ST_SECRET} --key={ST_SECRET}\n")
+    world.bot["gate"] = [((ST_NOW - 10) * 1000, "kql_error", None, f"slot x: 2 attempts: {ST_SECRET}")]
+    text = _json.dumps(_st_collect(world))
+    assert ST_SECRET not in text
+    assert ".venv" not in text and "--exec" not in text and "argv" not in text
+    assert ".env" not in text.replace("icmarketssc-48664595-XAUUSD", "")
+    assert not any("ctrader-collector/" in p for p in world.read_paths)
+    # scrub() removes known secret values anywhere, as a last line of defence
+    scrubbed = status_mod.scrub({"a": [f"x{ST_SECRET}y"], "b": {"c": ST_SECRET}}, [ST_SECRET, "", "abc"])
+    assert ST_SECRET not in _json.dumps(scrubbed) and scrubbed["b"]["c"] == "[redacted]"
+
+
+def test_status_routes_are_behind_the_login_wall():
+    world = _StWorld()
+    with _gated() as client, \
+            mock.patch.object(app_module, "_status_cache", status_mod.StatusCache()), \
+            mock.patch.object(app_module, "_collect_status",
+                              side_effect=lambda: status_mod.collect(world.sources())) as collect:
+        r = client.get("/status")
+        assert r.status_code == 302 and r.headers["Location"].endswith("/login?next=%2Fstatus")
+        r = client.get("/api/status")
+        assert r.status_code == 401 and r.json == {"error": "login required"}
+        assert collect.call_count == 0
+        assert "/status" not in app_module.PUBLIC_PATHS and "/api/status" not in app_module.PUBLIC_PATHS
+        assert _login(client).status_code == 200
+        page = client.get("/status")
+        assert page.status_code == 200 and b"/api/status" in page.data
+        assert page.headers["Cache-Control"] == "no-store"
+        api = client.get("/api/status")
+        assert api.status_code == 200 and api.json["overall"] == "ok"
+        assert api.headers["Cache-Control"] == "no-store"
+        assert client.post("/api/status").status_code == 405
+
+
+def test_status_page_is_self_contained():
+    with open(os.path.join(app_module.STATIC_DIR, "status.html"), encoding="utf-8") as handle:
+        html = handle.read()
+    assert 'src="http' not in html and 'href="http' not in html and "/assets/" not in html
+    assert 'name="robots" content="noindex"' in html and "/api/status" in html
+    assert "15000" in html and "Refresh" in html and 'role="alert"' in html
+    assert "--bg:#0b0e12" in html               # the login page's tokens
+    assert "innerHTML" not in html              # values are set as text, never as markup
+
+
+def test_status_rollup_rules():
+    assert status_mod.rollup(["ok", "n/a"]) == "ok"
+    assert status_mod.rollup(["ok", "unknown"]) == "warn"
+    assert status_mod.rollup(["warn", "down", "unknown"]) == "down"
+    assert status_mod.rollup([]) == "ok"
+
+
+
 # --- The Fabric SQL mirror ----------------------------------------------------
 #
 # These stay offline: the ODBC connection is faked, so the suite runs on a box

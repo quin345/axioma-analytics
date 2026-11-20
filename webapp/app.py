@@ -2,6 +2,7 @@ import hmac
 import json
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -11,6 +12,7 @@ from werkzeug.security import safe_join
 import analytics
 import db
 import queries
+import status as system_status
 from config import load_config
 from kusto_client import KustoReader
 
@@ -686,6 +688,72 @@ def volume_at_price_refresh():
             for w, p in profiles.items()
         },
     })
+
+
+# --- System status -------------------------------------------------------------
+#
+# GET /status (page) and GET /api/status (JSON): is the data pipeline healthy?
+# Both sit behind the login wall like every other route (deny by default - they
+# are deliberately NOT in PUBLIC_PATHS). The collection lives in status.py; this
+# only wires it to the app's Kusto reader, record store and symbol catalogue,
+# and caches the payload so several viewers cause one collection per ~10 s per
+# gunicorn worker. Read-only: there are no start/stop/restart actions.
+
+_status_cache = system_status.StatusCache()
+# Environment variables whose values must never appear in the payload.
+_SECRET_ENV = re.compile(r"SECRET|PASSWORD|TOKEN|KEY|CREDENTIAL", re.I)
+
+
+def _status_symbol_names():
+    """{(broker, account, symbol id): display name} from the local catalogue,
+    read through a read-only connection (manual rows over the Fabric snapshot)."""
+    uri = "file:" + quote(os.path.abspath(cfg.db_path)) + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        mapping = _mapping_by_triple(conn)
+    finally:
+        conn.close()
+    return {triple: row["standardized_name"] or row["symbol_name"] for triple, row in mapping.items()}
+
+
+def _status_secrets():
+    values = [cfg.auth_password, cfg.secret_key]
+    values += [v for k, v in os.environ.items() if _SECRET_ENV.search(k)]
+    return [v for v in values if v]
+
+
+def _collect_status():
+    sources = system_status.default_sources(
+        kusto=reader.run, kql_table=cfg.table, kql_database=cfg.database, app_db=cfg.db_path,
+        symbol_names=_status_symbol_names, broker=canonical_broker)
+    try:
+        payload = system_status.collect(sources)
+    except Exception as exc:  # collect() should not raise; never 500 the status page
+        app.logger.warning("status collection failed", exc_info=True)
+        payload = system_status.failure_payload(datetime.now(timezone.utc).timestamp(), exc)
+    return system_status.scrub(payload, _status_secrets())
+
+
+@app.get("/status")
+def status_page():
+    """The system status page (self-contained; polls /api/status)."""
+    response = send_from_directory(STATIC_DIR, "status.html")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/status")
+def status_api():
+    """Collectors, autotraders, KQL, cron and app units; see README "System status"."""
+    try:
+        payload = _status_cache.get(_collect_status)
+    except Exception as exc:
+        app.logger.warning("status endpoint failed", exc_info=True)
+        payload = system_status.failure_payload(datetime.now(timezone.utc).timestamp(), exc)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 if __name__ == "__main__":
