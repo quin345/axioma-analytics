@@ -1,0 +1,8 @@
+/var/log/axioma/flat-*.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

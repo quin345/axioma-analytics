@@ -100,7 +100,7 @@ per-slot metric is computed exactly as for 5m. The VAP lookbacks keep the
 defined in `export_flat.TIMEFRAMES`; the default 5m behaviour and `metrics_5m`
 are unchanged. `--list --timeframe 1m` summarises the table.
 
-There is no cron for 1m. Refresh it by hand (idempotent upsert), e.g. daily:
+Cron keeps it current (see Schedule below). To refresh a range by hand (idempotent upsert):
 
 ```bash
 cd webapp
@@ -111,19 +111,29 @@ With `--start` the VAP `coverage` is measured against the table-wide first tick,
 so for an instrument whose own stream starts later than the feed's first tick
 the early windows read `coverage = 1` although they hold less history.
 
-## Schedule (every 5 minutes, on the grid)
+## Schedule (cron, every 5 minutes and every minute)
 
-The job runs on the same grid as the VAP recorder and honours `VAP_GRID_DELAY`.
+Both timeframes run from cron on the server; the files are kept in the repo as
+`deploy/axioma-flat.cron` (install to `/etc/cron.d/axioma-flat`, mode 644) and
+`deploy/axioma-flat.logrotate` (to `/etc/logrotate.d/axioma-flat`, mode 644).
 
-```cron
-# /etc/cron.d/axioma-flat
-SHELL=/bin/bash
-PATH=/usr/local/bin:/usr/bin:/bin
-0,5,10,15,20,25,30,35,40,45,50,55 * * * * azureuser set -a; . /home/azureuser/axioma-analytics/.env; set +a; cd /home/azureuser/axioma-analytics/webapp && /home/azureuser/axioma-analytics/venv/bin/python export_flat.py >> /var/log/axioma-flat.log 2>&1
+- 5m: `*/5 * * * *`, `export_flat.py --recent 3`
+- 1m: `* * * * *`, `export_flat.py --timeframe 1m --recent 5`
+
+Each job runs as root only to read the root-only `.env`, then drops to the
+`axioma` user (owner of `axioma.db`) with `runuser`, so the database and its WAL
+files stay owned by the web service's user. `flock -n` skips a run while the
+previous one is still going, and `--recent` re-exports a few closed slots, so a
+missed or failed run is healed by the next one (idempotent upsert). Logs go to
+`/var/log/axioma/flat-5m.log` and `/var/log/axioma/flat-1m.log`.
+
+After downtime longer than the `--recent` window, backfill by hand, e.g.
+
+```bash
+cd webapp && set -a && . ../.env && set +a
+runuser -u axioma -- ../venv/bin/python export_flat.py --start 2026-11-20T00:00Z
+runuser -u axioma -- ../venv/bin/python export_flat.py --timeframe 1m --start 2026-11-20T00:00Z --chunk-minutes 30
 ```
-
-Create the log once:
-`sudo touch /var/log/axioma-flat.log && sudo chown azureuser /var/log/axioma-flat.log`.
 
 ## Loading it
 
